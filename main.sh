@@ -19,6 +19,7 @@ EOF
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="${1:-}"
+source "$SCRIPT_DIR/log_utils.sh"
 source "$SCRIPT_DIR/port_utils.sh"
 
 if [ -z "$TARGET" ]; then
@@ -26,7 +27,7 @@ if [ -z "$TARGET" ]; then
 fi
 
 if [ -z "$TARGET" ]; then
-  echo "No target provided. Exiting."
+  log_warn "No target provided. Exiting."
   exit 1
 fi
 
@@ -37,8 +38,8 @@ SERVICES_DIR="$OUTPUT_BASE/services"
 
 mkdir -p "$SCANS_DIR" "$WEB_DIR" "$SERVICES_DIR"
 
-echo "Starting orchestration for target: $TARGET"
-echo "Output base: $OUTPUT_BASE"
+log_info "Starting orchestration for target: $TARGET"
+log_info "Output base: $OUTPUT_BASE"
 
 "$SCRIPT_DIR/ports.sh" "$TARGET" "$OUTPUT_BASE"
 
@@ -67,20 +68,20 @@ if [ -n "$NON_WEB_UDP_PORTS" ]; then
   SERVICE_TARGETS="${SERVICE_TARGETS}$(printf '%s\n' "$NON_WEB_UDP_PORTS" | tr ',' '\n' | awk 'NF {print "udp/" $0}' | paste -sd, -)"
 fi
 
-echo "DEBUG: normalized web_ports='$WEB_PORTS' non_web_tcp_ports='$NON_WEB_PORTS' non_web_udp_ports='$NON_WEB_UDP_PORTS'"
+log_info "DEBUG: normalized web_ports='$WEB_PORTS' non_web_tcp_ports='$NON_WEB_PORTS' non_web_udp_ports='$NON_WEB_UDP_PORTS'"
 
 if [ -n "$WEB_PORTS" ]; then
-  echo "Web ports detected: $WEB_PORTS"
+  log_info "Web ports detected: $WEB_PORTS"
   "$SCRIPT_DIR/web.sh" "$TARGET" "$WEB_PORTS" "$OUTPUT_BASE"
 else
-  echo "No web ports detected; skipping web enumeration."
+  log_info "No web ports detected; skipping web enumeration."
 fi
 
 if [ -n "$SERVICE_TARGETS" ]; then
-  echo "Non-web service targets detected: $SERVICE_TARGETS"
+  log_info "Non-web service targets detected: $SERVICE_TARGETS"
   "$SCRIPT_DIR/services.sh" "$TARGET" "$SERVICE_TARGETS" "$OUTPUT_BASE"
 else
-  echo "No non-web service ports detected; skipping service checks."
+  log_info "No non-web service ports detected; skipping service checks."
 fi
 
 SUMMARY_FILE="$OUTPUT_BASE/summary.txt"
@@ -100,4 +101,4 @@ SUMMARY_FILE="$OUTPUT_BASE/summary.txt"
   echo "  Services: $SERVICES_DIR"
 } > "$SUMMARY_FILE"
 
-echo "Orchestration complete. Summary written to $SUMMARY_FILE"
+log_info "Orchestration complete. Summary written to $SUMMARY_FILE"

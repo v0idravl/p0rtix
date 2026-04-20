@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="${1:-}"
 OUTPUT_BASE="${2:-}"
+source "$SCRIPT_DIR/log_utils.sh"
 source "$SCRIPT_DIR/port_utils.sh"
 
 usage() {
@@ -28,18 +29,18 @@ FULL_TCP_BASE="$SCAN_DIR/full_tcp"
 UDP_BASE="$SCAN_DIR/top_100_udp"
 VERSION_BASE="$SCAN_DIR/service_version"
 
-echo "Running discovery scans for $TARGET"
+log_info "Running discovery scans for $TARGET"
 
-echo "[*] Running fast TCP discovery scan"
+log_info "Running fast TCP discovery scan"
 nmap -n --reason -sS -Pn --top-ports 1000 --open \
   -oA "$FAST_TCP_BASE" "$TARGET"
 
-echo "[*] Running full TCP discovery scan"
+log_info "Running full TCP discovery scan"
 nmap -n --reason -sS -Pn -p- --open \
   --min-rate 2000 --max-retries 2 --stats-every 60s \
   -oA "$FULL_TCP_BASE" "$TARGET"
 
-echo "[*] Running top 100 UDP scan"
+log_info "Running top 100 UDP scan"
 nmap -n -sU -T4 -Pn --top-ports 100 --stats-every 60s \
   -oA "$UDP_BASE" "$TARGET"
 
@@ -79,12 +80,12 @@ echo "$NON_WEB_PORTS" > "$SCAN_DIR/non_web_ports.txt"
 echo "$OPEN_UDP_PORTS" > "$SCAN_DIR/non_web_udp_ports.txt"
 
 if [ -n "$OPEN_TCP_PORTS" ]; then
-  echo "Running version scan against open TCP ports: $OPEN_TCP_PORTS"
-  echo "[*] Running TCP version detection"
+  log_info "Running version scan against open TCP ports: $OPEN_TCP_PORTS"
+  log_info "Running TCP version detection"
   nmap -n -sS -sV --version-light -sC -O -Pn -p "$OPEN_TCP_PORTS" \
     -oA "$VERSION_BASE" "$TARGET"
 else
-  echo "No open TCP ports found; skipping version scan."
+  log_info "No open TCP ports found; skipping version scan."
 fi
 
-echo "Discovery complete. Scan results saved under $SCAN_DIR"
+log_info "Discovery complete. Scan results saved under $SCAN_DIR"

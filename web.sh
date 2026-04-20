@@ -4,6 +4,8 @@ set -euo pipefail
 TARGET="${1:-}"
 PORTS="${2:-}"
 OUTPUT_BASE="${3:-}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/log_utils.sh"
 
 usage() {
   cat <<EOF
@@ -25,7 +27,7 @@ mkdir -p "$WEB_DIR"
 WORDLIST="/usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt"
 AVAILABLE_WORDLIST=true
 if [ ! -f "$WORDLIST" ]; then
-  echo "Warning: wordlist not found: $WORDLIST"
+  log_warn "Wordlist not found: $WORDLIST"
   AVAILABLE_WORDLIST=false
 fi
 
@@ -48,41 +50,41 @@ run_http_checks() {
     url="http://$TARGET:$port"
   fi
 
-  echo "[*] Running web checks for $TARGET:$port"
+  log_info "Running web checks for $TARGET:$port"
   mkdir -p "$(dirname "$output_base")"
 
-  echo "[*] HTTP enum"
+  log_info "HTTP enum"
   nmap --script=http-enum -p "$port" -oN "${output_base}_http_enum.txt" "$TARGET" >/dev/null 2>&1 || true
   
-  echo "[*] HTTP vuln scripts"
+  log_info "HTTP vuln scripts"
   nmap --script="http-vuln* and not dos" -p "$port" -oN "${output_base}_http_vuln.txt" "$TARGET" >/dev/null 2>&1 || true
   
-  echo "[*] Headers"
+  log_info "Headers"
   run_capture "${output_base}_headers.txt" curl -IL --max-time 15 "$url"
   
-  echo "[*] robots.txt"
+  log_info "robots.txt"
   run_capture "${output_base}_robots.txt" curl -s "$url/robots.txt"
   
-  echo "[*] sitemap.xml"
+  log_info "sitemap.xml"
   run_capture "${output_base}_sitemap.xml" curl -s "$url/sitemap.xml"
   
-  echo "[*] crossdomain.xml"
+  log_info "crossdomain.xml"
   run_capture "${output_base}_crossdomain.xml" curl -s "$url/crossdomain.xml"
   
-  echo "[*] clientaccesspolicy.xml"
+  log_info "clientaccesspolicy.xml"
   run_capture "${output_base}_clientaccesspolicy.xml" curl -s "$url/clientaccesspolicy.xml"
   
-  echo "[*] .well-known"
+  log_info ".well-known"
   run_capture "${output_base}_well_known.txt" curl -s "$url/.well-known/"
   
-  echo "[*] WhatWeb"
+  log_info "WhatWeb"
   run_capture "${output_base}_whatweb.txt" whatweb --no-errors "$url"
 
   if [ "$AVAILABLE_WORDLIST" = true ]; then
-    echo "[*] Gobuster dir"
+    log_info "Gobuster dir"
     gobuster dir -u "$url" -w "$WORDLIST" -o "${output_base}_gobuster_dir.txt" >/dev/null 2>&1 || true
     if [ "${GOBUSTER_VHOST:-0}" = "1" ]; then
-      echo "[*] Gobuster vhost"
+      log_info "Gobuster vhost"
       gobuster vhost -u "$url" -w "$WORDLIST" -o "${output_base}_gobuster_vhost.txt" >/dev/null 2>&1 || true
     fi
   fi
@@ -92,5 +94,5 @@ for port in $(printf '%s\n' "$PORTS" | tr ',' ' '); do
   run_http_checks "$port"
 done
 
-echo "Web enumeration complete for $TARGET"
-echo "Saved outputs under $WEB_DIR"
+log_info "Web enumeration complete for $TARGET"
+log_info "Saved outputs under $WEB_DIR"
