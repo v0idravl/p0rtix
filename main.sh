@@ -43,16 +43,31 @@ echo "Output base: $OUTPUT_BASE"
 "$SCRIPT_DIR/ports.sh" "$TARGET" "$OUTPUT_BASE"
 
 OPEN_TCP_PORTS_FILE="$SCANS_DIR/open_tcp_ports.txt"
+OPEN_UDP_PORTS_FILE="$SCANS_DIR/open_udp_ports.txt"
 WEB_PORTS_FILE="$SCANS_DIR/web_ports.txt"
 NON_WEB_PORTS_FILE="$SCANS_DIR/non_web_ports.txt"
+NON_WEB_UDP_PORTS_FILE="$SCANS_DIR/non_web_udp_ports.txt"
 
 WEB_PORTS=""
 NON_WEB_PORTS=""
+NON_WEB_UDP_PORTS=""
+SERVICE_TARGETS=""
 
 WEB_PORTS="$(sanitize_port_file "$WEB_PORTS_FILE" "web_ports.txt")"
 NON_WEB_PORTS="$(sanitize_port_file "$NON_WEB_PORTS_FILE" "non_web_ports.txt")"
+NON_WEB_UDP_PORTS="$(sanitize_port_file "$NON_WEB_UDP_PORTS_FILE" "non_web_udp_ports.txt")"
 
-echo "DEBUG: normalized web_ports='$WEB_PORTS' non_web_ports='$NON_WEB_PORTS'"
+if [ -n "$NON_WEB_PORTS" ]; then
+  SERVICE_TARGETS="$(printf '%s\n' "$NON_WEB_PORTS" | tr ',' '\n' | awk 'NF {print "tcp/" $0}' | paste -sd, -)"
+fi
+if [ -n "$NON_WEB_UDP_PORTS" ]; then
+  if [ -n "$SERVICE_TARGETS" ]; then
+    SERVICE_TARGETS="$SERVICE_TARGETS,"
+  fi
+  SERVICE_TARGETS="${SERVICE_TARGETS}$(printf '%s\n' "$NON_WEB_UDP_PORTS" | tr ',' '\n' | awk 'NF {print "udp/" $0}' | paste -sd, -)"
+fi
+
+echo "DEBUG: normalized web_ports='$WEB_PORTS' non_web_tcp_ports='$NON_WEB_PORTS' non_web_udp_ports='$NON_WEB_UDP_PORTS'"
 
 if [ -n "$WEB_PORTS" ]; then
   echo "Web ports detected: $WEB_PORTS"
@@ -61,9 +76,9 @@ else
   echo "No web ports detected; skipping web enumeration."
 fi
 
-if [ -n "$NON_WEB_PORTS" ]; then
-  echo "Non-web ports detected: $NON_WEB_PORTS"
-  "$SCRIPT_DIR/services.sh" "$TARGET" "$NON_WEB_PORTS" "$OUTPUT_BASE"
+if [ -n "$SERVICE_TARGETS" ]; then
+  echo "Non-web service targets detected: $SERVICE_TARGETS"
+  "$SCRIPT_DIR/services.sh" "$TARGET" "$SERVICE_TARGETS" "$OUTPUT_BASE"
 else
   echo "No non-web service ports detected; skipping service checks."
 fi
@@ -74,8 +89,10 @@ SUMMARY_FILE="$OUTPUT_BASE/summary.txt"
   echo "Output: $OUTPUT_BASE"
   echo ""
   echo "Open TCP ports: $(wc -l < "$OPEN_TCP_PORTS_FILE" 2>/dev/null || echo 0)"
+  echo "Open UDP ports: $(wc -l < "$OPEN_UDP_PORTS_FILE" 2>/dev/null || echo 0)"
   echo "Web ports: $WEB_PORTS"
-  echo "Non-web ports: $NON_WEB_PORTS"
+  echo "Non-web TCP ports: $NON_WEB_PORTS"
+  echo "Non-web UDP ports: $NON_WEB_UDP_PORTS"
   echo ""
   echo "Scan folders:"
   echo "  Scans: $SCANS_DIR"

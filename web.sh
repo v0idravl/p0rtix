@@ -29,6 +29,12 @@ if [ ! -f "$WORDLIST" ]; then
   AVAILABLE_WORDLIST=false
 fi
 
+run_capture() {
+  local output_file="$1"
+  shift
+  "$@" > "$output_file" 2>&1 || true
+}
+
 run_http_checks() {
   local port="$1"
   local url
@@ -45,61 +51,39 @@ run_http_checks() {
   echo "[*] Running web checks for $TARGET:$port"
   mkdir -p "$(dirname "$output_base")"
 
-  CMD_ENUM="nmap --script=http-enum -p \"$port\" -oN \"${output_base}_http_enum.txt\" \"$TARGET\""
-  echo "[*] $CMD_ENUM"
-  printf "\n# Command: $CMD_ENUM\n\n" > "${output_base}_http_enum.txt"
-  nmap --script=http-enum -p "$port" -oN "${output_base}_http_enum.txt" "$TARGET" 2>/dev/null >> "${output_base}_http_enum.txt" || true
+  echo "[*] HTTP enum"
+  nmap --script=http-enum -p "$port" -oN "${output_base}_http_enum.txt" "$TARGET" >/dev/null 2>&1 || true
   
-  CMD_VULN="nmap --script=\"http-vuln* and not dos\" -p \"$port\" -oN \"${output_base}_http_vuln.txt\" \"$TARGET\""
-  echo "[*] $CMD_VULN"
-  printf "\n# Command: $CMD_VULN\n\n" > "${output_base}_http_vuln.txt"
-  nmap --script="http-vuln* and not dos" -p "$port" -oN "${output_base}_http_vuln.txt" "$TARGET" 2>/dev/null >> "${output_base}_http_vuln.txt" || true
+  echo "[*] HTTP vuln scripts"
+  nmap --script="http-vuln* and not dos" -p "$port" -oN "${output_base}_http_vuln.txt" "$TARGET" >/dev/null 2>&1 || true
   
-  CMD_HEADERS="curl -IL --max-time 15 \"$url\""
-  echo "[*] $CMD_HEADERS"
-  printf "\n# Command: $CMD_HEADERS\n\n" > "${output_base}_headers.txt"
-  curl -IL --max-time 15 "$url" >> "${output_base}_headers.txt" 2>&1 || true
+  echo "[*] Headers"
+  run_capture "${output_base}_headers.txt" curl -IL --max-time 15 "$url"
   
-  CMD_ROBOTS="curl -s \"$url/robots.txt\""
-  echo "[*] $CMD_ROBOTS"
-  printf "\n# Command: $CMD_ROBOTS\n\n" > "${output_base}_robots.txt"
-  curl -s "$url/robots.txt" >> "${output_base}_robots.txt" || true
+  echo "[*] robots.txt"
+  run_capture "${output_base}_robots.txt" curl -s "$url/robots.txt"
   
-  CMD_SITEMAP="curl -s \"$url/sitemap.xml\""
-  echo "[*] $CMD_SITEMAP"
-  printf "\n# Command: $CMD_SITEMAP\n\n" > "${output_base}_sitemap.xml"
-  curl -s "$url/sitemap.xml" >> "${output_base}_sitemap.xml" || true
+  echo "[*] sitemap.xml"
+  run_capture "${output_base}_sitemap.xml" curl -s "$url/sitemap.xml"
   
-  CMD_CROSSDOMAIN="curl -s \"$url/crossdomain.xml\""
-  echo "[*] $CMD_CROSSDOMAIN"
-  printf "\n# Command: $CMD_CROSSDOMAIN\n\n" > "${output_base}_crossdomain.xml"
-  curl -s "$url/crossdomain.xml" >> "${output_base}_crossdomain.xml" || true
+  echo "[*] crossdomain.xml"
+  run_capture "${output_base}_crossdomain.xml" curl -s "$url/crossdomain.xml"
   
-  CMD_CLIENTACCESS="curl -s \"$url/clientaccesspolicy.xml\""
-  echo "[*] $CMD_CLIENTACCESS"
-  printf "\n# Command: $CMD_CLIENTACCESS\n\n" > "${output_base}_clientaccesspolicy.xml"
-  curl -s "$url/clientaccesspolicy.xml" >> "${output_base}_clientaccesspolicy.xml" || true
+  echo "[*] clientaccesspolicy.xml"
+  run_capture "${output_base}_clientaccesspolicy.xml" curl -s "$url/clientaccesspolicy.xml"
   
-  CMD_WELLKNOWN="curl -s \"$url/.well-known/\""
-  echo "[*] $CMD_WELLKNOWN"
-  printf "\n# Command: $CMD_WELLKNOWN\n\n" > "${output_base}_well_known.txt"
-  curl -s "$url/.well-known/" >> "${output_base}_well_known.txt" || true
+  echo "[*] .well-known"
+  run_capture "${output_base}_well_known.txt" curl -s "$url/.well-known/"
   
-  CMD_WHATWEB="whatweb --no-errors \"$url\""
-  echo "[*] $CMD_WHATWEB"
-  printf "\n# Command: $CMD_WHATWEB\n\n" > "${output_base}_whatweb.txt"
-  whatweb --no-errors "$url" >> "${output_base}_whatweb.txt" 2>&1 || true
+  echo "[*] WhatWeb"
+  run_capture "${output_base}_whatweb.txt" whatweb --no-errors "$url"
 
   if [ "$AVAILABLE_WORDLIST" = true ]; then
-    CMD_GOBUSTER_DIR="gobuster dir -u \"$url\" -w \"$WORDLIST\" -o \"${output_base}_gobuster_dir.txt\""
-    echo "[*] $CMD_GOBUSTER_DIR"
-    printf "\n# Command: $CMD_GOBUSTER_DIR\n\n" > "${output_base}_gobuster_dir.txt"
-    gobuster dir -u "$url" -w "$WORDLIST" -o "${output_base}_gobuster_dir.txt" 2>/dev/null >> "${output_base}_gobuster_dir.txt" || true
+    echo "[*] Gobuster dir"
+    gobuster dir -u "$url" -w "$WORDLIST" -o "${output_base}_gobuster_dir.txt" >/dev/null 2>&1 || true
     if [ "${GOBUSTER_VHOST:-0}" = "1" ]; then
-      CMD_GOBUSTER_VHOST="gobuster vhost -u \"$url\" -w \"$WORDLIST\" -o \"${output_base}_gobuster_vhost.txt\""
-      echo "[*] $CMD_GOBUSTER_VHOST"
-      printf "\n# Command: $CMD_GOBUSTER_VHOST\n\n" > "${output_base}_gobuster_vhost.txt"
-      gobuster vhost -u "$url" -w "$WORDLIST" -o "${output_base}_gobuster_vhost.txt" 2>/dev/null >> "${output_base}_gobuster_vhost.txt" || true
+      echo "[*] Gobuster vhost"
+      gobuster vhost -u "$url" -w "$WORDLIST" -o "${output_base}_gobuster_vhost.txt" >/dev/null 2>&1 || true
     fi
   fi
 }
