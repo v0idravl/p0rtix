@@ -45,20 +45,39 @@ run_http_checks() {
   echo "[*] Running web checks for $TARGET:$port"
   mkdir -p "$(dirname "$output_base")"
 
-  nmap --script=http-enum -p "$port" -oN "${output_base}_http_enum.txt" "$TARGET" 2>/dev/null || true
-  nmap --script="http-vuln* and not dos" -p "$port" -oN "${output_base}_http_vuln.txt" "$TARGET" 2>/dev/null || true
-  curl -IL --max-time 15 "$url" > "${output_base}_headers.txt" 2>&1 || true
-  curl -s "$url/robots.txt" > "${output_base}_robots.txt" || true
-  curl -s "$url/sitemap.xml" > "${output_base}_sitemap.xml" || true
-  curl -s "$url/crossdomain.xml" > "${output_base}_crossdomain.xml" || true
-  curl -s "$url/clientaccesspolicy.xml" > "${output_base}_clientaccesspolicy.xml" || true
-  curl -s "$url/.well-known/" > "${output_base}_well_known.txt" || true
-  whatweb --no-errors "$url" > "${output_base}_whatweb.txt" 2>&1 || true
+  echo "# Command: nmap --script=http-enum -p \"$port\" -oN \"${output_base}_http_enum.txt\" \"$TARGET\"" > "${output_base}_http_enum.txt"
+  nmap --script=http-enum -p "$port" -oN "${output_base}_http_enum.txt" "$TARGET" 2>/dev/null >> "${output_base}_http_enum.txt" || true
+  
+  echo "# Command: nmap --script=\"http-vuln* and not dos\" -p \"$port\" -oN \"${output_base}_http_vuln.txt\" \"$TARGET\"" > "${output_base}_http_vuln.txt"
+  nmap --script="http-vuln* and not dos" -p "$port" -oN "${output_base}_http_vuln.txt" "$TARGET" 2>/dev/null >> "${output_base}_http_vuln.txt" || true
+  
+  echo "# Command: curl -IL --max-time 15 \"$url\"" > "${output_base}_headers.txt"
+  curl -IL --max-time 15 "$url" >> "${output_base}_headers.txt" 2>&1 || true
+  
+  echo "# Command: curl -s \"$url/robots.txt\"" > "${output_base}_robots.txt"
+  curl -s "$url/robots.txt" >> "${output_base}_robots.txt" || true
+  
+  echo "# Command: curl -s \"$url/sitemap.xml\"" > "${output_base}_sitemap.xml"
+  curl -s "$url/sitemap.xml" >> "${output_base}_sitemap.xml" || true
+  
+  echo "# Command: curl -s \"$url/crossdomain.xml\"" > "${output_base}_crossdomain.xml"
+  curl -s "$url/crossdomain.xml" >> "${output_base}_crossdomain.xml" || true
+  
+  echo "# Command: curl -s \"$url/clientaccesspolicy.xml\"" > "${output_base}_clientaccesspolicy.xml"
+  curl -s "$url/clientaccesspolicy.xml" >> "${output_base}_clientaccesspolicy.xml" || true
+  
+  echo "# Command: curl -s \"$url/.well-known/\"" > "${output_base}_well_known.txt"
+  curl -s "$url/.well-known/" >> "${output_base}_well_known.txt" || true
+  
+  echo "# Command: whatweb --no-errors \"$url\"" > "${output_base}_whatweb.txt"
+  whatweb --no-errors "$url" >> "${output_base}_whatweb.txt" 2>&1 || true
 
   if [ "$AVAILABLE_WORDLIST" = true ]; then
-    gobuster dir -u "$url" -w "$WORDLIST" -o "${output_base}_gobuster_dir.txt" 2>/dev/null || true
+    echo "# Command: gobuster dir -u \"$url\" -w \"$WORDLIST\" -o \"${output_base}_gobuster_dir.txt\"" > "${output_base}_gobuster_dir.txt"
+    gobuster dir -u "$url" -w "$WORDLIST" -o "${output_base}_gobuster_dir.txt" 2>/dev/null >> "${output_base}_gobuster_dir.txt" || true
     if [ "${GOBUSTER_VHOST:-0}" = "1" ]; then
-      gobuster vhost -u "$url" -w "$WORDLIST" -o "${output_base}_gobuster_vhost.txt" 2>/dev/null || true
+      echo "# Command: gobuster vhost -u \"$url\" -w \"$WORDLIST\" -o \"${output_base}_gobuster_vhost.txt\"" > "${output_base}_gobuster_vhost.txt"
+      gobuster vhost -u "$url" -w "$WORDLIST" -o "${output_base}_gobuster_vhost.txt" 2>/dev/null >> "${output_base}_gobuster_vhost.txt" || true
     fi
   fi
 }
