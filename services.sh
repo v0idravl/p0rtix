@@ -23,10 +23,15 @@ SERVICE_DIR="$OUTPUT_BASE/services"
 mkdir -p "$SERVICE_DIR"
 OUTPUT_BASE_FILE="$SERVICE_DIR/${TARGET}_services"
 
+PORTS="$(printf '%s' "$PORTS" | tr -d ' \t\r\n')"
 printf "Running non-web service checks for %s on ports: %s\n" "$TARGET" "$PORTS"
 
 IFS=',' read -r -a ports <<< "$PORTS"
 for port in "${ports[@]}"; do
+  port="$(printf '%s' "$port" | tr -d '[:space:]')"
+  if [ -z "$port" ]; then
+    continue
+  fi
   case "$port" in
     21)
       echo "[*] FTP service detected on $TARGET:$port"
@@ -132,8 +137,10 @@ for port in "${ports[@]}"; do
       ;;
     *)
       echo "[*] No dedicated service checks defined for $TARGET:$port"
-      ;;
-  esac
+      CMD_GENERIC="nmap -sS -sV -Pn -p \"$port\" -oN \"${OUTPUT_BASE_FILE}_${port}_generic.txt\" \"$TARGET\""
+      echo "[*] $CMD_GENERIC"
+      printf "\n# Command: $CMD_GENERIC\n\n" > "${OUTPUT_BASE_FILE}_${port}_generic.txt"
+      nmap -sS -sV -Pn -p "$port" -oN "${OUTPUT_BASE_FILE}_${port}_generic.txt" "$TARGET" 2>/dev/null >> "${OUTPUT_BASE_FILE}_${port}_generic.txt" || true
 done
 
 echo "Non-web service outputs written to: $SERVICE_DIR"

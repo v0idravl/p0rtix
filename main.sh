@@ -49,10 +49,12 @@ WEB_PORTS=""
 NON_WEB_PORTS=""
 
 if [ -f "$WEB_PORTS_FILE" ]; then
-  WEB_PORTS="$(< "$WEB_PORTS_FILE")"
+  WEB_PORTS="$(tr -d ' \t\r\n' < "$WEB_PORTS_FILE" 2>/dev/null || true)"
+  WEB_PORTS="${WEB_PORTS%,}"
 fi
 if [ -f "$NON_WEB_PORTS_FILE" ]; then
-  NON_WEB_PORTS="$(< "$NON_WEB_PORTS_FILE")"
+  NON_WEB_PORTS="$(tr -d ' \t\r\n' < "$NON_WEB_PORTS_FILE" 2>/dev/null || true)"
+  NON_WEB_PORTS="${NON_WEB_PORTS%,}"
 fi
 
 if [ -n "$WEB_PORTS" ]; then
