@@ -20,7 +20,6 @@ EOF
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="${1:-}"
 source "$SCRIPT_DIR/log_utils.sh"
-source "$SCRIPT_DIR/port_utils.sh"
 
 if [ -z "$TARGET" ]; then
   read -rp "Target IP/hostname: " TARGET
@@ -38,13 +37,32 @@ SERVICES_DIR="$OUTPUT_BASE/services"
 
 mkdir -p "$SCANS_DIR" "$WEB_DIR" "$SERVICES_DIR"
 
+csv_from_port_file() {
+  local file_path="$1"
+
+  if [ ! -f "$file_path" ]; then
+    printf '%s' ""
+    return 0
+  fi
+
+  awk '
+    /^[[:space:]]*$/ {
+      next
+    }
+    /^[[:space:]]*[0-9]+[[:space:]]*$/ {
+      port = $1 + 0
+      if (port >= 1 && port <= 65535) {
+        print port
+      }
+    }
+  ' "$file_path" | paste -sd, -
+}
+
 log_info "Starting orchestration for target: $TARGET"
 log_info "Output base: $OUTPUT_BASE"
 
 "$SCRIPT_DIR/ports.sh" "$TARGET" "$OUTPUT_BASE"
 
-OPEN_TCP_PORTS_FILE="$SCANS_DIR/open_tcp_ports.txt"
-OPEN_UDP_PORTS_FILE="$SCANS_DIR/open_udp_ports.txt"
 WEB_PORTS_FILE="$SCANS_DIR/web_ports.txt"
 NON_WEB_PORTS_FILE="$SCANS_DIR/non_web_ports.txt"
 NON_WEB_UDP_PORTS_FILE="$SCANS_DIR/non_web_udp_ports.txt"
@@ -54,9 +72,9 @@ NON_WEB_PORTS=""
 NON_WEB_UDP_PORTS=""
 SERVICE_TARGETS=""
 
-WEB_PORTS="$(sanitize_port_file "$WEB_PORTS_FILE" "web_ports.txt")"
-NON_WEB_PORTS="$(sanitize_port_file "$NON_WEB_PORTS_FILE" "non_web_ports.txt")"
-NON_WEB_UDP_PORTS="$(sanitize_port_file "$NON_WEB_UDP_PORTS_FILE" "non_web_udp_ports.txt")"
+WEB_PORTS="$(csv_from_port_file "$WEB_PORTS_FILE")"
+NON_WEB_PORTS="$(csv_from_port_file "$NON_WEB_PORTS_FILE")"
+NON_WEB_UDP_PORTS="$(csv_from_port_file "$NON_WEB_UDP_PORTS_FILE")"
 
 tcp_target_count=0
 udp_target_count=0

@@ -5,7 +5,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="${1:-}"
 OUTPUT_BASE="${2:-}"
 source "$SCRIPT_DIR/log_utils.sh"
-source "$SCRIPT_DIR/port_utils.sh"
 
 usage() {
   cat <<USAGE
@@ -30,6 +29,52 @@ UDP_BASE="$SCAN_DIR/top_100_udp"
 VERSION_BASE="$SCAN_DIR/service_version"
 NMAP_STATS_EVERY="${NMAP_STATS_EVERY:-3m}"
 
+extract_ports_from_gnmap() {
+  local gnmap_file="$1"
+  local proto="$2"
+  local include_open_filtered="${3:-0}"
+
+  awk -v proto="$proto" -v include_open_filtered="$include_open_filtered" '
+    /Ports: / {
+      sub(/^.*Ports: /, "")
+      split($0, entries, /, /)
+      for (i in entries) {
+        split(entries[i], fields, "/")
+        port = fields[1]
+        state = fields[2]
+        entry_proto = fields[3]
+
+        if (entry_proto != proto) {
+          continue
+        }
+        if (state == "open" || (include_open_filtered && state == "open|filtered")) {
+          print port
+        }
+      }
+    }
+  ' "$gnmap_file" | sort -nu
+}
+
+write_port_files() {
+  local ports_csv="$1"
+  local txt_file="$2"
+  local csv_file="${3:-}"
+
+  if [ -n "$ports_csv" ]; then
+    printf '%s\n' "$ports_csv" | tr ',' '\n' > "$txt_file"
+  else
+    : > "$txt_file"
+  fi
+
+  if [ -n "$csv_file" ]; then
+    if [ -n "$ports_csv" ]; then
+      printf '%s\n' "$ports_csv" > "$csv_file"
+    else
+      : > "$csv_file"
+    fi
+  fi
+}
+
 log_info "Running discovery scans for $TARGET"
 
 log_info "Running fast TCP discovery scan"
@@ -46,40 +91,23 @@ log_info "Running top 100 UDP scan"
 nmap -n -sU -T4 -Pn --top-ports 100 --stats-every "$NMAP_STATS_EVERY" \
   -oA "$UDP_BASE" "$TARGET"
 
-OPEN_TCP_PORTS=$(awk -F'[:/, ]+' '/Ports:/{for(i=1;i<=NF;i++) if($(i+1)=="open") print $i}' "$FULL_TCP_BASE.gnmap" | sort -nu | paste -sd,)
-OPEN_TCP_PORTS="$(normalize_port_list "$OPEN_TCP_PORTS")"
-OPEN_UDP_PORTS=$(awk -F'[:/, ]+' '/Ports:/{for(i=1;i<=NF;i++) if($(i+1)=="open" || $(i+1)=="open|filtered") print $i}' "$UDP_BASE.gnmap" | sort -nu | paste -sd,)
-OPEN_UDP_PORTS="$(normalize_port_list "$OPEN_UDP_PORTS")"
+OPEN_TCP_PORTS="$(extract_ports_from_gnmap "$FULL_TCP_BASE.gnmap" tcp | paste -sd, -)"
+OPEN_UDP_PORTS="$(extract_ports_from_gnmap "$UDP_BASE.gnmap" udp 1 | paste -sd, -)"
+
+write_port_files "$OPEN_TCP_PORTS" "$SCAN_DIR/open_tcp_ports.txt" "$SCAN_DIR/open_tcp_ports.csv"
+write_port_files "$OPEN_UDP_PORTS" "$SCAN_DIR/open_udp_ports.txt" "$SCAN_DIR/open_udp_ports.csv"
 
 if [ -n "$OPEN_TCP_PORTS" ]; then
-  printf '%s\n' "$OPEN_TCP_PORTS" | tr ',' '\n' > "$SCAN_DIR/open_tcp_ports.txt"
-  echo "$OPEN_TCP_PORTS" > "$SCAN_DIR/open_tcp_ports.csv"
-else
-  : > "$SCAN_DIR/open_tcp_ports.txt"
-  : > "$SCAN_DIR/open_tcp_ports.csv"
-fi
-
-if [ -n "$OPEN_UDP_PORTS" ]; then
-  printf '%s\n' "$OPEN_UDP_PORTS" | tr ',' '\n' > "$SCAN_DIR/open_udp_ports.txt"
-  echo "$OPEN_UDP_PORTS" > "$SCAN_DIR/open_udp_ports.csv"
-else
-  : > "$SCAN_DIR/open_udp_ports.txt"
-  : > "$SCAN_DIR/open_udp_ports.csv"
-fi
-
-if [ -n "$OPEN_TCP_PORTS" ]; then
-  WEB_PORTS=$(printf '%s\n' "$OPEN_TCP_PORTS" | tr ',' '\n' | awk '/^(80|443)$/')
-  NON_WEB_PORTS=$(printf '%s\n' "$OPEN_TCP_PORTS" | tr ',' '\n' | awk '!/^(80|443)$/')
-  WEB_PORTS="$(printf '%s\n' "$WEB_PORTS" | paste -sd, -)"
-  NON_WEB_PORTS="$(printf '%s\n' "$NON_WEB_PORTS" | paste -sd, -)"
+  WEB_PORTS="$(printf '%s\n' "$OPEN_TCP_PORTS" | tr ',' '\n' | awk '/^(80|443)$/' | paste -sd, -)"
+  NON_WEB_PORTS="$(printf '%s\n' "$OPEN_TCP_PORTS" | tr ',' '\n' | awk '!/^(80|443)$/' | paste -sd, -)"
 else
   WEB_PORTS=""
   NON_WEB_PORTS=""
 fi
 
-echo "$WEB_PORTS" > "$SCAN_DIR/web_ports.txt"
-echo "$NON_WEB_PORTS" > "$SCAN_DIR/non_web_ports.txt"
-echo "$OPEN_UDP_PORTS" > "$SCAN_DIR/non_web_udp_ports.txt"
+write_port_files "$WEB_PORTS" "$SCAN_DIR/web_ports.txt"
+write_port_files "$NON_WEB_PORTS" "$SCAN_DIR/non_web_ports.txt"
+write_port_files "$OPEN_UDP_PORTS" "$SCAN_DIR/non_web_udp_ports.txt"
 
 if [ -n "$OPEN_TCP_PORTS" ]; then
   log_info "Running version scan against open TCP ports: $OPEN_TCP_PORTS"
