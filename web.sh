@@ -25,10 +25,21 @@ WEB_DIR="$OUTPUT_BASE/web"
 mkdir -p "$WEB_DIR"
 NMAP_STATS_EVERY="${NMAP_STATS_EVERY:-3m}"
 
-WORDLIST="/usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt"
+WORDLIST=""
+for candidate in \
+  "/usr/share/seclists/Discovery/Web-Content/raft-medium-words.txt" \
+  "/usr/share/seclists/Discovery/Web-Content/common.txt" \
+  "/usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt"
+do
+  if [ -f "$candidate" ]; then
+    WORDLIST="$candidate"
+    break
+  fi
+done
+
 AVAILABLE_WORDLIST=true
-if [ ! -f "$WORDLIST" ]; then
-  log_warn "Wordlist not found: $WORDLIST"
+if [ -z "$WORDLIST" ]; then
+  log_warn "No suitable web content wordlist found under /usr/share/seclists/Discovery/Web-Content/"
   AVAILABLE_WORDLIST=false
 fi
 
@@ -78,14 +89,11 @@ run_http_checks() {
   log_info "Running web checks for $TARGET:$port"
   mkdir -p "$(dirname "$output_base")"
 
-  log_info "HTTP enum"
-  run_nmap_file "${output_base}_http_enum.txt" nmap --script=http-enum -p "$port"
-  
-  log_info "HTTP vuln scripts"
-  run_nmap_file "${output_base}_http_vuln.txt" nmap --script="http-vuln* and not dos" -p "$port"
-  
   log_info "Headers"
   run_capture "${output_base}_headers.txt" curl -IL --max-time 15 "$url"
+
+  log_info "WhatWeb"
+  run_capture "${output_base}_whatweb.txt" whatweb --no-errors "$url"
   
   log_info "robots.txt"
   run_capture "${output_base}_robots.txt" curl -s "$url/robots.txt"
@@ -101,18 +109,17 @@ run_http_checks() {
   
   log_info ".well-known"
   run_capture "${output_base}_well_known.txt" curl -s "$url/.well-known/"
-  
-  log_info "WhatWeb"
-  run_capture "${output_base}_whatweb.txt" whatweb --no-errors "$url"
 
   if [ "$AVAILABLE_WORDLIST" = true ]; then
     log_info "Gobuster dir"
     run_capture "${output_base}_gobuster_dir.txt" gobuster dir -u "$url" -w "$WORDLIST"
-    if [ "${GOBUSTER_VHOST:-0}" = "1" ]; then
-      log_info "Gobuster vhost"
-      run_capture "${output_base}_gobuster_vhost.txt" gobuster vhost -u "$url" -w "$WORDLIST"
-    fi
   fi
+
+  log_info "HTTP vuln scripts"
+  run_nmap_file "${output_base}_http_vuln.txt" nmap --script="http-vuln* and not dos" -p "$port"
+
+  log_info "HTTP enum"
+  run_nmap_file "${output_base}_http_enum.txt" nmap --script=http-enum -p "$port"
 }
 
 for port in $(printf '%s\n' "$PORTS" | tr ',' ' '); do
