@@ -87,27 +87,9 @@ else
 fi
 
 if [ -n "$SERVICE_TARGETS" ]; then
-  log_info "Non-web service targets detected: ${tcp_target_count} TCP, ${udp_target_count} UDP"
   "$SCRIPT_DIR/services.sh" "$TARGET" "$SERVICE_TARGETS" "$OUTPUT_BASE"
 else
   log_info "No non-web service ports detected; skipping service checks."
 fi
 
-SUMMARY_FILE="$OUTPUT_BASE/summary.txt"
-{
-  echo "Target: $TARGET"
-  echo "Output: $OUTPUT_BASE"
-  echo ""
-  echo "Open TCP ports: $(wc -l < "$OPEN_TCP_PORTS_FILE" 2>/dev/null || echo 0)"
-  echo "Open UDP ports: $(wc -l < "$OPEN_UDP_PORTS_FILE" 2>/dev/null || echo 0)"
-  echo "Web ports: $WEB_PORTS"
-  echo "Non-web TCP ports: $NON_WEB_PORTS"
-  echo "Non-web UDP ports: $NON_WEB_UDP_PORTS"
-  echo ""
-  echo "Scan folders:"
-  echo "  Scans: $SCANS_DIR"
-  echo "  Web: $WEB_DIR"
-  echo "  Services: $SERVICES_DIR"
-} > "$SUMMARY_FILE"
-
-log_info "Orchestration complete. Summary written to $SUMMARY_FILE"
+log_info "Orchestration complete. Outputs saved under $OUTPUT_BASE"
