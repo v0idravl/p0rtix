@@ -79,17 +79,17 @@ fi
 
 log_info "DEBUG: normalized web_ports='$WEB_PORTS' non_web_tcp_ports='$NON_WEB_PORTS' non_web_udp_ports='$NON_WEB_UDP_PORTS'"
 
+if [ -n "$SERVICE_TARGETS" ]; then
+  "$SCRIPT_DIR/services.sh" "$TARGET" "$SERVICE_TARGETS" "$OUTPUT_BASE"
+else
+  log_info "No non-web service ports detected; skipping service checks."
+fi
+
 if [ -n "$WEB_PORTS" ]; then
   log_info "Web ports detected: $WEB_PORTS"
   "$SCRIPT_DIR/web.sh" "$TARGET" "$WEB_PORTS" "$OUTPUT_BASE"
 else
   log_info "No web ports detected; skipping web enumeration."
-fi
-
-if [ -n "$SERVICE_TARGETS" ]; then
-  "$SCRIPT_DIR/services.sh" "$TARGET" "$SERVICE_TARGETS" "$OUTPUT_BASE"
-else
-  log_info "No non-web service ports detected; skipping service checks."
 fi
 
 log_info "Orchestration complete. Outputs saved under $OUTPUT_BASE"
