@@ -60,8 +60,15 @@ else
   : > "$SCAN_DIR/open_tcp_ports.csv"
 fi
 
-WEB_PORTS=$(printf '%s\n' "$OPEN_TCP_PORTS" | tr ',' '\n' | grep -E '^(80|443)$' | paste -sd,)
-NON_WEB_PORTS=$(printf '%s\n' "$OPEN_TCP_PORTS" | tr ',' '\n' | grep -Ev '^(80|443)$' | paste -sd,)
+if [ -n "$OPEN_TCP_PORTS" ]; then
+  WEB_PORTS=$(printf '%s\n' "$OPEN_TCP_PORTS" | tr ',' '\n' | awk '/^(80|443)$/')
+  NON_WEB_PORTS=$(printf '%s\n' "$OPEN_TCP_PORTS" | tr ',' '\n' | awk '!/^(80|443)$/')
+  WEB_PORTS="$(printf '%s\n' "$WEB_PORTS" | paste -sd, -)"
+  NON_WEB_PORTS="$(printf '%s\n' "$NON_WEB_PORTS" | paste -sd, -)"
+else
+  WEB_PORTS=""
+  NON_WEB_PORTS=""
+fi
 
 echo "$WEB_PORTS" > "$SCAN_DIR/web_ports.txt"
 echo "$NON_WEB_PORTS" > "$SCAN_DIR/non_web_ports.txt"
