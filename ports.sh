@@ -35,16 +35,16 @@ nmap -n --reason -sS -Pn --top-ports 1000 --open \
   -oA "$FAST_TCP_BASE" "$TARGET"
 printf "\n# Command: $CMD_FAST\n\n" | cat - "$FAST_TCP_BASE.nmap" > "$FAST_TCP_BASE.tmp" && mv "$FAST_TCP_BASE.tmp" "$FAST_TCP_BASE.nmap"
 
-CMD_FULL="nmap -n --reason -sS -Pn -p- --open --min-rate 2000 --max-retries 2 --stats-every 15s -oA \"$FULL_TCP_BASE\" \"$TARGET\""
+CMD_FULL="nmap -n --reason -sS -Pn -p- --open --min-rate 2000 --max-retries 2 --stats-every 60s -oA \"$FULL_TCP_BASE\" \"$TARGET\""
 echo "[*] $CMD_FULL"
 nmap -n --reason -sS -Pn -p- --open \
-  --min-rate 2000 --max-retries 2 --stats-every 15s \
+  --min-rate 2000 --max-retries 2 --stats-every 60s \
   -oA "$FULL_TCP_BASE" "$TARGET"
 printf "\n# Command: $CMD_FULL\n\n" | cat - "$FULL_TCP_BASE.nmap" > "$FULL_TCP_BASE.tmp" && mv "$FULL_TCP_BASE.tmp" "$FULL_TCP_BASE.nmap"
 
-CMD_UDP="nmap -n -sU -T4 -Pn --top-ports 100 --stats-every 15s -oA \"$UDP_BASE\" \"$TARGET\""
+CMD_UDP="nmap -n -sU -T4 -Pn --top-ports 100 --stats-every 60s -oA \"$UDP_BASE\" \"$TARGET\""
 echo "[*] $CMD_UDP"
-nmap -n -sU -T4 -Pn --top-ports 100 --stats-every 15s \
+nmap -n -sU -T4 -Pn --top-ports 100 --stats-every 60s \
   -oA "$UDP_BASE" "$TARGET"
 printf "\n# Command: $CMD_UDP\n\n" | cat - "$UDP_BASE.nmap" > "$UDP_BASE.tmp" && mv "$UDP_BASE.tmp" "$UDP_BASE.nmap"
 
