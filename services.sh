@@ -132,7 +132,14 @@ for target_port in "${ports[@]}"; do
       log_info "RPC/NFS service detected on $TARGET:$proto/$port"
       run_scan_file "${OUTPUT_BASE_FILE}_${proto}_rpcinfo_${port}.txt" nmap "$scan_flag" -p "$port" --script=rpcinfo
       ;;
-    139|445)
+    139)
+      if [ "$proto" != "tcp" ]; then
+        record_unsupported_port "$proto" "$port"
+        continue
+      fi
+      log_info "NetBIOS session service detected on $TARGET:$port; skipping SMB NSE checks and using 445/tcp for SMB validation"
+      ;;
+    445)
       if [ "$proto" != "tcp" ]; then
         record_unsupported_port "$proto" "$port"
         continue
