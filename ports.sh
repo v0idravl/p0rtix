@@ -28,20 +28,22 @@ FAST_TCP_BASE="$SCAN_DIR/fast_tcp"
 FULL_TCP_BASE="$SCAN_DIR/full_tcp"
 UDP_BASE="$SCAN_DIR/top_100_udp"
 VERSION_BASE="$SCAN_DIR/service_version"
+NMAP_STATS_EVERY="${NMAP_STATS_EVERY:-3m}"
 
 log_info "Running discovery scans for $TARGET"
 
 log_info "Running fast TCP discovery scan"
 nmap -n --reason -sS -Pn --top-ports 1000 --open \
+  --stats-every "$NMAP_STATS_EVERY" \
   -oA "$FAST_TCP_BASE" "$TARGET"
 
 log_info "Running full TCP discovery scan"
 nmap -n --reason -sS -Pn -p- --open \
-  --min-rate 2000 --max-retries 2 --stats-every 60s \
+  --min-rate 2000 --max-retries 2 --stats-every "$NMAP_STATS_EVERY" \
   -oA "$FULL_TCP_BASE" "$TARGET"
 
 log_info "Running top 100 UDP scan"
-nmap -n -sU -T4 -Pn --top-ports 100 --stats-every 60s \
+nmap -n -sU -T4 -Pn --top-ports 100 --stats-every "$NMAP_STATS_EVERY" \
   -oA "$UDP_BASE" "$TARGET"
 
 OPEN_TCP_PORTS=$(awk -F'[:/, ]+' '/Ports:/{for(i=1;i<=NF;i++) if($(i+1)=="open") print $i}' "$FULL_TCP_BASE.gnmap" | sort -nu | paste -sd,)
@@ -83,6 +85,7 @@ if [ -n "$OPEN_TCP_PORTS" ]; then
   log_info "Running version scan against open TCP ports: $OPEN_TCP_PORTS"
   log_info "Running TCP version detection"
   nmap -n -sS -sV --version-light -sC -O -Pn -p "$OPEN_TCP_PORTS" \
+    --stats-every "$NMAP_STATS_EVERY" \
     -oA "$VERSION_BASE" "$TARGET"
 else
   log_info "No open TCP ports found; skipping version scan."

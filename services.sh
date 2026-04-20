@@ -26,13 +26,14 @@ mkdir -p "$SERVICE_DIR"
 OUTPUT_BASE_FILE="$SERVICE_DIR/${TARGET}_services"
 UNSUPPORTED_TCP_PORTS=()
 UNSUPPORTED_UDP_PORTS=()
+NMAP_STATS_EVERY="${NMAP_STATS_EVERY:-3m}"
 
 run_scan_file() {
   local output_file="$1"
   shift
   local status=0
   set +e
-  "$@" -oN - "$TARGET" 2>&1 | tee "$output_file"
+  "$@" --stats-every "$NMAP_STATS_EVERY" -oN - "$TARGET" 2>&1 | tee "$output_file"
   status=${PIPESTATUS[0]}
   set -e
   if [ "$status" -eq 139 ]; then
@@ -152,7 +153,7 @@ for target_port in "${ports[@]}"; do
       run_scan_file "${OUTPUT_BASE_FILE}_smb_enum.txt" nmap --script "smb-enum-*" -p "$port"
       
       log_info "SMB vuln scripts"
-      nmap -sS -p "$port" -Pn --script "smb-vuln* and not dos" --script-args=unsafe=1 -oA "${SERVICE_DIR}/smb_vuln_scan_${TARGET}" "$TARGET" || true
+      nmap -sS -p "$port" -Pn --stats-every "$NMAP_STATS_EVERY" --script "smb-vuln* and not dos" --script-args=unsafe=1 -oA "${SERVICE_DIR}/smb_vuln_scan_${TARGET}" "$TARGET" || true
       ;;
     161)
       log_info "SNMP service detected on $TARGET:$proto/$port"

@@ -23,6 +23,7 @@ fi
 
 WEB_DIR="$OUTPUT_BASE/web"
 mkdir -p "$WEB_DIR"
+NMAP_STATS_EVERY="${NMAP_STATS_EVERY:-3m}"
 
 WORDLIST="/usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt"
 AVAILABLE_WORDLIST=true
@@ -34,7 +35,31 @@ fi
 run_capture() {
   local output_file="$1"
   shift
-  "$@" > "$output_file" 2>&1 || true
+  local status=0
+  set +e
+  "$@" 2>&1 | tee "$output_file"
+  status=${PIPESTATUS[0]}
+  set -e
+  if [ "$status" -ne 0 ]; then
+    log_warn "Command failed with exit code $status while writing $output_file"
+  fi
+  return 0
+}
+
+run_nmap_file() {
+  local output_file="$1"
+  shift
+  local status=0
+  set +e
+  "$@" --stats-every "$NMAP_STATS_EVERY" -oN - "$TARGET" 2>&1 | tee "$output_file"
+  status=${PIPESTATUS[0]}
+  set -e
+  if [ "$status" -eq 139 ]; then
+    log_warn "Scan crashed with a segmentation fault while writing $output_file"
+  elif [ "$status" -ne 0 ]; then
+    log_warn "Scan failed with exit code $status while writing $output_file"
+  fi
+  return 0
 }
 
 run_http_checks() {
@@ -54,10 +79,10 @@ run_http_checks() {
   mkdir -p "$(dirname "$output_base")"
 
   log_info "HTTP enum"
-  nmap --script=http-enum -p "$port" -oN "${output_base}_http_enum.txt" "$TARGET" >/dev/null 2>&1 || true
+  run_nmap_file "${output_base}_http_enum.txt" nmap --script=http-enum -p "$port"
   
   log_info "HTTP vuln scripts"
-  nmap --script="http-vuln* and not dos" -p "$port" -oN "${output_base}_http_vuln.txt" "$TARGET" >/dev/null 2>&1 || true
+  run_nmap_file "${output_base}_http_vuln.txt" nmap --script="http-vuln* and not dos" -p "$port"
   
   log_info "Headers"
   run_capture "${output_base}_headers.txt" curl -IL --max-time 15 "$url"
@@ -82,10 +107,10 @@ run_http_checks() {
 
   if [ "$AVAILABLE_WORDLIST" = true ]; then
     log_info "Gobuster dir"
-    gobuster dir -u "$url" -w "$WORDLIST" -o "${output_base}_gobuster_dir.txt" >/dev/null 2>&1 || true
+    run_capture "${output_base}_gobuster_dir.txt" gobuster dir -u "$url" -w "$WORDLIST"
     if [ "${GOBUSTER_VHOST:-0}" = "1" ]; then
       log_info "Gobuster vhost"
-      gobuster vhost -u "$url" -w "$WORDLIST" -o "${output_base}_gobuster_vhost.txt" >/dev/null 2>&1 || true
+      run_capture "${output_base}_gobuster_vhost.txt" gobuster vhost -u "$url" -w "$WORDLIST"
     fi
   fi
 }
