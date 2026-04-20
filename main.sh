@@ -19,6 +19,7 @@ EOF
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="${1:-}"
+source "$SCRIPT_DIR/port_utils.sh"
 
 if [ -z "$TARGET" ]; then
   read -rp "Target IP/hostname: " TARGET
@@ -48,14 +49,8 @@ NON_WEB_PORTS_FILE="$SCANS_DIR/non_web_ports.txt"
 WEB_PORTS=""
 NON_WEB_PORTS=""
 
-if [ -f "$WEB_PORTS_FILE" ]; then
-  WEB_PORTS="$(tr -d ' \t\r\n' < "$WEB_PORTS_FILE" 2>/dev/null || true)"
-  WEB_PORTS="${WEB_PORTS%,}"
-fi
-if [ -f "$NON_WEB_PORTS_FILE" ]; then
-  NON_WEB_PORTS="$(tr -d ' \t\r\n' < "$NON_WEB_PORTS_FILE" 2>/dev/null || true)"
-  NON_WEB_PORTS="${NON_WEB_PORTS%,}"
-fi
+WEB_PORTS="$(sanitize_port_file "$WEB_PORTS_FILE" "web_ports.txt")"
+NON_WEB_PORTS="$(sanitize_port_file "$NON_WEB_PORTS_FILE" "non_web_ports.txt")"
 
 echo "DEBUG: normalized web_ports='$WEB_PORTS' non_web_ports='$NON_WEB_PORTS'"
 

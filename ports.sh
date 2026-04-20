@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="${1:-}"
 OUTPUT_BASE="${2:-}"
+source "$SCRIPT_DIR/port_utils.sh"
 
 usage() {
   cat <<USAGE
@@ -49,9 +50,10 @@ nmap -n -sU -T4 -Pn --top-ports 100 --stats-every 60s \
 printf "\n# Command: $CMD_UDP\n\n" | cat - "$UDP_BASE.nmap" > "$UDP_BASE.tmp" && mv "$UDP_BASE.tmp" "$UDP_BASE.nmap"
 
 OPEN_TCP_PORTS=$(awk -F'[:/, ]+' '/Ports:/{for(i=1;i<=NF;i++) if($(i+1)=="open") print $i}' "$FULL_TCP_BASE.gnmap" | sort -nu | paste -sd,)
+OPEN_TCP_PORTS="$(normalize_port_list "$OPEN_TCP_PORTS")"
 
 if [ -n "$OPEN_TCP_PORTS" ]; then
-  printf '%s\n' "${OPEN_TCP_PORTS//,/\n}" > "$SCAN_DIR/open_tcp_ports.txt"
+  printf '%s\n' "$OPEN_TCP_PORTS" | tr ',' '\n' > "$SCAN_DIR/open_tcp_ports.txt"
   echo "$OPEN_TCP_PORTS" > "$SCAN_DIR/open_tcp_ports.csv"
 else
   : > "$SCAN_DIR/open_tcp_ports.txt"
