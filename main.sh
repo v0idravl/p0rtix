@@ -58,6 +58,15 @@ WEB_PORTS="$(sanitize_port_file "$WEB_PORTS_FILE" "web_ports.txt")"
 NON_WEB_PORTS="$(sanitize_port_file "$NON_WEB_PORTS_FILE" "non_web_ports.txt")"
 NON_WEB_UDP_PORTS="$(sanitize_port_file "$NON_WEB_UDP_PORTS_FILE" "non_web_udp_ports.txt")"
 
+tcp_target_count=0
+udp_target_count=0
+if [ -n "$NON_WEB_PORTS" ]; then
+  tcp_target_count=$(printf '%s\n' "$NON_WEB_PORTS" | tr ',' '\n' | awk 'NF {count++} END {print count+0}')
+fi
+if [ -n "$NON_WEB_UDP_PORTS" ]; then
+  udp_target_count=$(printf '%s\n' "$NON_WEB_UDP_PORTS" | tr ',' '\n' | awk 'NF {count++} END {print count+0}')
+fi
+
 if [ -n "$NON_WEB_PORTS" ]; then
   SERVICE_TARGETS="$(printf '%s\n' "$NON_WEB_PORTS" | tr ',' '\n' | awk 'NF {print "tcp/" $0}' | paste -sd, -)"
 fi
@@ -78,7 +87,7 @@ else
 fi
 
 if [ -n "$SERVICE_TARGETS" ]; then
-  log_info "Non-web service targets detected: $SERVICE_TARGETS"
+  log_info "Non-web service targets detected: ${tcp_target_count} TCP, ${udp_target_count} UDP"
   "$SCRIPT_DIR/services.sh" "$TARGET" "$SERVICE_TARGETS" "$OUTPUT_BASE"
 else
   log_info "No non-web service ports detected; skipping service checks."

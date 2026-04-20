@@ -24,6 +24,8 @@ fi
 SERVICE_DIR="$OUTPUT_BASE/services"
 mkdir -p "$SERVICE_DIR"
 OUTPUT_BASE_FILE="$SERVICE_DIR/${TARGET}_services"
+UNSUPPORTED_TCP_PORTS=()
+UNSUPPORTED_UDP_PORTS=()
 
 run_scan_file() {
   local output_file="$1"
@@ -55,8 +57,28 @@ run_capture_file() {
   return 0
 }
 
+record_unsupported_port() {
+  local proto="$1"
+  local port="$2"
+
+  if [ "$proto" = "udp" ]; then
+    UNSUPPORTED_UDP_PORTS+=("$port")
+  else
+    UNSUPPORTED_TCP_PORTS+=("$port")
+  fi
+}
+
+join_by_comma() {
+  local values=("$@")
+  if [ "${#values[@]}" -eq 0 ]; then
+    printf '%s' ""
+    return 0
+  fi
+  printf '%s\n' "${values[@]}" | paste -sd, -
+}
+
 PORTS="$(printf '%s' "$PORTS" | tr -d ' \t\r\n')"
-log_info "Running non-web service checks for $TARGET on ports: $PORTS"
+log_info "Running non-web service checks for $TARGET"
 
 IFS=',' read -r -a ports <<< "$PORTS"
 for target_port in "${ports[@]}"; do
@@ -78,7 +100,7 @@ for target_port in "${ports[@]}"; do
   case "$port" in
     21)
       if [ "$proto" != "tcp" ]; then
-        log_info "No dedicated UDP service checks defined for $TARGET:$port"
+        record_unsupported_port "$proto" "$port"
         continue
       fi
       log_info "FTP service detected on $TARGET:$port"
@@ -88,7 +110,7 @@ for target_port in "${ports[@]}"; do
       ;;
     22)
       if [ "$proto" != "tcp" ]; then
-        log_info "No dedicated UDP service checks defined for $TARGET:$port"
+        record_unsupported_port "$proto" "$port"
         continue
       fi
       log_info "SSH service detected on $TARGET:$port"
@@ -112,7 +134,7 @@ for target_port in "${ports[@]}"; do
       ;;
     139|445)
       if [ "$proto" != "tcp" ]; then
-        log_info "No dedicated UDP SMB checks defined for $TARGET:$port"
+        record_unsupported_port "$proto" "$port"
         continue
       fi
       log_info "SMB service detected on $TARGET:$port"
@@ -138,7 +160,7 @@ for target_port in "${ports[@]}"; do
       ;;
     5985|5986)
       if [ "$proto" != "tcp" ]; then
-        log_info "No dedicated UDP WinRM checks defined for $TARGET:$port"
+        record_unsupported_port "$proto" "$port"
         continue
       fi
       log_info "WinRM service detected on $TARGET:$port"
@@ -150,13 +172,21 @@ for target_port in "${ports[@]}"; do
       if [ "$proto" = "tcp" ]; then
         log_info "Skipping web port $port in services checks"
       else
-        log_info "No dedicated UDP web checks defined for $TARGET:$port"
+        record_unsupported_port "$proto" "$port"
       fi
       ;;
     *)
-      log_info "No dedicated $proto service checks defined for $TARGET:$port"
+      record_unsupported_port "$proto" "$port"
       ;;
   esac
 done
+
+if [ "${#UNSUPPORTED_TCP_PORTS[@]}" -gt 0 ]; then
+  log_info "No dedicated TCP checks for: $(join_by_comma "${UNSUPPORTED_TCP_PORTS[@]}")"
+fi
+
+if [ "${#UNSUPPORTED_UDP_PORTS[@]}" -gt 0 ]; then
+  log_info "No dedicated UDP checks for: $(join_by_comma "${UNSUPPORTED_UDP_PORTS[@]}")"
+fi
 
 log_info "Non-web service outputs written to: $SERVICE_DIR"
