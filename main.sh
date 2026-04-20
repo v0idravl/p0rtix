@@ -57,6 +57,8 @@ if [ -f "$NON_WEB_PORTS_FILE" ]; then
   NON_WEB_PORTS="${NON_WEB_PORTS%,}"
 fi
 
+echo "DEBUG: normalized web_ports='$WEB_PORTS' non_web_ports='$NON_WEB_PORTS'"
+
 if [ -n "$WEB_PORTS" ]; then
   echo "Web ports detected: $WEB_PORTS"
   "$SCRIPT_DIR/web.sh" "$TARGET" "$WEB_PORTS" "$OUTPUT_BASE"
