@@ -71,7 +71,7 @@ run_port_nse_scan() {
   fi
 
   # Only hand Nmap the subset that matches the detected service family for this port.
-  run_scan_file "$output_file" nmap "$scan_flag" --script "$scripts_csv" -p "$port"
+  run_scan_file "$output_file" nmap "$scan_flag" -sV --version-light --script "$scripts_csv" -p "$port"
 }
 
 run_port_baseline_scan() {

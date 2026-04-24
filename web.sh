@@ -61,6 +61,52 @@ run_capture() {
   return 0
 }
 
+capture_headers() {
+  local output_file="$1"
+  local url="$2"
+  local status=0
+
+  set +e
+  curl -sS -I -L --max-time 15 "$url" 2>&1 | tee "$output_file"
+  status=${PIPESTATUS[0]}
+  set -e
+  if [ "$status" -ne 0 ]; then
+    log_warn "Command failed with exit code $status while writing $output_file"
+  fi
+  return 0
+}
+
+fetch_if_present() {
+  local output_file="$1"
+  local url="$2"
+  local label="$3"
+  local temp_file
+  local http_code
+  local status=0
+
+  temp_file="$(mktemp)"
+  set +e
+  http_code="$(curl -sS --max-time 15 -o "$temp_file" -w '%{http_code}' "$url")"
+  status=$?
+  set -e
+
+  if [ "$status" -ne 0 ]; then
+    rm -f "$temp_file"
+    log_warn "Command failed with exit code $status while fetching $label"
+    return 0
+  fi
+
+  if [ "${http_code:-000}" -ge 400 ]; then
+    rm -f "$temp_file"
+    log_info "$label returned HTTP $http_code; skipping saved output"
+    return 0
+  fi
+
+  tee "$output_file" < "$temp_file"
+  rm -f "$temp_file"
+  return 0
+}
+
 run_nmap_file() {
   local output_file="$1"
   shift
@@ -89,7 +135,7 @@ run_port_nse_scan() {
 
   # Web ports still use the shared approved pool, but only after it has been narrowed
   # to scripts that actually fit the detected service family for this port.
-  run_nmap_file "$output_file" nmap --script "$scripts_csv" -p "$port"
+  run_nmap_file "$output_file" nmap -sV --version-light --script "$scripts_csv" -p "$port"
 }
 
 run_port_baseline_scan() {
@@ -130,25 +176,25 @@ run_http_checks() {
 
   # These lightweight fetches give quick wins before any deeper directory or NSE work.
   log_info "Headers"
-  run_capture "${output_base}_headers.txt" curl -IL --max-time 15 "$url"
+  capture_headers "${output_base}_headers.txt" "$url"
 
   log_info "WhatWeb"
   run_capture "${output_base}_whatweb.txt" whatweb --no-errors "$url"
   
   log_info "robots.txt"
-  run_capture "${output_base}_robots.txt" curl -s "$url/robots.txt"
+  fetch_if_present "${output_base}_robots.txt" "$url/robots.txt" "robots.txt"
   
   log_info "sitemap.xml"
-  run_capture "${output_base}_sitemap.xml" curl -s "$url/sitemap.xml"
+  fetch_if_present "${output_base}_sitemap.xml" "$url/sitemap.xml" "sitemap.xml"
   
   log_info "crossdomain.xml"
-  run_capture "${output_base}_crossdomain.xml" curl -s "$url/crossdomain.xml"
+  fetch_if_present "${output_base}_crossdomain.xml" "$url/crossdomain.xml" "crossdomain.xml"
   
   log_info "clientaccesspolicy.xml"
-  run_capture "${output_base}_clientaccesspolicy.xml" curl -s "$url/clientaccesspolicy.xml"
+  fetch_if_present "${output_base}_clientaccesspolicy.xml" "$url/clientaccesspolicy.xml" "clientaccesspolicy.xml"
   
   log_info ".well-known"
-  run_capture "${output_base}_well_known.txt" curl -s "$url/.well-known/"
+  fetch_if_present "${output_base}_well_known.txt" "$url/.well-known/" ".well-known"
 
   if [ "$AVAILABLE_WORDLIST" = true ]; then
     log_info "Gobuster dir"
