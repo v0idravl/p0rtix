@@ -19,7 +19,28 @@ EOF
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="${1:-}"
+PROJECT_ROOT="${2:-}"
+MACHINE_NAME="${3:-}"
 source "$SCRIPT_DIR/log_utils.sh"
+
+usage() {
+  cat <<EOF
+Usage: $0 <target-ip-or-hostname> [project-root-dir] [machine-nickname]
+
+Examples:
+  $0 10.10.11.34
+  $0 10.10.11.34 /home/user/Projects/htb lame
+EOF
+  exit 1
+}
+
+sanitize_machine_name() {
+  local raw_name="$1"
+
+  printf '%s\n' "$raw_name" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed 's/[^a-z0-9._-]/_/g'
+}
 
 if [ -z "$TARGET" ]; then
   read -rp "Target IP/hostname: " TARGET
@@ -30,13 +51,56 @@ if [ -z "$TARGET" ]; then
   exit 1
 fi
 
-OUTPUT_BASE="$SCRIPT_DIR/output/$TARGET"
+if [ -z "$PROJECT_ROOT" ]; then
+  read -rp "Project root directory [$SCRIPT_DIR]: " PROJECT_ROOT
+fi
+PROJECT_ROOT="${PROJECT_ROOT:-$SCRIPT_DIR}"
+
+if [ -z "$MACHINE_NAME" ]; then
+  read -rp "Machine nickname [$(sanitize_machine_name "$TARGET")]: " MACHINE_NAME
+fi
+MACHINE_NAME="${MACHINE_NAME:-$(sanitize_machine_name "$TARGET")}"
+MACHINE_NAME="$(sanitize_machine_name "$MACHINE_NAME")"
+
+if [ -z "$MACHINE_NAME" ]; then
+  log_warn "Machine nickname resolved to an empty value. Exiting."
+  usage
+fi
+
+MACHINE_ROOT="$PROJECT_ROOT/$MACHINE_NAME"
+OUTPUT_BASE="$MACHINE_ROOT/output"
 SCANS_DIR="$OUTPUT_BASE/scans"
 WEB_DIR="$OUTPUT_BASE/web"
 SERVICES_DIR="$OUTPUT_BASE/services"
+LOOT_DIR="$MACHINE_ROOT/loot"
+EXPLOIT_DIR="$MACHINE_ROOT/exploit"
+REPORT_FILE="$MACHINE_ROOT/${MACHINE_NAME}_report.md"
+REPORT_TEMPLATE_URL="https://raw.githubusercontent.com/v0idravl/lab-writeups/refs/heads/main/writeup-template.md"
 
 # Create the full output tree up front so downstream scripts can assume it exists.
-mkdir -p "$SCANS_DIR" "$WEB_DIR" "$SERVICES_DIR"
+mkdir -p "$SCANS_DIR" "$WEB_DIR" "$SERVICES_DIR" "$LOOT_DIR" "$EXPLOIT_DIR"
+
+if [ ! -f "$REPORT_FILE" ]; then
+  if command -v wget >/dev/null 2>&1; then
+    if wget -qO "$REPORT_FILE" "$REPORT_TEMPLATE_URL"; then
+      log_info "Created report template at $REPORT_FILE"
+    else
+      rm -f "$REPORT_FILE"
+      log_warn "Failed to download report template from $REPORT_TEMPLATE_URL"
+    fi
+  elif command -v curl >/dev/null 2>&1; then
+    if curl -fsSL "$REPORT_TEMPLATE_URL" -o "$REPORT_FILE"; then
+      log_info "Created report template at $REPORT_FILE"
+    else
+      rm -f "$REPORT_FILE"
+      log_warn "Failed to download report template from $REPORT_TEMPLATE_URL"
+    fi
+  else
+    log_warn "Neither wget nor curl is installed; skipping report template download."
+  fi
+else
+  log_info "Report already exists at $REPORT_FILE; leaving it untouched."
+fi
 
 csv_from_port_file() {
   local file_path="$1"
@@ -61,6 +125,8 @@ csv_from_port_file() {
 }
 
 log_info "Starting orchestration for target: $TARGET"
+log_info "Project root: $PROJECT_ROOT"
+log_info "Machine workspace: $MACHINE_ROOT"
 log_info "Output base: $OUTPUT_BASE"
 
 # Discovery writes the canonical port lists used by the rest of the pipeline.

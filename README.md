@@ -13,7 +13,8 @@ p0rtix automates the process of discovering open ports, enumerating services, an
 - **Web Enumeration**: HTTP/HTTPS header collection, robots.txt, sitemap, whatweb, gobuster directory enumeration
 - **Service Enumeration**: Targeted checks for FTP, SSH, DNS, SMB, SNMP, RPC/NFS, WinRM, and more
 - **Vulnerability Scanning**: Service-specific NSE vuln scripts (excluding DoS)
-- **Organized Output**: Results saved under `output/<target>/{scans,web,services}/`
+- **Organized Output**: Results saved under `<project-root>/<machine-name>/output/{scans,web,services}/`
+- **Machine Workspace Bootstrap**: Creates per-machine `loot/`, `exploit/`, and report template files
 - **Safe Execution**: All scripts use `set -euo pipefail` for robust error handling
 
 ## Project Structure
@@ -25,12 +26,14 @@ p0rtix/
 ├── web.sh           # Web enumeration - HTTP/HTTPS specific checks
 ├── services.sh      # Non-web service enumeration - targeted service checks
 ├── README.md        # This file
-└── output/          # Generated output directory (created on first run)
-    └── <target>/
-        ├── scans/   # Port discovery and version scan results
-        ├── web/     # Web enumeration outputs
-        ├── services/# Non-web service outputs
-        └── summary.txt  # High-level summary
+└── <machine-name>/
+    ├── output/
+    │   ├── scans/     # Port discovery and version scan results
+    │   ├── web/       # Web enumeration outputs
+    │   └── services/  # Non-web service outputs
+    ├── loot/          # Loot gathered during enumeration/exploitation
+    ├── exploit/       # Exploit helpers, notes, and payloads
+    └── <machine-name>_report.md
 ```
 
 ## Dependencies
@@ -66,15 +69,15 @@ sudo apt install seclists  # or download manually to /usr/share/seclists/
 
 ### Full Pipeline (Recommended)
 ```bash
-./main.sh <target-ip-or-hostname>
+./main.sh <target-ip-or-hostname> [project-root-dir] [machine-nickname]
 ```
 
 Example:
 ```bash
-./main.sh 192.168.1.100
+./main.sh 192.168.1.100 /home/user/Projects/htb lame
 ```
 
-If no target is provided, you'll be prompted to enter one.
+If you omit any argument, you'll be prompted for it. The project root defaults to the repository directory, and the machine nickname defaults to a sanitized version of the target.
 
 ### Individual Scripts
 
@@ -95,22 +98,24 @@ If no target is provided, you'll be prompted to enter one.
 
 ## Output Structure
 
-Results are organized under `output/<target>/`:
+Results are organized under `<project-root>/<machine-name>/`:
 
-- **scans/**: Raw nmap outputs (.gnmap, .nmap, .xml), parsed port lists
-- **web/**: HTTP headers, robots.txt, sitemap, whatweb, gobuster results
-- **services/**: Service-specific enumeration outputs (SSH keys, SMB info, etc.)
-- **summary.txt**: Overview of discovered ports and scan results
+- **output/scans/**: Raw nmap outputs (.gnmap, .nmap, .xml), parsed port lists
+- **output/web/**: HTTP headers, robots.txt, sitemap, whatweb, gobuster results
+- **output/services/**: Service-specific enumeration outputs (SSH keys, SMB info, etc.)
+- **loot/**: Manual findings and captured artifacts
+- **exploit/**: Exploit code, payloads, or attack notes
+- **`<machine-name>_report.md`**: Writeup template downloaded from the shared template repo
 
 ## What Each Script Does
 
 ### main.sh (Orchestrator)
 - Defines the target
-- Creates output directories
+- Creates machine workspace directories
 - Calls ports.sh for discovery
 - Conditionally calls web.sh if web ports (80/443) are found
 - Conditionally calls services.sh if non-web ports are found
-- Generates a summary
+- Downloads a machine report template if one does not already exist
 
 ### ports.sh (Discovery)
 - Runs full TCP scan (all ports)
@@ -136,25 +141,28 @@ Results are organized under `output/<target>/`:
 
 ### Basic Scan
 ```bash
-./main.sh example.com
+./main.sh example.com /home/user/Projects/labs example
 ```
 
 Output:
 ```
-output/example.com/
-├── scans/
-│   ├── full_tcp.gnmap
-│   ├── open_tcp_ports.txt
-│   └── top_100_udp.nmap
-├── web/
-│   ├── example.com_80_baseline.txt
-│   ├── example.com_80_headers.txt
-│   ├── example.com_80_whatweb.txt
-│   └── example.com_80_nse.txt
-├── services/
-│   ├── example.com_services_tcp_22_baseline.txt
-│   └── example.com_services_tcp_22_nse.txt
-└── summary.txt
+/home/user/Projects/labs/example/
+├── output/
+│   ├── scans/
+│   │   ├── full_tcp.gnmap
+│   │   ├── open_tcp_ports.txt
+│   │   └── top_100_udp.nmap
+│   ├── web/
+│   │   ├── example.com_80_baseline.txt
+│   │   ├── example.com_80_headers.txt
+│   │   ├── example.com_80_whatweb.txt
+│   │   └── example.com_80_nse.txt
+│   └── services/
+│       ├── example.com_services_tcp_22_baseline.txt
+│       └── example.com_services_tcp_22_nse.txt
+├── loot/
+├── exploit/
+└── example_report.md
 ```
 
 ### Targeted Web Scan
