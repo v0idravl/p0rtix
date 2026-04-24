@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 
+# Keep log coloring optional so redirected output stays readable.
 LOG_INFO_COLOR=""
 LOG_WARN_COLOR=""
 LOG_RESET_COLOR=""
@@ -11,9 +12,11 @@ if [ -t 1 ] && [ "${TERM:-}" != "dumb" ] && [ -z "${NO_COLOR:-}" ]; then
 fi
 
 log_info() {
+  # Standard user-facing status line for normal progress updates.
   printf '\n%s[*]%s %s\n\n' "$LOG_INFO_COLOR" "$LOG_RESET_COLOR" "$*"
 }
 
 log_warn() {
+  # Warnings go to stderr so they still stand out in pipelines and tee output.
   printf '\n%s[*]%s %s\n\n' "$LOG_WARN_COLOR" "$LOG_RESET_COLOR" "$*" >&2
 }

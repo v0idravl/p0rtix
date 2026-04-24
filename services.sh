@@ -6,6 +6,7 @@ PORTS="${2:-}"
 OUTPUT_BASE="${3:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/log_utils.sh"
+source "$SCRIPT_DIR/nse_utils.sh"
 
 usage() {
   cat <<EOF
@@ -24,15 +25,16 @@ fi
 SERVICE_DIR="$OUTPUT_BASE/services"
 mkdir -p "$SERVICE_DIR"
 OUTPUT_BASE_FILE="$SERVICE_DIR/${TARGET}_services"
-UNSUPPORTED_TCP_PORTS=()
-UNSUPPORTED_UDP_PORTS=()
 NMAP_STATS_EVERY="${NMAP_STATS_EVERY:-3m}"
+# Build the filtered NSE allowlist once so every port uses the same rules.
+ALLOWED_NSE_SCRIPTS="$(load_allowed_nse_scripts)"
 
 run_scan_file() {
   local output_file="$1"
   shift
   local status=0
   set +e
+  # Keep nmap output visible on screen while also writing a plain-text artifact.
   "$@" --stats-every "$NMAP_STATS_EVERY" -oN - "$TARGET" 2>&1 | tee "$output_file"
   status=${PIPESTATUS[0]}
   set -e
@@ -49,6 +51,7 @@ run_capture_file() {
   shift
   local status=0
   set +e
+  # Some helpers are not nmap-based, but we still want identical tee-to-file behavior.
   "$@" 2>&1 | tee "$output_file"
   status=${PIPESTATUS[0]}
   set -e
@@ -58,28 +61,24 @@ run_capture_file() {
   return 0
 }
 
-record_unsupported_port() {
-  local proto="$1"
-  local port="$2"
-
-  if [ "$proto" = "udp" ]; then
-    UNSUPPORTED_UDP_PORTS+=("$port")
-  else
-    UNSUPPORTED_TCP_PORTS+=("$port")
-  fi
-}
-
-join_by_comma() {
-  local values=("$@")
-  if [ "${#values[@]}" -eq 0 ]; then
-    printf '%s' ""
+run_port_nse_scan() {
+  local output_file="$1"
+  if [ -z "$ALLOWED_NSE_SCRIPTS" ]; then
+    log_info "No approved NSE scripts available locally for $(basename "$output_file")"
     return 0
   fi
-  printf '%s\n' "${values[@]}" | paste -sd, -
+
+  # We hand Nmap one large allowlist and let each script's portrule decide whether
+  # it should actually run against the current service.
+  run_scan_file "$output_file" nmap "$scan_flag" --script "$ALLOWED_NSE_SCRIPTS" -p "$port"
 }
 
 PORTS="$(printf '%s' "$PORTS" | tr -d ' \t\r\n')"
 log_info "Running non-web service checks for $TARGET"
+if [ -n "$ALLOWED_NSE_SCRIPTS" ]; then
+  script_count=$(printf '%s\n' "$ALLOWED_NSE_SCRIPTS" | tr ',' '\n' | awk 'NF {count++} END {print count+0}')
+  log_info "Approved NSE script count for per-port scans: $script_count"
+fi
 
 IFS=',' read -r -a ports <<< "$PORTS"
 for target_port in "${ports[@]}"; do
@@ -98,103 +97,16 @@ for target_port in "${ports[@]}"; do
   if [ "$proto" = "udp" ]; then
     scan_flag="-sU"
   fi
-  case "$port" in
-    21)
-      if [ "$proto" != "tcp" ]; then
-        record_unsupported_port "$proto" "$port"
-        continue
-      fi
-      log_info "FTP service detected on $TARGET:$port"
-      run_scan_file "${OUTPUT_BASE_FILE}_ftp.txt" nmap --script=ftp-* -p "$port"
-      
-      run_scan_file "${OUTPUT_BASE_FILE}_ftp_vuln.txt" nmap --script="ftp-vuln* and not dos" -p "$port"
-      ;;
-    22)
-      if [ "$proto" != "tcp" ]; then
-        record_unsupported_port "$proto" "$port"
-        continue
-      fi
-      log_info "SSH service detected on $TARGET:$port"
-      run_scan_file "${OUTPUT_BASE_FILE}_ssh_algos.txt" nmap -p "$port" --script ssh2-enum-algos
-      
-      run_scan_file "${OUTPUT_BASE_FILE}_ssh_hostkey.txt" nmap -p "$port" --script ssh-hostkey --script-args ssh_hostkey=full
-      
-      run_scan_file "${OUTPUT_BASE_FILE}_ssh_auth_methods.txt" nmap -p "$port" --script ssh-auth-methods
-      
-      run_scan_file "${OUTPUT_BASE_FILE}_ssh_vuln.txt" nmap --script="ssh-vuln* and not dos" -p "$port"
-      ;;
-    53)
-      log_info "DNS service detected on $TARGET:$proto/$port"
-      run_scan_file "${OUTPUT_BASE_FILE}_${proto}_dns.txt" nmap -n "$scan_flag" --script "(default and *dns*) or fcrdns or dns-srv-enum" -p "$port"
-      
-      run_scan_file "${OUTPUT_BASE_FILE}_${proto}_dns_vuln.txt" nmap "$scan_flag" --script="dns-vuln* and not dos" -p "$port"
-      ;;
-    111|2049)
-      log_info "RPC/NFS service detected on $TARGET:$proto/$port"
-      run_scan_file "${OUTPUT_BASE_FILE}_${proto}_rpcinfo_${port}.txt" nmap "$scan_flag" -p "$port" --script=rpcinfo
-      ;;
-    139)
-      if [ "$proto" != "tcp" ]; then
-        record_unsupported_port "$proto" "$port"
-        continue
-      fi
-      log_info "NetBIOS session service detected on $TARGET:$port; skipping SMB NSE checks and using 445/tcp for SMB validation"
-      ;;
-    445)
-      if [ "$proto" != "tcp" ]; then
-        record_unsupported_port "$proto" "$port"
-        continue
-      fi
-      log_info "SMB service detected on $TARGET:$port"
-      log_info "SMB OS discovery"
-      run_scan_file "${OUTPUT_BASE_FILE}_smb_os_discovery.txt" nmap --script=smb-os-discovery.nse -p "$port"
-      
-      log_info "SMB enumeration"
-      run_scan_file "${OUTPUT_BASE_FILE}_smb_enum.txt" nmap --script "smb-enum-*" -p "$port"
-      
-      log_info "SMB vuln scripts"
-      nmap -sS -p "$port" -Pn --stats-every "$NMAP_STATS_EVERY" --script "smb-vuln* and not dos" --script-args=unsafe=1 -oA "${SERVICE_DIR}/smb_vuln_scan_${TARGET}" "$TARGET" || true
-      ;;
-    161)
-      log_info "SNMP service detected on $TARGET:$proto/$port"
-      if [ "$proto" = "udp" ]; then
-        log_info "SNMP public community walk"
-        run_capture_file "${OUTPUT_BASE_FILE}_${proto}_snmp_public.txt" snmpwalk -v 2c -c public "$TARGET"
-      fi
-      
-      run_scan_file "${OUTPUT_BASE_FILE}_${proto}_snmp.txt" nmap "$scan_flag" --script "snmp* and not snmp-brute" -p "$port"
-      
-      run_scan_file "${OUTPUT_BASE_FILE}_${proto}_snmp_vuln.txt" nmap "$scan_flag" --script="snmp-vuln* and not dos" -p "$port"
-      ;;
-    5985|5986)
-      if [ "$proto" != "tcp" ]; then
-        record_unsupported_port "$proto" "$port"
-        continue
-      fi
-      log_info "WinRM service detected on $TARGET:$port"
-      run_scan_file "${OUTPUT_BASE_FILE}_winrm.txt" nmap -p "$port" --script=http-windows*
-      
-      run_scan_file "${OUTPUT_BASE_FILE}_winrm_vuln.txt" nmap --script="http-vuln* and not dos" -p "$port"
-      ;;
-    80|443)
-      if [ "$proto" = "tcp" ]; then
-        log_info "Skipping web port $port in services checks"
-      else
-        record_unsupported_port "$proto" "$port"
-      fi
-      ;;
-    *)
-      record_unsupported_port "$proto" "$port"
-      ;;
-  esac
+  log_info "Running approved NSE set on $TARGET:$proto/$port"
+
+  # SNMP gets one extra manual pass because a public community string is common
+  # enough to be worth a quick check outside of NSE.
+  if [ "$proto" = "udp" ] && [ "$port" = "161" ]; then
+    log_info "SNMP public community walk"
+    run_capture_file "${OUTPUT_BASE_FILE}_${proto}_${port}_snmp_public.txt" snmpwalk -v 2c -c public "$TARGET"
+  fi
+
+  run_port_nse_scan "${OUTPUT_BASE_FILE}_${proto}_${port}_nse.txt"
 done
-
-if [ "${#UNSUPPORTED_TCP_PORTS[@]}" -gt 0 ]; then
-  log_info "No dedicated TCP checks for: $(join_by_comma "${UNSUPPORTED_TCP_PORTS[@]}")"
-fi
-
-if [ "${#UNSUPPORTED_UDP_PORTS[@]}" -gt 0 ]; then
-  log_info "No dedicated UDP checks for: $(join_by_comma "${UNSUPPORTED_UDP_PORTS[@]}")"
-fi
 
 log_info "Non-web service outputs written to: $SERVICE_DIR"

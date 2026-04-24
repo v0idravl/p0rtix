@@ -35,6 +35,7 @@ SCANS_DIR="$OUTPUT_BASE/scans"
 WEB_DIR="$OUTPUT_BASE/web"
 SERVICES_DIR="$OUTPUT_BASE/services"
 
+# Create the full output tree up front so downstream scripts can assume it exists.
 mkdir -p "$SCANS_DIR" "$WEB_DIR" "$SERVICES_DIR"
 
 csv_from_port_file() {
@@ -45,6 +46,7 @@ csv_from_port_file() {
     return 0
   fi
 
+  # Normalize plain-text port lists back into a clean CSV for the child scripts.
   awk '
     /^[[:space:]]*$/ {
       next
@@ -61,6 +63,7 @@ csv_from_port_file() {
 log_info "Starting orchestration for target: $TARGET"
 log_info "Output base: $OUTPUT_BASE"
 
+# Discovery writes the canonical port lists used by the rest of the pipeline.
 "$SCRIPT_DIR/ports.sh" "$TARGET" "$OUTPUT_BASE"
 
 WEB_PORTS_FILE="$SCANS_DIR/web_ports.txt"
@@ -86,6 +89,7 @@ if [ -n "$NON_WEB_UDP_PORTS" ]; then
 fi
 
 if [ -n "$NON_WEB_PORTS" ]; then
+  # Service scans expect explicit protocol prefixes so TCP/UDP can be mixed.
   SERVICE_TARGETS="$(printf '%s\n' "$NON_WEB_PORTS" | tr ',' '\n' | awk 'NF {print "tcp/" $0}' | paste -sd, -)"
 fi
 if [ -n "$NON_WEB_UDP_PORTS" ]; then
@@ -110,4 +114,5 @@ else
   log_info "No web ports detected; skipping web enumeration."
 fi
 
+# At this point the run is complete; everything else is already on disk.
 log_info "Orchestration complete. Outputs saved under $OUTPUT_BASE"

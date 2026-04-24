@@ -23,6 +23,7 @@ fi
 SCAN_DIR="$OUTPUT_BASE/scans"
 mkdir -p "$SCAN_DIR"
 
+# Keep the raw nmap artifacts grouped by scan purpose for easier review later.
 FAST_TCP_BASE="$SCAN_DIR/fast_tcp"
 FULL_TCP_BASE="$SCAN_DIR/full_tcp"
 UDP_BASE="$SCAN_DIR/top_100_udp"
@@ -34,6 +35,7 @@ extract_ports_from_gnmap() {
   local proto="$2"
   local include_open_filtered="${3:-0}"
 
+  # Grepable output is easier to post-process than the human-readable .nmap files.
   awk -v proto="$proto" -v include_open_filtered="$include_open_filtered" '
     /Ports: / {
       sub(/^.*Ports: /, "")
@@ -60,6 +62,8 @@ write_port_files() {
   local txt_file="$2"
   local csv_file="${3:-}"
 
+  # Write both one-port-per-line and CSV variants so later steps can use whichever
+  # format is more convenient without reparsing the raw nmap output.
   if [ -n "$ports_csv" ]; then
     printf '%s\n' "$ports_csv" | tr ',' '\n' > "$txt_file"
   else
@@ -77,6 +81,7 @@ write_port_files() {
 
 log_info "Running discovery scans for $TARGET"
 
+# Fast TCP gives early signal; the full sweep is what we trust for orchestration.
 log_info "Running fast TCP discovery scan"
 nmap -n --reason -sS -Pn --top-ports 1000 --open \
   --stats-every "$NMAP_STATS_EVERY" \
@@ -91,6 +96,7 @@ log_info "Running top 100 UDP scan"
 nmap -n -sU -T4 -Pn --top-ports 100 --stats-every "$NMAP_STATS_EVERY" \
   -oA "$UDP_BASE" "$TARGET"
 
+# TCP requires strictly open ports; UDP often leaves us with open|filtered.
 OPEN_TCP_PORTS="$(extract_ports_from_gnmap "$FULL_TCP_BASE.gnmap" tcp | paste -sd, -)"
 OPEN_UDP_PORTS="$(extract_ports_from_gnmap "$UDP_BASE.gnmap" udp 1 | paste -sd, -)"
 
@@ -98,6 +104,7 @@ write_port_files "$OPEN_TCP_PORTS" "$SCAN_DIR/open_tcp_ports.txt" "$SCAN_DIR/ope
 write_port_files "$OPEN_UDP_PORTS" "$SCAN_DIR/open_udp_ports.txt" "$SCAN_DIR/open_udp_ports.csv"
 
 if [ -n "$OPEN_TCP_PORTS" ]; then
+  # Web handling is intentionally separate so HTTP-specific tooling stays isolated.
   WEB_PORTS="$(printf '%s\n' "$OPEN_TCP_PORTS" | tr ',' '\n' | awk '/^(80|443)$/' | paste -sd, -)"
   NON_WEB_PORTS="$(printf '%s\n' "$OPEN_TCP_PORTS" | tr ',' '\n' | awk '!/^(80|443)$/' | paste -sd, -)"
 else
@@ -112,6 +119,7 @@ write_port_files "$OPEN_UDP_PORTS" "$SCAN_DIR/non_web_udp_ports.txt"
 if [ -n "$OPEN_TCP_PORTS" ]; then
   log_info "Running version scan against open TCP ports: $OPEN_TCP_PORTS"
   log_info "Running TCP version detection"
+  # -sC here establishes the baseline default-script coverage the later NSE filters avoid duplicating.
   nmap -n -sS -sV --version-light -sC -O -Pn -p "$OPEN_TCP_PORTS" \
     --stats-every "$NMAP_STATS_EVERY" \
     -oA "$VERSION_BASE" "$TARGET"

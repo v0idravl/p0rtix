@@ -6,6 +6,7 @@ PORTS="${2:-}"
 OUTPUT_BASE="${3:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/log_utils.sh"
+source "$SCRIPT_DIR/nse_utils.sh"
 
 usage() {
   cat <<EOF
@@ -24,6 +25,8 @@ fi
 WEB_DIR="$OUTPUT_BASE/web"
 mkdir -p "$WEB_DIR"
 NMAP_STATS_EVERY="${NMAP_STATS_EVERY:-3m}"
+# Web ports reuse the same approved NSE policy as non-web service ports.
+ALLOWED_NSE_SCRIPTS="$(load_allowed_nse_scripts)"
 
 WORDLIST=""
 for candidate in \
@@ -48,6 +51,7 @@ run_capture() {
   shift
   local status=0
   set +e
+  # Mirror command output to disk so quick web checks are easy to inspect later.
   "$@" 2>&1 | tee "$output_file"
   status=${PIPESTATUS[0]}
   set -e
@@ -62,6 +66,7 @@ run_nmap_file() {
   shift
   local status=0
   set +e
+  # Web NSE output gets the same tee-to-file treatment as the service scans.
   "$@" --stats-every "$NMAP_STATS_EVERY" -oN - "$TARGET" 2>&1 | tee "$output_file"
   status=${PIPESTATUS[0]}
   set -e
@@ -73,11 +78,23 @@ run_nmap_file() {
   return 0
 }
 
+run_port_nse_scan() {
+  local output_file="$1"
+  if [ -z "$ALLOWED_NSE_SCRIPTS" ]; then
+    log_info "No approved NSE scripts available locally for $(basename "$output_file")"
+    return 0
+  fi
+
+  # The allowlist includes many non-HTTP scripts; their portrules simply no-op here.
+  run_nmap_file "$output_file" nmap --script "$ALLOWED_NSE_SCRIPTS" -p "$port"
+}
+
 run_http_checks() {
   local port="$1"
   local url
   local output_base="$WEB_DIR/${TARGET}_${port}"
 
+  # Preserve friendly URLs for 80/443 and fall back to host:port for everything else.
   if [ "$port" = "80" ]; then
     url="http://$TARGET"
   elif [ "$port" = "443" ]; then
@@ -89,6 +106,7 @@ run_http_checks() {
   log_info "Running web checks for $TARGET:$port"
   mkdir -p "$(dirname "$output_base")"
 
+  # These lightweight fetches give quick wins before any deeper directory or NSE work.
   log_info "Headers"
   run_capture "${output_base}_headers.txt" curl -IL --max-time 15 "$url"
 
@@ -115,11 +133,8 @@ run_http_checks() {
     run_capture "${output_base}_gobuster_dir.txt" gobuster dir -u "$url" -w "$WORDLIST"
   fi
 
-  log_info "HTTP vuln scripts"
-  run_nmap_file "${output_base}_http_vuln.txt" nmap --script="http-vuln* and not dos" -p "$port"
-
-  log_info "HTTP enum"
-  run_nmap_file "${output_base}_http_enum.txt" nmap --script=http-enum -p "$port"
+  log_info "Port-specific approved NSE scripts"
+  run_port_nse_scan "${output_base}_nse.txt"
 }
 
 for port in $(printf '%s\n' "$PORTS" | tr ',' ' '); do
