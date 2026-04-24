@@ -113,30 +113,24 @@ Results are organized under `output/<target>/`:
 - Generates a summary
 
 ### ports.sh (Discovery)
-- Runs fast TCP scan (top 1000 ports)
 - Runs full TCP scan (all ports)
 - Runs UDP top 100 ports scan
 - Parses open TCP ports
 - Separates web ports from non-web ports
-- Runs service version scan on open ports
+- Writes the port lists consumed by the web and service enumeration stages
 
 ### web.sh (Web Enumeration)
+- Runs a per-port baseline `-sV -sC` scan for each web service
 - Collects HTTP headers
 - Fetches robots.txt, sitemap.xml, crossdomain.xml, etc.
 - Runs whatweb for technology fingerprinting
 - Runs gobuster directory enumeration (if wordlist available)
-- Runs HTTP vuln NSE scripts
+- Runs the approved dynamic NSE set for that web port
 
 ### services.sh (Service Enumeration)
-- Checks for specific services on discovered ports:
-  - FTP (21): ftp NSE scripts + vuln
-  - SSH (22): algorithm enum, hostkey, auth methods + vuln
-  - DNS (53): DNS NSE scripts + vuln
-  - RPC/NFS (111/2049): rpcinfo
-  - SMB (139/445): OS discovery, enum, vuln scans
-  - SNMP (161): snmpwalk + NSE scripts + vuln
-  - WinRM (5985/5986): Windows HTTP scripts + vuln
-- Skips web ports (handled by web.sh)
+- Runs a per-port baseline `-sV -sC` scan for each non-web TCP/UDP service
+- Runs the approved dynamic NSE set for each discovered service port
+- Performs an extra `snmpwalk -v2c -c public` check on UDP 161
 
 ## Examples
 
@@ -149,17 +143,17 @@ Output:
 ```
 output/example.com/
 ├── scans/
-│   ├── fast_tcp.gnmap
 │   ├── full_tcp.gnmap
 │   ├── open_tcp_ports.txt
-│   └── service_version.nmap
+│   └── top_100_udp.nmap
 ├── web/
+│   ├── example.com_80_baseline.txt
 │   ├── example.com_80_headers.txt
 │   ├── example.com_80_whatweb.txt
-│   └── example.com_80_gobuster_dir.txt
+│   └── example.com_80_nse.txt
 ├── services/
-│   ├── example.com_services_ssh_algos.txt
-│   └── example.com_services_smb_enum.txt
+│   ├── example.com_services_tcp_22_baseline.txt
+│   └── example.com_services_tcp_22_nse.txt
 └── summary.txt
 ```
 

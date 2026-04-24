@@ -24,10 +24,8 @@ SCAN_DIR="$OUTPUT_BASE/scans"
 mkdir -p "$SCAN_DIR"
 
 # Keep the raw nmap artifacts grouped by scan purpose for easier review later.
-FAST_TCP_BASE="$SCAN_DIR/fast_tcp"
 FULL_TCP_BASE="$SCAN_DIR/full_tcp"
 UDP_BASE="$SCAN_DIR/top_100_udp"
-VERSION_BASE="$SCAN_DIR/service_version"
 NMAP_STATS_EVERY="${NMAP_STATS_EVERY:-3m}"
 
 extract_ports_from_gnmap() {
@@ -81,12 +79,6 @@ write_port_files() {
 
 log_info "Running discovery scans for $TARGET"
 
-# Fast TCP gives early signal; the full sweep is what we trust for orchestration.
-log_info "Running fast TCP discovery scan"
-nmap -n --reason -sS -Pn --top-ports 1000 --open \
-  --stats-every "$NMAP_STATS_EVERY" \
-  -oA "$FAST_TCP_BASE" "$TARGET"
-
 log_info "Running full TCP discovery scan"
 nmap -n --reason -sS -Pn -p- --open \
   --min-rate 2000 --max-retries 2 --stats-every "$NMAP_STATS_EVERY" \
@@ -115,16 +107,5 @@ fi
 write_port_files "$WEB_PORTS" "$SCAN_DIR/web_ports.txt"
 write_port_files "$NON_WEB_PORTS" "$SCAN_DIR/non_web_ports.txt"
 write_port_files "$OPEN_UDP_PORTS" "$SCAN_DIR/non_web_udp_ports.txt"
-
-if [ -n "$OPEN_TCP_PORTS" ]; then
-  log_info "Running version scan against open TCP ports: $OPEN_TCP_PORTS"
-  log_info "Running TCP version detection"
-  # -sC here establishes the baseline default-script coverage the later NSE filters avoid duplicating.
-  nmap -n -sS -sV --version-light -sC -O -Pn -p "$OPEN_TCP_PORTS" \
-    --stats-every "$NMAP_STATS_EVERY" \
-    -oA "$VERSION_BASE" "$TARGET"
-else
-  log_info "No open TCP ports found; skipping version scan."
-fi
 
 log_info "Discovery complete. Scan results saved under $SCAN_DIR"

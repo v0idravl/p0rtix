@@ -80,13 +80,24 @@ run_nmap_file() {
 
 run_port_nse_scan() {
   local output_file="$1"
-  if [ -z "$ALLOWED_NSE_SCRIPTS" ]; then
-    log_info "No approved NSE scripts available locally for $(basename "$output_file")"
+  local scripts_csv="$2"
+
+  if [ -z "$scripts_csv" ]; then
+    log_info "No relevant NSE scripts selected for $(basename "$output_file")"
     return 0
   fi
 
-  # The allowlist includes many non-HTTP scripts; their portrules simply no-op here.
-  run_nmap_file "$output_file" nmap --script "$ALLOWED_NSE_SCRIPTS" -p "$port"
+  # Web ports still use the shared approved pool, but only after it has been narrowed
+  # to scripts that actually fit the detected service family for this port.
+  run_nmap_file "$output_file" nmap --script "$scripts_csv" -p "$port"
+}
+
+run_port_baseline_scan() {
+  local output_file="$1"
+
+  # Keep the standard Nmap service/version view beside the rest of the HTTP recon
+  # so each web port has one cohesive folder of artifacts.
+  run_nmap_file "$output_file" nmap -sS -sV --version-light -sC -Pn -p "$port"
 }
 
 run_http_checks() {
@@ -105,6 +116,17 @@ run_http_checks() {
 
   log_info "Running web checks for $TARGET:$port"
   mkdir -p "$(dirname "$output_base")"
+
+  log_info "Baseline service scan"
+  baseline_output="${output_base}_baseline.txt"
+  run_port_baseline_scan "$baseline_output"
+  detected_service="$(extract_detected_service "$baseline_output" "$port" tcp)"
+  relevant_nse_scripts="$(build_relevant_nse_scripts "$ALLOWED_NSE_SCRIPTS" "$detected_service" "$port" tcp)"
+  if [ -n "$detected_service" ]; then
+    log_info "Detected service for $TARGET:$port: $detected_service"
+  else
+    log_info "No service name detected for $TARGET:$port; falling back to generic matching"
+  fi
 
   # These lightweight fetches give quick wins before any deeper directory or NSE work.
   log_info "Headers"
@@ -134,7 +156,7 @@ run_http_checks() {
   fi
 
   log_info "Port-specific approved NSE scripts"
-  run_port_nse_scan "${output_base}_nse.txt"
+  run_port_nse_scan "${output_base}_nse.txt" "$relevant_nse_scripts"
 }
 
 for port in $(printf '%s\n' "$PORTS" | tr ',' ' '); do

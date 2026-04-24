@@ -63,14 +63,23 @@ run_capture_file() {
 
 run_port_nse_scan() {
   local output_file="$1"
-  if [ -z "$ALLOWED_NSE_SCRIPTS" ]; then
-    log_info "No approved NSE scripts available locally for $(basename "$output_file")"
+  local scripts_csv="$2"
+
+  if [ -z "$scripts_csv" ]; then
+    log_info "No relevant NSE scripts selected for $(basename "$output_file")"
     return 0
   fi
 
-  # We hand Nmap one large allowlist and let each script's portrule decide whether
-  # it should actually run against the current service.
-  run_scan_file "$output_file" nmap "$scan_flag" --script "$ALLOWED_NSE_SCRIPTS" -p "$port"
+  # Only hand Nmap the subset that matches the detected service family for this port.
+  run_scan_file "$output_file" nmap "$scan_flag" --script "$scripts_csv" -p "$port"
+}
+
+run_port_baseline_scan() {
+  local output_file="$1"
+
+  # Each service gets its own baseline -sV/-sC artifact so version data and
+  # default-script output stay grouped with the port-specific follow-up NSE results.
+  run_scan_file "$output_file" nmap "$scan_flag" -sV --version-light -sC -Pn -p "$port"
 }
 
 PORTS="$(printf '%s' "$PORTS" | tr -d ' \t\r\n')"
@@ -98,6 +107,17 @@ for target_port in "${ports[@]}"; do
     scan_flag="-sU"
   fi
   log_info "Running approved NSE set on $TARGET:$proto/$port"
+  log_info "Running baseline service scan on $TARGET:$proto/$port"
+  baseline_output="${OUTPUT_BASE_FILE}_${proto}_${port}_baseline.txt"
+  run_port_baseline_scan "$baseline_output"
+
+  detected_service="$(extract_detected_service "$baseline_output" "$port" "$proto")"
+  relevant_nse_scripts="$(build_relevant_nse_scripts "$ALLOWED_NSE_SCRIPTS" "$detected_service" "$port" "$proto")"
+  if [ -n "$detected_service" ]; then
+    log_info "Detected service for $TARGET:$proto/$port: $detected_service"
+  else
+    log_info "No service name detected for $TARGET:$proto/$port; falling back to generic matching"
+  fi
 
   # SNMP gets one extra manual pass because a public community string is common
   # enough to be worth a quick check outside of NSE.
@@ -106,7 +126,7 @@ for target_port in "${ports[@]}"; do
     run_capture_file "${OUTPUT_BASE_FILE}_${proto}_${port}_snmp_public.txt" snmpwalk -v 2c -c public "$TARGET"
   fi
 
-  run_port_nse_scan "${OUTPUT_BASE_FILE}_${proto}_${port}_nse.txt"
+  run_port_nse_scan "${OUTPUT_BASE_FILE}_${proto}_${port}_nse.txt" "$relevant_nse_scripts"
 done
 
 log_info "Non-web service outputs written to: $SERVICE_DIR"
