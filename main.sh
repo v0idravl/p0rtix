@@ -145,15 +145,6 @@ WEB_PORTS="$(csv_from_port_file "$WEB_PORTS_FILE")"
 NON_WEB_PORTS="$(csv_from_port_file "$NON_WEB_PORTS_FILE")"
 NON_WEB_UDP_PORTS="$(csv_from_port_file "$NON_WEB_UDP_PORTS_FILE")"
 
-tcp_target_count=0
-udp_target_count=0
-if [ -n "$NON_WEB_PORTS" ]; then
-  tcp_target_count=$(printf '%s\n' "$NON_WEB_PORTS" | tr ',' '\n' | awk 'NF {count++} END {print count+0}')
-fi
-if [ -n "$NON_WEB_UDP_PORTS" ]; then
-  udp_target_count=$(printf '%s\n' "$NON_WEB_UDP_PORTS" | tr ',' '\n' | awk 'NF {count++} END {print count+0}')
-fi
-
 if [ -n "$NON_WEB_PORTS" ]; then
   # Service scans expect explicit protocol prefixes so TCP/UDP can be mixed.
   SERVICE_TARGETS="$(printf '%s\n' "$NON_WEB_PORTS" | tr ',' '\n' | awk 'NF {print "tcp/" $0}' | paste -sd, -)"
@@ -164,8 +155,6 @@ if [ -n "$NON_WEB_UDP_PORTS" ]; then
   fi
   SERVICE_TARGETS="${SERVICE_TARGETS}$(printf '%s\n' "$NON_WEB_UDP_PORTS" | tr ',' '\n' | awk 'NF {print "udp/" $0}' | paste -sd, -)"
 fi
-
-log_info "DEBUG: normalized web_ports='$WEB_PORTS' non_web_tcp_ports='$NON_WEB_PORTS' non_web_udp_ports='$NON_WEB_UDP_PORTS'"
 
 if [ -n "$SERVICE_TARGETS" ]; then
   "$SCRIPT_DIR/services.sh" "$TARGET" "$SERVICE_TARGETS" "$OUTPUT_BASE"

@@ -28,6 +28,10 @@ OUTPUT_BASE_FILE="$SERVICE_DIR/${TARGET}_services"
 NMAP_STATS_EVERY="${NMAP_STATS_EVERY:-3m}"
 # Build the filtered NSE allowlist once so every port uses the same rules.
 ALLOWED_NSE_SCRIPTS="$(load_allowed_nse_scripts)"
+# Temporary coarse filter: skip individual follow-up scans on high TCP ports that
+# are often Windows dynamic RPC / ephemeral allocations. Discovery still records
+# them, so revisit this threshold if it starts hiding something meaningful.
+SKIP_INDIVIDUAL_TCP_PORTS_MIN=49152
 
 run_scan_file() {
   local output_file="$1"
@@ -82,8 +86,24 @@ run_port_baseline_scan() {
   run_scan_file "$output_file" nmap "$scan_flag" -sV --version-light -sC -Pn -p "$port"
 }
 
+should_skip_individual_scan() {
+  local proto="$1"
+  local port="$2"
+
+  if [ "$proto" != "tcp" ]; then
+    return 1
+  fi
+
+  if [ "$port" -ge "$SKIP_INDIVIDUAL_TCP_PORTS_MIN" ]; then
+    return 0
+  fi
+
+  return 1
+}
+
 PORTS="$(printf '%s' "$PORTS" | tr -d ' \t\r\n')"
 log_info "Running non-web service checks for $TARGET"
+log_warn "Reminder: individual TCP follow-up scans are temporarily skipped for ports >= $SKIP_INDIVIDUAL_TCP_PORTS_MIN"
 if [ -n "$ALLOWED_NSE_SCRIPTS" ]; then
   script_count=$(printf '%s\n' "$ALLOWED_NSE_SCRIPTS" | tr ',' '\n' | awk 'NF {count++} END {print count+0}')
   log_info "Approved NSE script count for per-port scans: $script_count"
@@ -105,6 +125,10 @@ for target_port in "${ports[@]}"; do
   scan_flag="-sS"
   if [ "$proto" = "udp" ]; then
     scan_flag="-sU"
+  fi
+  if should_skip_individual_scan "$proto" "$port"; then
+    log_info "Skipping individual follow-up scans on $TARGET:$proto/$port due to temporary high-port filter"
+    continue
   fi
   log_info "Running approved NSE set on $TARGET:$proto/$port"
   log_info "Running baseline service scan on $TARGET:$proto/$port"
