@@ -133,8 +133,10 @@ Results are organized under `<project-root>/<machine-name>/`:
 - Runs the approved dynamic NSE set for that web port
 
 ### services.sh (Service Enumeration)
-- Runs a per-port baseline `-sV -sC` scan for each non-web TCP/UDP service
-- Runs the approved dynamic NSE set for each discovered service port
+- Runs a per-port baseline `-sV -sC` scan for each non-web TCP service
+- Records discovered UDP ports in a notes file and skips blanket UDP follow-up by default
+- Runs targeted UDP follow-up only for a small high-value allowlist
+- Runs the approved dynamic NSE set for each service port that receives follow-up scanning
 - Performs an extra `snmpwalk -v2c -c public` check on UDP 161
 
 ## Examples

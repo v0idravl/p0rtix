@@ -32,6 +32,11 @@ ALLOWED_NSE_SCRIPTS="$(load_allowed_nse_scripts)"
 # are often Windows dynamic RPC / ephemeral allocations. Discovery still records
 # them, so revisit this threshold if it starts hiding something meaningful.
 SKIP_INDIVIDUAL_TCP_PORTS_MIN=49152
+# UDP follow-up is intentionally selective: discovery already records open UDP
+# ports, and only a short list of higher-value ports gets individual baseline/NSE
+# scans by default.
+UDP_FOLLOW_UP_PORTS="${UDP_FOLLOW_UP_PORTS:-53,69,123,137,161,500,623}"
+UDP_NOTES_FILE="$SERVICE_DIR/${TARGET}_udp_notes.txt"
 
 run_scan_file() {
   local output_file="$1"
@@ -86,12 +91,35 @@ run_port_baseline_scan() {
   run_scan_file "$output_file" nmap "$scan_flag" -sV --version-light -sC -Pn -p "$port"
 }
 
+csv_contains_value() {
+  local csv="$1"
+  local value="$2"
+  local item
+
+  while IFS= read -r item; do
+    item="$(printf '%s' "$item" | tr -d '[:space:]')"
+    [ -n "$item" ] || continue
+    if [ "$item" = "$value" ]; then
+      return 0
+    fi
+  done < <(printf '%s\n' "$csv" | tr ',' '\n')
+
+  return 1
+}
+
 should_skip_individual_scan() {
   local proto="$1"
   local port="$2"
 
+  if [ "$proto" = "udp" ]; then
+    if csv_contains_value "$UDP_FOLLOW_UP_PORTS" "$port"; then
+      return 1
+    fi
+    return 0
+  fi
+
   if [ "$proto" != "tcp" ]; then
-    return 1
+    return 0
   fi
 
   if [ "$port" -ge "$SKIP_INDIVIDUAL_TCP_PORTS_MIN" ]; then
@@ -104,6 +132,8 @@ should_skip_individual_scan() {
 PORTS="$(printf '%s' "$PORTS" | tr -d ' \t\r\n')"
 log_info "Running non-web service checks for $TARGET"
 log_warn "Reminder: individual TCP follow-up scans are temporarily skipped for ports >= $SKIP_INDIVIDUAL_TCP_PORTS_MIN"
+printf 'UDP ports discovered for %s\n' "$TARGET" > "$UDP_NOTES_FILE"
+printf 'Selective UDP follow-up allowlist: %s\n\n' "$UDP_FOLLOW_UP_PORTS" >> "$UDP_NOTES_FILE"
 if [ -n "$ALLOWED_NSE_SCRIPTS" ]; then
   script_count=$(printf '%s\n' "$ALLOWED_NSE_SCRIPTS" | tr ',' '\n' | awk 'NF {count++} END {print count+0}')
   log_info "Approved NSE script count for per-port scans: $script_count"
@@ -125,9 +155,18 @@ for target_port in "${ports[@]}"; do
   scan_flag="-sS"
   if [ "$proto" = "udp" ]; then
     scan_flag="-sU"
+    if csv_contains_value "$UDP_FOLLOW_UP_PORTS" "$port"; then
+      printf 'udp/%s: targeted follow-up enabled\n' "$port" >> "$UDP_NOTES_FILE"
+    else
+      printf 'udp/%s: noted only, no individual follow-up scan\n' "$port" >> "$UDP_NOTES_FILE"
+    fi
   fi
   if should_skip_individual_scan "$proto" "$port"; then
-    log_info "Skipping individual follow-up scans on $TARGET:$proto/$port due to temporary high-port filter"
+    if [ "$proto" = "udp" ]; then
+      log_info "Noting $TARGET:$proto/$port without individual follow-up scan"
+    else
+      log_info "Skipping individual follow-up scans on $TARGET:$proto/$port due to temporary high-port filter"
+    fi
     continue
   fi
   log_info "Running approved NSE set on $TARGET:$proto/$port"

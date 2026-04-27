@@ -83,14 +83,14 @@ mkdir -p "$SCANS_DIR" "$WEB_DIR" "$SERVICES_DIR" "$LOOT_DIR" "$EXPLOIT_DIR"
 if [ ! -f "$REPORT_FILE" ]; then
   if command -v wget >/dev/null 2>&1; then
     if wget -qO "$REPORT_FILE" "$REPORT_TEMPLATE_URL"; then
-      log_info "Created report template at $REPORT_FILE"
+      log_info "Created report template: ${MACHINE_NAME}_report.md"
     else
       rm -f "$REPORT_FILE"
       log_warn "Failed to download report template from $REPORT_TEMPLATE_URL"
     fi
   elif command -v curl >/dev/null 2>&1; then
     if curl -fsSL "$REPORT_TEMPLATE_URL" -o "$REPORT_FILE"; then
-      log_info "Created report template at $REPORT_FILE"
+      log_info "Created report template: ${MACHINE_NAME}_report.md"
     else
       rm -f "$REPORT_FILE"
       log_warn "Failed to download report template from $REPORT_TEMPLATE_URL"
@@ -99,7 +99,7 @@ if [ ! -f "$REPORT_FILE" ]; then
     log_warn "Neither wget nor curl is installed; skipping report template download."
   fi
 else
-  log_info "Report already exists at $REPORT_FILE; leaving it untouched."
+  log_info "Using existing report template: ${MACHINE_NAME}_report.md"
 fi
 
 csv_from_port_file() {
@@ -124,10 +124,8 @@ csv_from_port_file() {
   ' "$file_path" | paste -sd, -
 }
 
-log_info "Starting orchestration for target: $TARGET"
-log_info "Project root: $PROJECT_ROOT"
-log_info "Machine workspace: $MACHINE_ROOT"
-log_info "Output base: $OUTPUT_BASE"
+log_info "Starting scan for $TARGET"
+log_info "Workspace: $MACHINE_ROOT | Output: $OUTPUT_BASE"
 
 # Discovery writes the canonical port lists used by the rest of the pipeline.
 "$SCRIPT_DIR/ports.sh" "$TARGET" "$OUTPUT_BASE"
