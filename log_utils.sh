@@ -13,10 +13,10 @@ fi
 
 log_info() {
   # Standard user-facing status line for normal progress updates.
-  printf '\n%s[*]%s %s\n\n' "$LOG_INFO_COLOR" "$LOG_RESET_COLOR" "$*"
+  printf '%s[*]%s %s\n' "$LOG_INFO_COLOR" "$LOG_RESET_COLOR" "$*"
 }
 
 log_warn() {
   # Warnings go to stderr so they still stand out in pipelines and tee output.
-  printf '\n%s[*]%s %s\n\n' "$LOG_WARN_COLOR" "$LOG_RESET_COLOR" "$*" >&2
+  printf '%s[*]%s %s\n' "$LOG_WARN_COLOR" "$LOG_RESET_COLOR" "$*" >&2
 }

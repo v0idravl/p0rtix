@@ -124,8 +124,7 @@ csv_from_port_file() {
   ' "$file_path" | paste -sd, -
 }
 
-log_info "Starting scan for $TARGET"
-log_info "Workspace: $MACHINE_ROOT | Output: $OUTPUT_BASE"
+log_info "Starting scan for $TARGET | Workspace: $MACHINE_ROOT | Output: $OUTPUT_BASE"
 
 # Discovery writes the canonical port lists used by the rest of the pipeline.
 "$SCRIPT_DIR/ports.sh" "$TARGET" "$OUTPUT_BASE"
