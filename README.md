@@ -10,7 +10,7 @@ p0rtix automates the process of discovering open ports, enumerating services, an
 
 - **Modular Design**: Separate scripts for orchestration, discovery, web, and service enumeration
 - **Comprehensive Scanning**: TCP port discovery, UDP top ports, service versioning, and OS detection
-- **Web Enumeration**: HTTP/HTTPS header collection, robots.txt, sitemap, whatweb, gobuster directory enumeration
+- **Web Enumeration**: HTTP/HTTPS header collection, robots.txt, sitemap, whatweb, gobuster directory enumeration on standard and non-standard web ports
 - **Service Enumeration**: Targeted checks for FTP, SSH, DNS, SMB, SNMP, RPC/NFS, WinRM, and more
 - **Vulnerability Scanning**: Service-specific NSE vuln scripts (excluding DoS)
 - **Organized Output**: Results saved under `<project-root>/<machine-name>/output/{scans,web,services}/`
@@ -113,15 +113,15 @@ Results are organized under `<project-root>/<machine-name>/`:
 - Defines the target
 - Creates machine workspace directories
 - Calls ports.sh for discovery
-- Conditionally calls web.sh if web ports (80/443) are found
+- Conditionally calls web.sh if ports are identified as HTTP/HTTPS services
 - Conditionally calls services.sh if non-web ports are found
 - Downloads a machine report template if one does not already exist
 
 ### ports.sh (Discovery)
 - Runs full TCP scan (all ports)
 - Runs UDP top 100 ports scan
-- Parses open TCP ports
-- Separates web ports from non-web ports
+- Runs a lightweight TCP service classification scan on open TCP ports
+- Separates web ports from non-web ports based on detected service, not only port number
 - Writes the port lists consumed by the web and service enumeration stages
 
 ### web.sh (Web Enumeration)

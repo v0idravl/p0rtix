@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="${1:-}"
 OUTPUT_BASE="${2:-}"
 source "$SCRIPT_DIR/log_utils.sh"
+source "$SCRIPT_DIR/nse_utils.sh"
 
 usage() {
   cat <<USAGE
@@ -26,6 +27,7 @@ mkdir -p "$SCAN_DIR"
 # Keep the raw nmap artifacts grouped by scan purpose for easier review later.
 FULL_TCP_BASE="$SCAN_DIR/full_tcp"
 UDP_BASE="$SCAN_DIR/top_100_udp"
+TCP_SERVICE_BASE="$SCAN_DIR/open_tcp_services"
 NMAP_STATS_EVERY="${NMAP_STATS_EVERY:-3m}"
 
 extract_ports_from_gnmap() {
@@ -77,6 +79,52 @@ write_port_files() {
   fi
 }
 
+is_web_service() {
+  local port="$1"
+  local service_name="$2"
+  local family
+
+  while IFS= read -r family; do
+    if [ "$family" = "http" ]; then
+      return 0
+    fi
+  done < <(service_families_for_target "$service_name" "$port" tcp)
+
+  return 1
+}
+
+classify_tcp_ports() {
+  local service_scan_file="$1"
+  local open_tcp_ports_csv="$2"
+  local port
+  local detected_service
+  local web_ports=()
+  local non_web_ports=()
+
+  for port in $(printf '%s\n' "$open_tcp_ports_csv" | tr ',' ' '); do
+    detected_service="$(extract_detected_service "$service_scan_file" "$port" tcp)"
+    if is_web_service "$port" "$detected_service"; then
+      web_ports+=("$port")
+    else
+      non_web_ports+=("$port")
+    fi
+  done
+
+  if [ "${#web_ports[@]}" -gt 0 ]; then
+    local IFS=','
+    WEB_PORTS="${web_ports[*]}"
+  else
+    WEB_PORTS=""
+  fi
+
+  if [ "${#non_web_ports[@]}" -gt 0 ]; then
+    local IFS=','
+    NON_WEB_PORTS="${non_web_ports[*]}"
+  else
+    NON_WEB_PORTS=""
+  fi
+}
+
 log_info "Running discovery scans for $TARGET"
 
 log_info "Running full TCP discovery scan"
@@ -96,9 +144,13 @@ write_port_files "$OPEN_TCP_PORTS" "$SCAN_DIR/open_tcp_ports.txt" "$SCAN_DIR/ope
 write_port_files "$OPEN_UDP_PORTS" "$SCAN_DIR/open_udp_ports.txt" "$SCAN_DIR/open_udp_ports.csv"
 
 if [ -n "$OPEN_TCP_PORTS" ]; then
-  # Web handling is intentionally separate so HTTP-specific tooling stays isolated.
-  WEB_PORTS="$(printf '%s\n' "$OPEN_TCP_PORTS" | tr ',' '\n' | awk '/^(80|443)$/' | paste -sd, -)"
-  NON_WEB_PORTS="$(printf '%s\n' "$OPEN_TCP_PORTS" | tr ',' '\n' | awk '!/^(80|443)$/' | paste -sd, -)"
+  log_info "Running lightweight TCP service classification scan"
+  nmap -n -sS -sV --version-light -Pn -p "$OPEN_TCP_PORTS" \
+    --stats-every "$NMAP_STATS_EVERY" -oN "$TCP_SERVICE_BASE.nmap" "$TARGET"
+
+  # Route anything identified as HTTP/HTTPS into the web workflow, even on
+  # non-standard ports such as 8080/8082/8443.
+  classify_tcp_ports "$TCP_SERVICE_BASE.nmap" "$OPEN_TCP_PORTS"
 else
   WEB_PORTS=""
   NON_WEB_PORTS=""
