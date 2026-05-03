@@ -34,6 +34,46 @@ EOF
   exit 1
 }
 
+require_command() {
+  local cmd="$1"
+
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    log_warn "Missing required dependency: $cmd"
+    return 1
+  fi
+
+  return 0
+}
+
+optional_command() {
+  local cmd="$1"
+  local description="$2"
+
+  if command -v "$cmd" >/dev/null 2>&1; then
+    log_info "Optional dependency available: $cmd ($description)"
+  else
+    log_warn "Optional dependency missing: $cmd ($description will be skipped)"
+  fi
+}
+
+preflight_dependencies() {
+  local missing_required=0
+
+  log_info "Running dependency preflight"
+
+  require_command nmap || missing_required=1
+  optional_command curl "HTTP fetches and report template download fallback"
+  optional_command wget "report template download"
+  optional_command whatweb "web fingerprinting"
+  optional_command gobuster "directory enumeration"
+  optional_command snmpwalk "SNMP public community probe"
+
+  if [ "$missing_required" -ne 0 ]; then
+    log_warn "Required dependencies are missing. Exiting."
+    exit 1
+  fi
+}
+
 sanitize_machine_name() {
   local raw_name="$1"
 
@@ -66,6 +106,8 @@ if [ -z "$MACHINE_NAME" ]; then
   log_warn "Machine nickname resolved to an empty value. Exiting."
   usage
 fi
+
+preflight_dependencies
 
 MACHINE_ROOT="$PROJECT_ROOT/$MACHINE_NAME"
 OUTPUT_BASE="$MACHINE_ROOT/output"

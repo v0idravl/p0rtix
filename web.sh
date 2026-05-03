@@ -27,6 +27,12 @@ mkdir -p "$WEB_DIR"
 NMAP_STATS_EVERY="${NMAP_STATS_EVERY:-3m}"
 # Web ports reuse the same approved NSE policy as non-web service ports.
 ALLOWED_NSE_SCRIPTS="$(load_allowed_nse_scripts)"
+HAS_CURL=false
+if command -v curl >/dev/null 2>&1; then
+  HAS_CURL=true
+else
+  log_warn "curl not found; header and file-fetch web checks will be skipped"
+fi
 
 WORDLIST=""
 for candidate in \
@@ -135,7 +141,7 @@ run_port_nse_scan() {
 
   # Web ports still use the shared approved pool, but only after it has been narrowed
   # to scripts that actually fit the detected service family for this port.
-  run_nmap_file "$output_file" nmap -sV --version-light --script "$scripts_csv" -p "$port"
+  run_nmap_file "$output_file" nmap -sV --version-light -Pn --script "$scripts_csv" -p "$port"
 }
 
 run_port_baseline_scan() {
@@ -149,16 +155,8 @@ run_port_baseline_scan() {
 run_http_checks() {
   local port="$1"
   local url
+  local scheme
   local output_base="$WEB_DIR/${TARGET}_${port}"
-
-  # Preserve friendly URLs for 80/443 and fall back to host:port for everything else.
-  if [ "$port" = "80" ]; then
-    url="http://$TARGET"
-  elif [ "$port" = "443" ]; then
-    url="https://$TARGET"
-  else
-    url="http://$TARGET:$port"
-  fi
 
   log_info "Running web checks for $TARGET:$port"
   mkdir -p "$(dirname "$output_base")"
@@ -173,32 +171,54 @@ run_http_checks() {
   else
     log_info "No service name detected for $TARGET:$port; falling back to generic matching"
   fi
+  scheme="$(web_scheme_for_target "$detected_service" "$port")"
+
+  if [ "$port" = "80" ] && [ "$scheme" = "http" ]; then
+    url="$scheme://$TARGET"
+  elif [ "$port" = "443" ] && [ "$scheme" = "https" ]; then
+    url="$scheme://$TARGET"
+  else
+    url="$scheme://$TARGET:$port"
+  fi
+  log_info "Using $scheme for $TARGET:$port"
 
   # These lightweight fetches give quick wins before any deeper directory or NSE work.
-  log_info "Headers"
-  capture_headers "${output_base}_headers.txt" "$url"
+  if [ "$HAS_CURL" = true ]; then
+    log_info "Headers"
+    capture_headers "${output_base}_headers.txt" "$url"
+  fi
 
-  log_info "WhatWeb"
-  run_capture "${output_base}_whatweb.txt" whatweb --no-errors "$url"
+  if command -v whatweb >/dev/null 2>&1; then
+    log_info "WhatWeb"
+    run_capture "${output_base}_whatweb.txt" whatweb --no-errors "$url"
+  else
+    log_warn "whatweb not found; skipping fingerprinting for $url"
+  fi
   
-  log_info "robots.txt"
-  fetch_if_present "${output_base}_robots.txt" "$url/robots.txt" "robots.txt"
-  
-  log_info "sitemap.xml"
-  fetch_if_present "${output_base}_sitemap.xml" "$url/sitemap.xml" "sitemap.xml"
-  
-  log_info "crossdomain.xml"
-  fetch_if_present "${output_base}_crossdomain.xml" "$url/crossdomain.xml" "crossdomain.xml"
-  
-  log_info "clientaccesspolicy.xml"
-  fetch_if_present "${output_base}_clientaccesspolicy.xml" "$url/clientaccesspolicy.xml" "clientaccesspolicy.xml"
-  
-  log_info ".well-known"
-  fetch_if_present "${output_base}_well_known.txt" "$url/.well-known/" ".well-known"
+  if [ "$HAS_CURL" = true ]; then
+    log_info "robots.txt"
+    fetch_if_present "${output_base}_robots.txt" "$url/robots.txt" "robots.txt"
+
+    log_info "sitemap.xml"
+    fetch_if_present "${output_base}_sitemap.xml" "$url/sitemap.xml" "sitemap.xml"
+
+    log_info "crossdomain.xml"
+    fetch_if_present "${output_base}_crossdomain.xml" "$url/crossdomain.xml" "crossdomain.xml"
+
+    log_info "clientaccesspolicy.xml"
+    fetch_if_present "${output_base}_clientaccesspolicy.xml" "$url/clientaccesspolicy.xml" "clientaccesspolicy.xml"
+
+    log_info ".well-known"
+    fetch_if_present "${output_base}_well_known.txt" "$url/.well-known/" ".well-known"
+  fi
 
   if [ "$AVAILABLE_WORDLIST" = true ]; then
-    log_info "Gobuster dir"
-    run_capture "${output_base}_gobuster_dir.txt" gobuster dir -u "$url" -w "$WORDLIST"
+    if command -v gobuster >/dev/null 2>&1; then
+      log_info "Gobuster dir"
+      run_capture "${output_base}_gobuster_dir.txt" gobuster dir -u "$url" -w "$WORDLIST"
+    else
+      log_warn "gobuster not found; skipping directory enumeration for $url"
+    fi
   fi
 
   log_info "Port-specific approved NSE scripts"

@@ -226,84 +226,174 @@ service_families_for_target() {
   esac
 }
 
-script_matches_family() {
-  local script="$1"
-  local family="$2"
+web_scheme_for_target() {
+  local service_name="$1"
+  local port="$2"
+  local normalized
 
-  case "$family" in
-    ssh)
-      [[ "$script" == ssh* ]]
+  normalized="$(printf '%s' "$service_name" | tr '[:upper:]' '[:lower:]')"
+
+  case "$normalized" in
+    https|https-alt|ssl/http|ssl|ssl/*|tls|tls/*)
+      printf '%s\n' "https"
+      return 0
       ;;
-    http)
-      [[ "$script" == http-* || "$script" == https-* || "$script" == xmlrpc-* ]]
-      ;;
-    ssl)
-      [[ "$script" == ssl-* || "$script" == tls-* || "$script" == sslv2* ]]
-      ;;
-    dns)
-      [[ "$script" == dns-* || "$script" == fcrdns.nse ]]
-      ;;
-    smb)
-      [[ "$script" == smb-* || "$script" == smb2-* ]]
-      ;;
-    snmp)
-      [[ "$script" == snmp-* ]]
-      ;;
-    ldap)
-      [[ "$script" == ldap-* ]]
-      ;;
-    ftp)
-      [[ "$script" == ftp-* ]]
-      ;;
-    smtp)
-      [[ "$script" == smtp-* ]]
-      ;;
-    pop3)
-      [[ "$script" == pop3-* ]]
-      ;;
-    imap)
-      [[ "$script" == imap-* ]]
-      ;;
-    mysql)
-      [[ "$script" == mysql-* ]]
-      ;;
-    pgsql)
-      [[ "$script" == pgsql-* ]]
-      ;;
-    ms-sql)
-      [[ "$script" == ms-sql-* ]]
-      ;;
-    redis)
-      [[ "$script" == redis-* ]]
-      ;;
-    oracle)
-      [[ "$script" == oracle-* ]]
-      ;;
-    nfs)
-      [[ "$script" == nfs-* ]]
-      ;;
-    rpc)
-      [[ "$script" == rpc* ]]
-      ;;
-    rdp)
-      [[ "$script" == rdp-* ]]
-      ;;
-    rsync)
-      [[ "$script" == rsync-* ]]
-      ;;
-    vnc)
-      [[ "$script" == vnc-* ]]
-      ;;
-    telnet)
-      [[ "$script" == telnet-* ]]
-      ;;
-    tftp)
-      [[ "$script" == tftp-* ]]
-      ;;
-    ntp)
-      [[ "$script" == ntp-* ]]
+    http|http-alt|http-proxy|sun-answerbook)
+      printf '%s\n' "http"
+      return 0
       ;;
   esac
+
+  case "$port" in
+    443|8443|9443)
+      printf '%s\n' "https"
+      ;;
+    *)
+      printf '%s\n' "http"
+      ;;
+  esac
+}
+
+csv_contains_script() {
+  local csv="$1"
+  local script="$2"
+  local item
+
+  while IFS= read -r item; do
+    [ -n "$item" ] || continue
+    if [ "$item" = "$script" ]; then
+      return 0
+    fi
+  done < <(printf '%s\n' "$csv" | tr ',' '\n')
+
+  return 1
+}
+
+append_unique_script() {
+  local -n target_array="$1"
+  local script="$2"
+  local existing
+
+  [ -n "$script" ] || return 0
+  for existing in "${target_array[@]}"; do
+    if [ "$existing" = "$script" ]; then
+      return 0
+    fi
+  done
+
+  target_array+=("$script")
+}
+
+high_roi_scripts_for_family() {
+  local family="$1"
+
+  case "$family" in
+    http)
+      printf '%s\n' \
+        http-methods.nse \
+        http-put.nse \
+        http-git.nse \
+        http-config-backup.nse \
+        http-backup-finder.nse \
+        http-apache-server-status.nse \
+        http-auth-finder.nse \
+        http-security-headers.nse
+      ;;
+    ssl)
+      printf '%s\n' \
+        ssl-cert.nse \
+        ssl-date.nse \
+        ssl-enum-ciphers.nse \
+        tls-alpn.nse
+      ;;
+    ssh)
+      printf '%s\n' \
+        ssh-hostkey.nse \
+        ssh-auth-methods.nse \
+        ssh2-enum-algos.nse \
+        sshv1.nse
+      ;;
+    dns)
+      printf '%s\n' \
+        dns-nsid.nse \
+        dns-recursion.nse \
+        dns-zone-transfer.nse
+      ;;
+    smb)
+      printf '%s\n' \
+        smb-os-discovery.nse \
+        smb-protocols.nse \
+        smb-security-mode.nse \
+        smb2-security-mode.nse \
+        smb2-time.nse
+      ;;
+    snmp)
+      printf '%s\n' snmp-info.nse
+      ;;
+    ldap)
+      printf '%s\n' ldap-rootdse.nse
+      ;;
+    ftp)
+      printf '%s\n' \
+        ftp-anon.nse \
+        ftp-syst.nse
+      ;;
+    smtp)
+      printf '%s\n' \
+        smtp-commands.nse \
+        smtp-open-relay.nse
+      ;;
+    pop3)
+      printf '%s\n' pop3-capabilities.nse
+      ;;
+    imap)
+      printf '%s\n' imap-capabilities.nse
+      ;;
+    mysql)
+      printf '%s\n' mysql-info.nse
+      ;;
+    ms-sql)
+      printf '%s\n' ms-sql-info.nse
+      ;;
+    redis)
+      printf '%s\n' redis-info.nse
+      ;;
+    oracle)
+      printf '%s\n' oracle-tns-version.nse
+      ;;
+    nfs)
+      printf '%s\n' \
+        nfs-showmount.nse \
+        nfs-ls.nse \
+        nfs-statfs.nse
+      ;;
+    rpc)
+      printf '%s\n' rpcinfo.nse
+      ;;
+    rdp)
+      printf '%s\n' \
+        rdp-enum-encryption.nse \
+        rdp-ntlm-info.nse
+      ;;
+    rsync)
+      printf '%s\n' rsync-list-modules.nse
+      ;;
+    vnc)
+      printf '%s\n' vnc-info.nse
+      ;;
+    telnet)
+      printf '%s\n' telnet-encryption.nse
+      ;;
+    ntp)
+      printf '%s\n' ntp-info.nse
+      ;;
+  esac
+}
+
+generic_tcp_scripts() {
+  printf '%s\n' \
+    banner.nse \
+    fingerprint-strings.nse
 }
 
 build_relevant_nse_scripts() {
@@ -315,7 +405,6 @@ build_relevant_nse_scripts() {
   local family
   local scripts=()
   local families=()
-  local generic_tcp_csv="banner.nse,fingerprint-strings.nse,vulners.nse"
 
   while IFS= read -r family; do
     [ -n "$family" ] || continue
@@ -325,26 +414,22 @@ build_relevant_nse_scripts() {
     esac
   done < <(service_families_for_target "$service_name" "$port" "$proto")
 
-  if [ -n "$approved_csv" ]; then
+  for family in "${families[@]}"; do
     while IFS= read -r script; do
       [ -n "$script" ] || continue
-
-      for family in "${families[@]}"; do
-        if script_matches_family "$script" "$family"; then
-          scripts+=("$script")
-          break
-        fi
-      done
-    done < <(printf '%s\n' "$approved_csv" | tr ',' '\n')
-  fi
-
-  if [ "${#scripts[@]}" -eq 0 ] && [ "$proto" = "tcp" ]; then
-    while IFS= read -r script; do
-      [ -n "$script" ] || continue
-      if printf '%s\n' "$approved_csv" | tr ',' '\n' | grep -Fxq "$script"; then
-        scripts+=("$script")
+      if csv_contains_script "$approved_csv" "$script"; then
+          append_unique_script scripts "$script"
       fi
-    done < <(printf '%s\n' "$generic_tcp_csv" | tr ',' '\n')
+    done < <(high_roi_scripts_for_family "$family")
+  done
+
+  if [ "${#scripts[@]}" -eq 0 ] && [ "$proto" = "tcp" ] && [ -n "$approved_csv" ]; then
+    while IFS= read -r script; do
+      [ -n "$script" ] || continue
+      if csv_contains_script "$approved_csv" "$script"; then
+        append_unique_script scripts "$script"
+      fi
+    done < <(generic_tcp_scripts)
   fi
 
   if [ "${#scripts[@]}" -eq 0 ]; then

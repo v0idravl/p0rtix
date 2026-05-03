@@ -13,9 +13,11 @@ p0rtix automates the process of discovering open ports, enumerating services, an
 - **Web Enumeration**: HTTP/HTTPS header collection, robots.txt, sitemap, whatweb, gobuster directory enumeration on standard and non-standard web ports
 - **Service Enumeration**: Targeted checks for FTP, SSH, DNS, SMB, SNMP, RPC/NFS, WinRM, and more
 - **Vulnerability Scanning**: Service-specific NSE vuln scripts (excluding DoS)
+- **High-ROI NSE Defaults**: Uses a small curated NSE shortlist intended to add signal beyond `-sC` without producing a lot of duplicate noise
 - **Organized Output**: Results saved under `<project-root>/<machine-name>/output/{scans,web,services}/`
 - **Machine Workspace Bootstrap**: Creates per-machine `loot/`, `exploit/`, and report template files
 - **Safe Execution**: All scripts use `set -euo pipefail` for robust error handling
+- **Dependency Preflight**: Reports required and optional tooling before scans begin, with clear skip behavior for missing optional helpers
 
 ## Project Structure
 
@@ -112,6 +114,7 @@ Results are organized under `<project-root>/<machine-name>/`:
 ### main.sh (Orchestrator)
 - Defines the target
 - Creates machine workspace directories
+- Runs a dependency preflight for required and optional tools
 - Calls ports.sh for discovery
 - Conditionally calls web.sh if ports are identified as HTTP/HTTPS services
 - Conditionally calls services.sh if non-web ports are found
@@ -126,17 +129,18 @@ Results are organized under `<project-root>/<machine-name>/`:
 
 ### web.sh (Web Enumeration)
 - Runs a per-port baseline `-sV -sC` scan for each web service
+- Chooses `http://` vs `https://` for each port using detected service data, including common non-standard TLS ports
 - Collects HTTP headers
 - Fetches robots.txt, sitemap.xml, crossdomain.xml, etc.
 - Runs whatweb for technology fingerprinting
 - Runs gobuster directory enumeration (if wordlist available)
-- Runs the approved dynamic NSE set for that web port
+- Runs a fixed high-ROI NSE shortlist for that web port
 
 ### services.sh (Service Enumeration)
 - Runs a per-port baseline `-sV -sC` scan for each non-web TCP service
 - Records discovered UDP ports in a notes file and skips blanket UDP follow-up by default
 - Runs targeted UDP follow-up only for a small high-value allowlist
-- Runs the approved dynamic NSE set for each service port that receives follow-up scanning
+- Runs a fixed high-ROI NSE shortlist for each service port that receives follow-up scanning
 - Performs an extra `snmpwalk -v2c -c public` check on UDP 161
 
 ## Examples

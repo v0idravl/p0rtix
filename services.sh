@@ -80,7 +80,7 @@ run_port_nse_scan() {
   fi
 
   # Only hand Nmap the subset that matches the detected service family for this port.
-  run_scan_file "$output_file" nmap "$scan_flag" -sV --version-light --script "$scripts_csv" -p "$port"
+  run_scan_file "$output_file" nmap "$scan_flag" -sV --version-light -Pn --script "$scripts_csv" -p "$port"
 }
 
 run_port_baseline_scan() {
@@ -136,7 +136,7 @@ printf 'UDP ports discovered for %s\n' "$TARGET" > "$UDP_NOTES_FILE"
 printf 'Selective UDP follow-up allowlist: %s\n\n' "$UDP_FOLLOW_UP_PORTS" >> "$UDP_NOTES_FILE"
 if [ -n "$ALLOWED_NSE_SCRIPTS" ]; then
   script_count=$(printf '%s\n' "$ALLOWED_NSE_SCRIPTS" | tr ',' '\n' | awk 'NF {count++} END {print count+0}')
-  log_info "Approved NSE script count for per-port scans: $script_count"
+  log_info "Installed safe NSE script pool size: $script_count"
 fi
 
 IFS=',' read -r -a ports <<< "$PORTS"
@@ -185,8 +185,12 @@ for target_port in "${ports[@]}"; do
   # SNMP gets one extra manual pass because a public community string is common
   # enough to be worth a quick check outside of NSE.
   if [ "$proto" = "udp" ] && [ "$port" = "161" ]; then
-    log_info "SNMP public community walk"
-    run_capture_file "${OUTPUT_BASE_FILE}_${proto}_${port}_snmp_public.txt" snmpwalk -v 2c -c public "$TARGET"
+    if command -v snmpwalk >/dev/null 2>&1; then
+      log_info "SNMP public community walk"
+      run_capture_file "${OUTPUT_BASE_FILE}_${proto}_${port}_snmp_public.txt" snmpwalk -v 2c -c public "$TARGET"
+    else
+      log_warn "snmpwalk not found; skipping SNMP public community walk on $TARGET:$proto/$port"
+    fi
   fi
 
   run_port_nse_scan "${OUTPUT_BASE_FILE}_${proto}_${port}_nse.txt" "$relevant_nse_scripts"
