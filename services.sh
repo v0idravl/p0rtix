@@ -37,6 +37,8 @@ SKIP_INDIVIDUAL_TCP_PORTS_MIN=49152
 # scans by default.
 UDP_FOLLOW_UP_PORTS="${UDP_FOLLOW_UP_PORTS:-53,69,123,137,161,500,623}"
 UDP_NOTES_FILE="$SERVICE_DIR/${TARGET}_udp_notes.txt"
+ENUM4LINUX_DONE=false
+SHOWMOUNT_DONE=false
 
 run_scan_file() {
   local output_file="$1"
@@ -89,6 +91,42 @@ run_port_baseline_scan() {
   # Each service gets its own baseline -sV/-sC artifact so version data and
   # default-script output stay grouped with the port-specific follow-up NSE results.
   run_scan_file "$output_file" nmap "$scan_flag" -sV --version-light -sC -Pn -p "$port"
+}
+
+run_service_helper_checks() {
+  local proto="$1"
+  local port="$2"
+  local detected_service="$3"
+  local family
+
+  while IFS= read -r family; do
+    [ -n "$family" ] || continue
+
+    case "$family" in
+      smb)
+        if [ "$ENUM4LINUX_DONE" = false ]; then
+          if command -v enum4linux-ng >/dev/null 2>&1; then
+            log_info "Running enum4linux-ng against $TARGET"
+            run_capture_file "${OUTPUT_BASE_FILE}_smb_enum4linux.txt" enum4linux-ng -A "$TARGET"
+          else
+            log_warn "enum4linux-ng not found; skipping SMB helper enumeration on $TARGET"
+          fi
+          ENUM4LINUX_DONE=true
+        fi
+        ;;
+      nfs)
+        if [ "$SHOWMOUNT_DONE" = false ]; then
+          if command -v showmount >/dev/null 2>&1; then
+            log_info "Running showmount against $TARGET"
+            run_capture_file "${OUTPUT_BASE_FILE}_nfs_showmount.txt" showmount -e "$TARGET"
+          else
+            log_warn "showmount not found; skipping NFS export enumeration on $TARGET"
+          fi
+          SHOWMOUNT_DONE=true
+        fi
+        ;;
+    esac
+  done < <(service_families_for_target "$detected_service" "$port" "$proto")
 }
 
 csv_contains_value() {
@@ -181,6 +219,7 @@ for target_port in "${ports[@]}"; do
   else
     log_info "No service name detected for $TARGET:$proto/$port; falling back to generic matching"
   fi
+  run_service_helper_checks "$proto" "$port" "$detected_service"
 
   # SNMP gets one extra manual pass because a public community string is common
   # enough to be worth a quick check outside of NSE.

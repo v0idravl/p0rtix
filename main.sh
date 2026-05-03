@@ -67,6 +67,8 @@ preflight_dependencies() {
   optional_command whatweb "web fingerprinting"
   optional_command gobuster "directory enumeration"
   optional_command snmpwalk "SNMP public community probe"
+  optional_command enum4linux-ng "SMB enumeration"
+  optional_command showmount "NFS export enumeration"
 
   if [ "$missing_required" -ne 0 ]; then
     log_warn "Required dependencies are missing. Exiting."

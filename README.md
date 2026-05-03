@@ -44,13 +44,15 @@ p0rtix/
 - **gobuster**: Directory enumeration (optional, requires wordlist)
 - **whatweb**: Web technology fingerprinting
 - **snmpwalk**: SNMP enumeration
+- **enum4linux-ng**: SMB enumeration
+- **showmount**: NFS export enumeration
 - **curl**: HTTP requests
 - **xmllint**: XML formatting (optional)
 
 Install on Debian/Ubuntu:
 ```bash
 sudo apt update
-sudo apt install nmap gobuster whatweb snmp snmp-mibs-downloader curl libxml2-utils
+sudo apt install nmap gobuster whatweb snmp snmp-mibs-downloader enum4linux-ng nfs-common curl libxml2-utils
 ```
 
 For gobuster wordlist:
@@ -141,6 +143,8 @@ Results are organized under `<project-root>/<machine-name>/`:
 - Records discovered UDP ports in a notes file and skips blanket UDP follow-up by default
 - Runs targeted UDP follow-up only for a small high-value allowlist
 - Runs a fixed high-ROI NSE shortlist for each service port that receives follow-up scanning
+- Runs `enum4linux-ng -A` once when SMB is identified
+- Runs `showmount -e` once when NFS is identified
 - Performs an extra `snmpwalk -v2c -c public` check on UDP 161
 
 ## Examples
