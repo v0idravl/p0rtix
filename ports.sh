@@ -5,7 +5,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="${1:-}"
 OUTPUT_BASE="${2:-}"
 source "$SCRIPT_DIR/log_utils.sh"
-source "$SCRIPT_DIR/nse_utils.sh"
 
 usage() {
   cat <<USAGE
@@ -82,13 +81,21 @@ write_port_files() {
 is_web_service() {
   local port="$1"
   local service_name="$2"
-  local family
+  local normalized
 
-  while IFS= read -r family; do
-    if [ "$family" = "http" ]; then
+  normalized="$(printf '%s' "$service_name" | tr '[:upper:]' '[:lower:]')"
+
+  case "$normalized" in
+    http|http-alt|http-proxy|https|https-alt|ssl/http|sun-answerbook)
       return 0
-    fi
-  done < <(service_families_for_target "$service_name" "$port" tcp)
+      ;;
+  esac
+
+  case "$port" in
+    80|81|280|443|591|593|8000|8008|8080|8081|8082|8088|8443|8888|9000|9443)
+      return 0
+      ;;
+  esac
 
   return 1
 }

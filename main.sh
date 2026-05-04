@@ -62,13 +62,8 @@ preflight_dependencies() {
   log_info "Running dependency preflight"
 
   require_command nmap || missing_required=1
-  optional_command curl "HTTP fetches and report template download fallback"
-  optional_command wget "report template download"
+  optional_command curl "HTTP header and robots.txt checks"
   optional_command whatweb "web fingerprinting"
-  optional_command gobuster "directory enumeration"
-  optional_command snmpwalk "SNMP public community probe"
-  optional_command enum4linux-ng "SMB enumeration"
-  optional_command showmount "NFS export enumeration"
 
   if [ "$missing_required" -ne 0 ]; then
     log_warn "Required dependencies are missing. Exiting."
@@ -85,22 +80,10 @@ sanitize_machine_name() {
 }
 
 if [ -z "$TARGET" ]; then
-  read -rp "Target IP/hostname: " TARGET
-fi
-
-if [ -z "$TARGET" ]; then
-  log_warn "No target provided. Exiting."
-  exit 1
-fi
-
-if [ -z "$PROJECT_ROOT" ]; then
-  read -rp "Project root directory [$SCRIPT_DIR]: " PROJECT_ROOT
+  usage
 fi
 PROJECT_ROOT="${PROJECT_ROOT:-$SCRIPT_DIR}"
 
-if [ -z "$MACHINE_NAME" ]; then
-  read -rp "Machine nickname [$(sanitize_machine_name "$TARGET")]: " MACHINE_NAME
-fi
 MACHINE_NAME="${MACHINE_NAME:-$(sanitize_machine_name "$TARGET")}"
 MACHINE_NAME="$(sanitize_machine_name "$MACHINE_NAME")"
 
@@ -116,35 +99,8 @@ OUTPUT_BASE="$MACHINE_ROOT/output"
 SCANS_DIR="$OUTPUT_BASE/scans"
 WEB_DIR="$OUTPUT_BASE/web"
 SERVICES_DIR="$OUTPUT_BASE/services"
-LOOT_DIR="$MACHINE_ROOT/loot"
-EXPLOIT_DIR="$MACHINE_ROOT/exploit"
-REPORT_FILE="$MACHINE_ROOT/${MACHINE_NAME}_report.md"
-REPORT_TEMPLATE_URL="https://raw.githubusercontent.com/v0idravl/lab-writeups/refs/heads/main/writeup-template.md"
 
-# Create the full output tree up front so downstream scripts can assume it exists.
-mkdir -p "$SCANS_DIR" "$WEB_DIR" "$SERVICES_DIR" "$LOOT_DIR" "$EXPLOIT_DIR"
-
-if [ ! -f "$REPORT_FILE" ]; then
-  if command -v wget >/dev/null 2>&1; then
-    if wget -qO "$REPORT_FILE" "$REPORT_TEMPLATE_URL"; then
-      log_info "Created report template: ${MACHINE_NAME}_report.md"
-    else
-      rm -f "$REPORT_FILE"
-      log_warn "Failed to download report template from $REPORT_TEMPLATE_URL"
-    fi
-  elif command -v curl >/dev/null 2>&1; then
-    if curl -fsSL "$REPORT_TEMPLATE_URL" -o "$REPORT_FILE"; then
-      log_info "Created report template: ${MACHINE_NAME}_report.md"
-    else
-      rm -f "$REPORT_FILE"
-      log_warn "Failed to download report template from $REPORT_TEMPLATE_URL"
-    fi
-  else
-    log_warn "Neither wget nor curl is installed; skipping report template download."
-  fi
-else
-  log_info "Using existing report template: ${MACHINE_NAME}_report.md"
-fi
+mkdir -p "$SCANS_DIR" "$WEB_DIR" "$SERVICES_DIR"
 
 csv_from_port_file() {
   local file_path="$1"

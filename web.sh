@@ -6,7 +6,6 @@ PORTS="${2:-}"
 OUTPUT_BASE="${3:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/log_utils.sh"
-source "$SCRIPT_DIR/nse_utils.sh"
 
 usage() {
   cat <<EOF
@@ -25,60 +24,47 @@ fi
 WEB_DIR="$OUTPUT_BASE/web"
 mkdir -p "$WEB_DIR"
 NMAP_STATS_EVERY="${NMAP_STATS_EVERY:-3m}"
-# Web ports reuse the same approved NSE policy as non-web service ports.
-ALLOWED_NSE_SCRIPTS="$(load_allowed_nse_scripts)"
 HAS_CURL=false
+
 if command -v curl >/dev/null 2>&1; then
   HAS_CURL=true
 else
-  log_warn "curl not found; header and file-fetch web checks will be skipped"
-fi
-
-WORDLIST=""
-for candidate in \
-  "/usr/share/seclists/Discovery/Web-Content/raft-medium-words.txt" \
-  "/usr/share/seclists/Discovery/Web-Content/common.txt" \
-  "/usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt"
-do
-  if [ -f "$candidate" ]; then
-    WORDLIST="$candidate"
-    break
-  fi
-done
-
-AVAILABLE_WORDLIST=true
-if [ -z "$WORDLIST" ]; then
-  log_warn "No suitable web content wordlist found under /usr/share/seclists/Discovery/Web-Content/"
-  AVAILABLE_WORDLIST=false
+  log_warn "curl not found; header and robots.txt checks will be skipped"
 fi
 
 run_capture() {
   local output_file="$1"
   shift
   local status=0
+
   set +e
-  # Mirror command output to disk so quick web checks are easy to inspect later.
   "$@" 2>&1 | tee "$output_file"
   status=${PIPESTATUS[0]}
   set -e
+
   if [ "$status" -ne 0 ]; then
     log_warn "Command failed with exit code $status while writing $output_file"
   fi
+
   return 0
 }
 
-capture_headers() {
+run_nmap_file() {
   local output_file="$1"
-  local url="$2"
+  shift
   local status=0
 
   set +e
-  curl -sS -I -L --max-time 15 "$url" 2>&1 | tee "$output_file"
+  "$@" --stats-every "$NMAP_STATS_EVERY" -oN - "$TARGET" 2>&1 | tee "$output_file"
   status=${PIPESTATUS[0]}
   set -e
-  if [ "$status" -ne 0 ]; then
-    log_warn "Command failed with exit code $status while writing $output_file"
+
+  if [ "$status" -eq 139 ]; then
+    log_warn "Scan crashed with a segmentation fault while writing $output_file"
+  elif [ "$status" -ne 0 ]; then
+    log_warn "Scan failed with exit code $status while writing $output_file"
   fi
+
   return 0
 }
 
@@ -113,65 +99,60 @@ fetch_if_present() {
   return 0
 }
 
-run_nmap_file() {
-  local output_file="$1"
-  shift
-  local status=0
-  set +e
-  # Web NSE output gets the same tee-to-file treatment as the service scans.
-  "$@" --stats-every "$NMAP_STATS_EVERY" -oN - "$TARGET" 2>&1 | tee "$output_file"
-  status=${PIPESTATUS[0]}
-  set -e
-  if [ "$status" -eq 139 ]; then
-    log_warn "Scan crashed with a segmentation fault while writing $output_file"
-  elif [ "$status" -ne 0 ]; then
-    log_warn "Scan failed with exit code $status while writing $output_file"
-  fi
-  return 0
+web_scheme_for_port() {
+  local service_name="$1"
+  local port="$2"
+  local normalized
+
+  normalized="$(printf '%s' "$service_name" | tr '[:upper:]' '[:lower:]')"
+
+  case "$normalized" in
+    https|https-alt|ssl/http|ssl|ssl/*|tls|tls/*)
+      printf '%s\n' "https"
+      return 0
+      ;;
+    http|http-alt|http-proxy|sun-answerbook)
+      printf '%s\n' "http"
+      return 0
+      ;;
+  esac
+
+  case "$port" in
+    443|8443|9443)
+      printf '%s\n' "https"
+      ;;
+    *)
+      printf '%s\n' "http"
+      ;;
+  esac
 }
 
-run_port_nse_scan() {
-  local output_file="$1"
-  local scripts_csv="$2"
+extract_detected_service() {
+  local baseline_file="$1"
+  local port="$2"
 
-  if [ -z "$scripts_csv" ]; then
-    log_info "No relevant NSE scripts selected for $(basename "$output_file")"
-    return 0
-  fi
-
-  # Web ports still use the shared approved pool, but only after it has been narrowed
-  # to scripts that actually fit the detected service family for this port.
-  run_nmap_file "$output_file" nmap -sV --version-light -Pn --script "$scripts_csv" -p "$port"
-}
-
-run_port_baseline_scan() {
-  local output_file="$1"
-
-  # Keep the standard Nmap service/version view beside the rest of the HTTP recon
-  # so each web port has one cohesive folder of artifacts.
-  run_nmap_file "$output_file" nmap -sS -sV --version-light -sC -Pn -p "$port"
+  awk -v target="$port/tcp" '
+    $1 == target {
+      print $3
+      exit
+    }
+  ' "$baseline_file" 2>/dev/null
 }
 
 run_http_checks() {
   local port="$1"
   local url
   local scheme
+  local detected_service
   local output_base="$WEB_DIR/${TARGET}_${port}"
 
   log_info "Running web checks for $TARGET:$port"
-  mkdir -p "$(dirname "$output_base")"
 
-  log_info "Baseline service scan"
   baseline_output="${output_base}_baseline.txt"
-  run_port_baseline_scan "$baseline_output"
-  detected_service="$(extract_detected_service "$baseline_output" "$port" tcp)"
-  relevant_nse_scripts="$(build_relevant_nse_scripts "$ALLOWED_NSE_SCRIPTS" "$detected_service" "$port" tcp)"
-  if [ -n "$detected_service" ]; then
-    log_info "Detected service for $TARGET:$port: $detected_service"
-  else
-    log_info "No service name detected for $TARGET:$port; falling back to generic matching"
-  fi
-  scheme="$(web_scheme_for_target "$detected_service" "$port")"
+  run_nmap_file "$baseline_output" nmap -n -sS -sV --version-light -sC -Pn -p "$port"
+
+  detected_service="$(extract_detected_service "$baseline_output" "$port")"
+  scheme="$(web_scheme_for_port "$detected_service" "$port")"
 
   if [ "$port" = "80" ] && [ "$scheme" = "http" ]; then
     url="$scheme://$TARGET"
@@ -180,12 +161,15 @@ run_http_checks() {
   else
     url="$scheme://$TARGET:$port"
   fi
+
   log_info "Using $scheme for $TARGET:$port"
 
-  # These lightweight fetches give quick wins before any deeper directory or NSE work.
   if [ "$HAS_CURL" = true ]; then
     log_info "Headers"
-    capture_headers "${output_base}_headers.txt" "$url"
+    run_capture "${output_base}_headers.txt" curl -sS -I -L --max-time 15 "$url"
+
+    log_info "robots.txt"
+    fetch_if_present "${output_base}_robots.txt" "$url/robots.txt" "robots.txt"
   fi
 
   if command -v whatweb >/dev/null 2>&1; then
@@ -194,35 +178,6 @@ run_http_checks() {
   else
     log_warn "whatweb not found; skipping fingerprinting for $url"
   fi
-  
-  if [ "$HAS_CURL" = true ]; then
-    log_info "robots.txt"
-    fetch_if_present "${output_base}_robots.txt" "$url/robots.txt" "robots.txt"
-
-    log_info "sitemap.xml"
-    fetch_if_present "${output_base}_sitemap.xml" "$url/sitemap.xml" "sitemap.xml"
-
-    log_info "crossdomain.xml"
-    fetch_if_present "${output_base}_crossdomain.xml" "$url/crossdomain.xml" "crossdomain.xml"
-
-    log_info "clientaccesspolicy.xml"
-    fetch_if_present "${output_base}_clientaccesspolicy.xml" "$url/clientaccesspolicy.xml" "clientaccesspolicy.xml"
-
-    log_info ".well-known"
-    fetch_if_present "${output_base}_well_known.txt" "$url/.well-known/" ".well-known"
-  fi
-
-  if [ "$AVAILABLE_WORDLIST" = true ]; then
-    if command -v gobuster >/dev/null 2>&1; then
-      log_info "Gobuster dir"
-      run_capture "${output_base}_gobuster_dir.txt" gobuster dir -u "$url" -w "$WORDLIST"
-    else
-      log_warn "gobuster not found; skipping directory enumeration for $url"
-    fi
-  fi
-
-  log_info "Port-specific approved NSE scripts"
-  run_port_nse_scan "${output_base}_nse.txt" "$relevant_nse_scripts"
 }
 
 for port in $(printf '%s\n' "$PORTS" | tr ',' ' '); do
