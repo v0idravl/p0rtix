@@ -78,6 +78,18 @@ write_port_files() {
   fi
 }
 
+extract_detected_service() {
+  local service_scan_file="$1"
+  local port="$2"
+
+  awk -v target="$port/tcp" '
+    $1 == target {
+      print $3
+      exit
+    }
+  ' "$service_scan_file" 2>/dev/null
+}
+
 is_web_service() {
   local port="$1"
   local service_name="$2"
