@@ -27,25 +27,6 @@ NMAP_STATS_EVERY="${NMAP_STATS_EVERY:-3m}"
 TCP_PORTS=()
 UDP_PORTS=()
 
-run_scan_file() {
-  local output_file="$1"
-  shift
-  local status=0
-
-  set +e
-  "$@" --stats-every "$NMAP_STATS_EVERY" -oN - "$TARGET" 2>&1 | tee "$output_file"
-  status=${PIPESTATUS[0]}
-  set -e
-
-  if [ "$status" -eq 139 ]; then
-    log_warn "Scan crashed with a segmentation fault while writing $output_file"
-  elif [ "$status" -ne 0 ]; then
-    log_warn "Scan failed with exit code $status while writing $output_file"
-  fi
-
-  return 0
-}
-
 append_port() {
   local -n target_array="$1"
   local port="$2"

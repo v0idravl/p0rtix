@@ -38,31 +38,12 @@ run_capture() {
   local status=0
 
   set +e
-  "$@" 2>&1 | tee "$output_file"
+  "$@" | tee "$output_file"
   status=${PIPESTATUS[0]}
   set -e
 
   if [ "$status" -ne 0 ]; then
     log_warn "Command failed with exit code $status while writing $output_file"
-  fi
-
-  return 0
-}
-
-run_nmap_file() {
-  local output_file="$1"
-  shift
-  local status=0
-
-  set +e
-  "$@" --stats-every "$NMAP_STATS_EVERY" -oN - "$TARGET" 2>&1 | tee "$output_file"
-  status=${PIPESTATUS[0]}
-  set -e
-
-  if [ "$status" -eq 139 ]; then
-    log_warn "Scan crashed with a segmentation fault while writing $output_file"
-  elif [ "$status" -ne 0 ]; then
-    log_warn "Scan failed with exit code $status while writing $output_file"
   fi
 
   return 0
@@ -78,7 +59,7 @@ fetch_if_present() {
 
   temp_file="$(mktemp)"
   set +e
-  http_code="$(curl -sS --max-time 15 -o "$temp_file" -w '%{http_code}' "$url")"
+  http_code="$(curl -sS -L --max-time 15 -o "$temp_file" -w '%{http_code}' "$url")"
   status=$?
   set -e
 
@@ -127,18 +108,6 @@ web_scheme_for_port() {
   esac
 }
 
-extract_detected_service() {
-  local baseline_file="$1"
-  local port="$2"
-
-  awk -v target="$port/tcp" '
-    $1 == target {
-      print $3
-      exit
-    }
-  ' "$baseline_file" 2>/dev/null
-}
-
 run_http_checks() {
   local port="$1"
   local url
@@ -149,7 +118,7 @@ run_http_checks() {
   log_info "Running web checks for $TARGET:$port"
 
   baseline_output="${output_base}_baseline.txt"
-  run_nmap_file "$baseline_output" nmap -n -sS -sV --version-light -sC -Pn -p "$port"
+  run_scan_file "$baseline_output" nmap -n -sS -sV --version-light -sC -Pn -p "$port"
 
   detected_service="$(extract_detected_service "$baseline_output" "$port")"
   scheme="$(web_scheme_for_port "$detected_service" "$port")"

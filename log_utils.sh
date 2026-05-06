@@ -12,11 +12,44 @@ if [ -t 1 ] && [ "${TERM:-}" != "dumb" ] && [ -z "${NO_COLOR:-}" ]; then
 fi
 
 log_info() {
-  # Standard user-facing status line for normal progress updates.
   printf '%s[*]%s %s\n' "$LOG_INFO_COLOR" "$LOG_RESET_COLOR" "$*"
 }
 
 log_warn() {
-  # Warnings go to stderr so they still stand out in pipelines and tee output.
-  printf '%s[*]%s %s\n' "$LOG_WARN_COLOR" "$LOG_RESET_COLOR" "$*" >&2
+  printf '%s[!]%s %s\n' "$LOG_WARN_COLOR" "$LOG_RESET_COLOR" "$*" >&2
+}
+
+# Shared nmap wrapper: appends --stats-every and -oN - to the given nmap command,
+# tees output to output_file, and tolerates non-zero exit codes (including segfaults).
+# Callers must have NMAP_STATS_EVERY and TARGET set in their environment.
+run_scan_file() {
+  local output_file="$1"
+  shift
+  local status=0
+
+  set +e
+  "$@" --stats-every "$NMAP_STATS_EVERY" -oN - "$TARGET" 2>&1 | tee "$output_file"
+  status=${PIPESTATUS[0]}
+  set -e
+
+  if [ "$status" -eq 139 ]; then
+    log_warn "Scan crashed with a segmentation fault while writing $output_file"
+  elif [ "$status" -ne 0 ]; then
+    log_warn "Scan failed with exit code $status while writing $output_file"
+  fi
+
+  return 0
+}
+
+# Extract the service name for a given TCP port from an nmap -oN output file.
+extract_detected_service() {
+  local scan_file="$1"
+  local port="$2"
+
+  awk -v target="$port/tcp" '
+    $1 == target {
+      print $3
+      exit
+    }
+  ' "$scan_file" 2>/dev/null
 }

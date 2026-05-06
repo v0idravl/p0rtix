@@ -28,6 +28,7 @@ FULL_TCP_BASE="$SCAN_DIR/full_tcp"
 UDP_BASE="$SCAN_DIR/top_100_udp"
 TCP_SERVICE_BASE="$SCAN_DIR/open_tcp_services"
 NMAP_STATS_EVERY="${NMAP_STATS_EVERY:-3m}"
+NMAP_MIN_RATE="${NMAP_MIN_RATE:-2000}"
 
 extract_ports_from_gnmap() {
   local gnmap_file="$1"
@@ -78,18 +79,6 @@ write_port_files() {
   fi
 }
 
-extract_detected_service() {
-  local service_scan_file="$1"
-  local port="$2"
-
-  awk -v target="$port/tcp" '
-    $1 == target {
-      print $3
-      exit
-    }
-  ' "$service_scan_file" 2>/dev/null
-}
-
 is_web_service() {
   local port="$1"
   local service_name="$2"
@@ -104,7 +93,7 @@ is_web_service() {
   esac
 
   case "$port" in
-    80|81|280|443|591|593|8000|8008|8080|8081|8082|8088|8443|8888|9000|9443)
+    80|81|280|443|591|593|3000|5000|8000|8008|8080|8081|8082|8088|8443|8888|9000|9090|9443)
       return 0
       ;;
   esac
@@ -121,7 +110,7 @@ classify_tcp_ports() {
   local non_web_ports=()
 
   for port in $(printf '%s\n' "$open_tcp_ports_csv" | tr ',' ' '); do
-    detected_service="$(extract_detected_service "$service_scan_file" "$port" tcp)"
+    detected_service="$(extract_detected_service "$service_scan_file" "$port")"
     if is_web_service "$port" "$detected_service"; then
       web_ports+=("$port")
     else
@@ -148,7 +137,7 @@ log_info "Running discovery scans for $TARGET"
 
 log_info "Running full TCP discovery scan"
 nmap -n --reason -sS -Pn -p- --open \
-  --min-rate 2000 --max-retries 2 --stats-every "$NMAP_STATS_EVERY" \
+  --min-rate "$NMAP_MIN_RATE" --max-retries 2 --stats-every "$NMAP_STATS_EVERY" \
   -oA "$FULL_TCP_BASE" "$TARGET"
 
 log_info "Running top 100 UDP scan"

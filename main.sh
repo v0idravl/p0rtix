@@ -168,3 +168,9 @@ fi
 
 # At this point the run is complete; everything else is already on disk.
 log_info "Orchestration complete. Outputs saved under $OUTPUT_BASE"
+
+printf '\n'
+log_info "=== Summary for $TARGET ==="
+log_info "  Web ports    : ${WEB_PORTS:-none}"
+log_info "  Service ports: ${NON_WEB_PORTS:-none}"
+log_info "  UDP ports    : ${NON_WEB_UDP_PORTS:-none}"
