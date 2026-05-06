@@ -12,6 +12,7 @@ It does:
 - Lightweight TCP service classification
 - Basic non-web follow-up scans
 - Basic web follow-up scans
+- End-of-run summary of discovered ports by category
 
 It does not try to do:
 - Workspace bootstrapping
@@ -29,7 +30,7 @@ p0rtix/
 ├── ports.sh      # Discovery and web/non-web classification
 ├── services.sh   # Lightweight batch follow-up for non-web ports
 ├── web.sh        # Lightweight follow-up for web ports
-├── log_utils.sh  # Shared logging helpers
+├── log_utils.sh  # Shared logging, scan wrapper, and service extraction helpers
 └── README.md
 ```
 
@@ -66,6 +67,14 @@ Examples:
 
 You must provide the target explicitly. If `project-root-dir` is omitted, the repository directory is used. If `machine-nickname` is omitted, a sanitized form of the target is used.
 
+## Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `NMAP_STATS_EVERY` | `3m` | How often nmap prints progress stats |
+| `NMAP_MIN_RATE` | `2000` | Minimum packet rate for the full TCP discovery scan |
+| `NO_COLOR` | unset | Set to any value to disable coloured log output |
+
 ## Output Structure
 
 Results are written under:
@@ -81,10 +90,8 @@ Typical outputs:
 
 - `output/scans/full_tcp.*`
 - `output/scans/top_100_udp.*`
+- `output/scans/udp_confirmed.*`
 - `output/scans/open_tcp_services.nmap`
-- `output/scans/web_ports.txt`
-- `output/scans/non_web_ports.txt`
-- `output/scans/non_web_udp_ports.txt`
 - `output/services/<target>_services_tcp_baseline.txt`
 - `output/services/<target>_services_udp_baseline.txt`
 - `output/web/<target>_<port>_baseline.txt`
@@ -95,17 +102,17 @@ Typical outputs:
 ## What Each Script Does
 
 ### `main.sh`
-- Validates arguments
-- Creates the output directories
-- Runs discovery
-- Runs lightweight non-web follow-up if non-web ports are found
-- Runs lightweight web follow-up if web ports are found
+- Validates arguments and dependencies
+- Creates the output directory tree
+- Runs discovery, then routes results to service and web follow-ups
+- Prints a summary of discovered web, service, and UDP ports on completion
 
 ### `ports.sh`
 - Runs a full TCP scan
 - Runs a top 100 UDP scan
 - Runs a lightweight TCP service classification scan
 - Splits open TCP ports into web and non-web buckets
+- Web bucket covers standard ports (80, 443, 8080, 8443, …) plus common dev/alt ports (3000, 5000, 9090, …)
 
 ### `services.sh`
 - Runs one batch TCP baseline follow-up scan for non-web TCP ports
@@ -113,16 +120,22 @@ Typical outputs:
 
 ### `web.sh`
 - Runs a baseline `-sC -sV` scan for each detected web port
-- Chooses `http` or `https` heuristically
+- Chooses `http` or `https` heuristically based on service name and port
 - Captures HTTP headers when `curl` is available
-- Fetches `robots.txt` when `curl` is available
+- Fetches `robots.txt` when `curl` is available (follows redirects)
 - Runs `whatweb` when installed
+
+### `log_utils.sh`
+- `log_info` / `log_warn` — coloured status output (`[*]` / `[!]`), `NO_COLOR`-aware
+- `run_scan_file` — shared nmap wrapper used by `services.sh` and `web.sh`
+- `extract_detected_service` — parses an nmap `-oN` file to retrieve a service name for a given port
 
 ## Notes
 
 - The default workflow is meant to be fast and low-complexity.
 - Deeper enumeration is expected to be manual or handled by separate tooling.
 - Missing optional tools are reported and skipped cleanly.
+- Lower `NMAP_MIN_RATE` on flaky VPN connections to reduce packet loss.
 
 ## License
 

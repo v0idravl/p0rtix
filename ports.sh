@@ -2,30 +2,31 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET="${1:-}"
-OUTPUT_BASE="${2:-}"
 source "$SCRIPT_DIR/log_utils.sh"
 
-usage() {
-  cat <<USAGE
+# When run directly, parse arguments. When sourced by main.sh, TARGET and
+# OUTPUT_BASE are already in scope.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  TARGET="${1:-}"
+  OUTPUT_BASE="${2:-}"
+
+  if [ -z "$TARGET" ] || [ -z "$OUTPUT_BASE" ]; then
+    cat <<USAGE
 Usage: $0 <target-ip-or-hostname> <output-base-dir>
 
 Example:
   $0 10.10.10.10 /home/user/Projects/p0rtix/output/10.10.10.10
 USAGE
-  exit 1
-}
-
-if [ -z "$TARGET" ] || [ -z "$OUTPUT_BASE" ]; then
-  usage
+    exit 1
+  fi
 fi
 
 SCAN_DIR="$OUTPUT_BASE/scans"
 mkdir -p "$SCAN_DIR"
 
-# Keep the raw nmap artifacts grouped by scan purpose for easier review later.
 FULL_TCP_BASE="$SCAN_DIR/full_tcp"
 UDP_BASE="$SCAN_DIR/top_100_udp"
+UDP_CONFIRMED_BASE="$SCAN_DIR/udp_confirmed"
 TCP_SERVICE_BASE="$SCAN_DIR/open_tcp_services"
 NMAP_STATS_EVERY="${NMAP_STATS_EVERY:-3m}"
 NMAP_MIN_RATE="${NMAP_MIN_RATE:-2000}"
@@ -55,28 +56,6 @@ extract_ports_from_gnmap() {
       }
     }
   ' "$gnmap_file" | sort -nu
-}
-
-write_port_files() {
-  local ports_csv="$1"
-  local txt_file="$2"
-  local csv_file="${3:-}"
-
-  # Write both one-port-per-line and CSV variants so later steps can use whichever
-  # format is more convenient without reparsing the raw nmap output.
-  if [ -n "$ports_csv" ]; then
-    printf '%s\n' "$ports_csv" | tr ',' '\n' > "$txt_file"
-  else
-    : > "$txt_file"
-  fi
-
-  if [ -n "$csv_file" ]; then
-    if [ -n "$ports_csv" ]; then
-      printf '%s\n' "$ports_csv" > "$csv_file"
-    else
-      : > "$csv_file"
-    fi
-  fi
 }
 
 is_web_service() {
@@ -141,15 +120,26 @@ nmap -n --reason -sS -Pn -p- --open \
   -oA "$FULL_TCP_BASE" "$TARGET"
 
 log_info "Running top 100 UDP scan"
-nmap -n -sU -T4 -Pn --top-ports 100 --stats-every "$NMAP_STATS_EVERY" \
+# T3 (not T4) gives nmap enough time to receive ICMP port-unreachable replies,
+# so genuinely closed ports are marked closed rather than open|filtered.
+nmap -n -sU -T3 -Pn --top-ports 100 --stats-every "$NMAP_STATS_EVERY" \
   -oA "$UDP_BASE" "$TARGET"
 
-# TCP requires strictly open ports; UDP often leaves us with open|filtered.
 OPEN_TCP_PORTS="$(extract_ports_from_gnmap "$FULL_TCP_BASE.gnmap" tcp | paste -sd, -)"
-OPEN_UDP_PORTS="$(extract_ports_from_gnmap "$UDP_BASE.gnmap" udp 1 | paste -sd, -)"
 
-write_port_files "$OPEN_TCP_PORTS" "$SCAN_DIR/open_tcp_ports.txt" "$SCAN_DIR/open_tcp_ports.csv"
-write_port_files "$OPEN_UDP_PORTS" "$SCAN_DIR/open_udp_ports.txt" "$SCAN_DIR/open_udp_ports.csv"
+# Collect open + open|filtered candidates from the discovery sweep, then run a
+# lightweight version scan to confirm. Ports that respond to a service probe are
+# promoted to strictly open; everything else is discarded as noise.
+UDP_CANDIDATES="$(extract_ports_from_gnmap "$UDP_BASE.gnmap" udp 1 | paste -sd, -)"
+
+if [ -n "$UDP_CANDIDATES" ]; then
+  log_info "Confirming UDP candidates via version detection: $UDP_CANDIDATES"
+  nmap -n -sU -sV --version-intensity 0 -Pn -p "$UDP_CANDIDATES" \
+    --stats-every "$NMAP_STATS_EVERY" -oA "$UDP_CONFIRMED_BASE" "$TARGET"
+  OPEN_UDP_PORTS="$(extract_ports_from_gnmap "$UDP_CONFIRMED_BASE.gnmap" udp 0 | paste -sd, -)"
+else
+  OPEN_UDP_PORTS=""
+fi
 
 if [ -n "$OPEN_TCP_PORTS" ]; then
   log_info "Running lightweight TCP service classification scan"
@@ -164,8 +154,6 @@ else
   NON_WEB_PORTS=""
 fi
 
-write_port_files "$WEB_PORTS" "$SCAN_DIR/web_ports.txt"
-write_port_files "$NON_WEB_PORTS" "$SCAN_DIR/non_web_ports.txt"
-write_port_files "$OPEN_UDP_PORTS" "$SCAN_DIR/non_web_udp_ports.txt"
+NON_WEB_UDP_PORTS="$OPEN_UDP_PORTS"
 
 log_info "Discovery complete. Scan results saved under $SCAN_DIR"

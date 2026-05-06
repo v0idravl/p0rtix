@@ -6,12 +6,12 @@ cat << 'EOF'
 ██▓███   ▒█████   ██▀███  ▄▄▄█████▓ ██▓▒███  ██▒
 ▓██░  ██▒▒██▒  ██▒▓██ ▒ ██▒▓  ██▒ ▓▒▓██▒▒▒ █ █ ▒░
 ▓██░ ██▓▒▒██░  ██▒▓██ ░▄█ ▒▒ ▓██░ ▒░▒██▒░░  █   ░
-▒██▄█▓▒ ▒▒██   ██░▒██▀▀█▄  ░ ▓██▓ ░ ░██░ ░ █ █ ▒ 
+▒██▄█▓▒ ▒▒██   ██░▒██▀▀█▄  ░ ▓██▓ ░ ░██░ ░ █ █ ▒
 ▒██▒ ░  ░░ ████▓▒░░██▓ ▒██▒  ▒██▒ ░ ░██░▒██▒ ▒██▒
 ▒▓▒░ ░  ░░ ▒░▒░▒░ ░ ▒▓ ░▒▓░  ▒ ░░   ░▓  ▒▒ ░ ░▓ ░
 ░▒ ░       ░ ▒ ▒░   ░▒ ░ ▒░    ░     ▒ ░░░   ░▒ ░
-░░       ░ ░ ░ ▒    ░░   ░   ░       ▒ ░ ░    ░  
-             ░ ░     ░               ░   ░    ░  
+░░       ░ ░ ░ ▒    ░░   ░   ░       ▒ ░ ░    ░
+             ░ ░     ░               ░   ░    ░
 
 by v0idravl
 
@@ -96,54 +96,16 @@ preflight_dependencies
 
 MACHINE_ROOT="$PROJECT_ROOT/$MACHINE_NAME"
 OUTPUT_BASE="$MACHINE_ROOT/output"
-SCANS_DIR="$OUTPUT_BASE/scans"
-WEB_DIR="$OUTPUT_BASE/web"
-SERVICES_DIR="$OUTPUT_BASE/services"
-
-mkdir -p "$SCANS_DIR" "$WEB_DIR" "$SERVICES_DIR"
-
-csv_from_port_file() {
-  local file_path="$1"
-
-  if [ ! -f "$file_path" ]; then
-    printf '%s' ""
-    return 0
-  fi
-
-  # Normalize plain-text port lists back into a clean CSV for the child scripts.
-  awk '
-    /^[[:space:]]*$/ {
-      next
-    }
-    /^[[:space:]]*[0-9]+[[:space:]]*$/ {
-      port = $1 + 0
-      if (port >= 1 && port <= 65535) {
-        print port
-      }
-    }
-  ' "$file_path" | paste -sd, -
-}
 
 log_info "Starting scan for $TARGET | Workspace: $MACHINE_ROOT | Output: $OUTPUT_BASE"
 
-# Discovery writes the canonical port lists used by the rest of the pipeline.
-"$SCRIPT_DIR/ports.sh" "$TARGET" "$OUTPUT_BASE"
+# Source ports.sh so WEB_PORTS, NON_WEB_PORTS, and NON_WEB_UDP_PORTS are set
+# directly in this scope — no intermediate port files needed.
+source "$SCRIPT_DIR/ports.sh"
 
-WEB_PORTS_FILE="$SCANS_DIR/web_ports.txt"
-NON_WEB_PORTS_FILE="$SCANS_DIR/non_web_ports.txt"
-NON_WEB_UDP_PORTS_FILE="$SCANS_DIR/non_web_udp_ports.txt"
-
-WEB_PORTS=""
-NON_WEB_PORTS=""
-NON_WEB_UDP_PORTS=""
 SERVICE_TARGETS=""
 
-WEB_PORTS="$(csv_from_port_file "$WEB_PORTS_FILE")"
-NON_WEB_PORTS="$(csv_from_port_file "$NON_WEB_PORTS_FILE")"
-NON_WEB_UDP_PORTS="$(csv_from_port_file "$NON_WEB_UDP_PORTS_FILE")"
-
 if [ -n "$NON_WEB_PORTS" ]; then
-  # Service scans expect explicit protocol prefixes so TCP/UDP can be mixed.
   SERVICE_TARGETS="$(printf '%s\n' "$NON_WEB_PORTS" | tr ',' '\n' | awk 'NF {print "tcp/" $0}' | paste -sd, -)"
 fi
 if [ -n "$NON_WEB_UDP_PORTS" ]; then
@@ -166,7 +128,6 @@ else
   log_info "No web ports detected; skipping web enumeration."
 fi
 
-# At this point the run is complete; everything else is already on disk.
 log_info "Orchestration complete. Outputs saved under $OUTPUT_BASE"
 
 printf '\n'
