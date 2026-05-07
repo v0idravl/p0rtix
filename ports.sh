@@ -21,13 +21,12 @@ USAGE
   fi
 fi
 
-SCAN_DIR="$OUTPUT_BASE/scans"
-mkdir -p "$SCAN_DIR"
+mkdir -p "$OUTPUT_BASE"
 
-FULL_TCP_BASE="$SCAN_DIR/full_tcp"
-UDP_BASE="$SCAN_DIR/top_100_udp"
-UDP_CONFIRMED_BASE="$SCAN_DIR/udp_confirmed"
-TCP_SERVICE_BASE="$SCAN_DIR/open_tcp_services"
+FULL_TCP_BASE="$OUTPUT_BASE/full_tcp"
+UDP_BASE="$OUTPUT_BASE/top_100_udp"
+UDP_CONFIRMED_BASE="$OUTPUT_BASE/udp_confirmed"
+TCP_SERVICE_BASE="$OUTPUT_BASE/open_tcp_services"
 NMAP_STATS_EVERY="${NMAP_STATS_EVERY:-3m}"
 NMAP_MIN_RATE="${NMAP_MIN_RATE:-2000}"
 
@@ -156,4 +155,4 @@ fi
 
 NON_WEB_UDP_PORTS="$OPEN_UDP_PORTS"
 
-log_info "Discovery complete. Scan results saved under $SCAN_DIR"
+log_info "Discovery complete. Scan results saved under $OUTPUT_BASE"

@@ -21,8 +21,7 @@ if [ -z "$TARGET" ] || [ -z "$PORTS" ] || [ -z "$OUTPUT_BASE" ]; then
   usage
 fi
 
-WEB_DIR="$OUTPUT_BASE/web"
-mkdir -p "$WEB_DIR"
+mkdir -p "$OUTPUT_BASE"
 NMAP_STATS_EVERY="${NMAP_STATS_EVERY:-3m}"
 HAS_CURL=false
 
@@ -113,7 +112,7 @@ run_http_checks() {
   local url
   local scheme
   local detected_service
-  local output_base="$WEB_DIR/${TARGET}_${port}"
+  local output_base="$OUTPUT_BASE/${TARGET}_${port}"
 
   log_info "Running web checks for $TARGET:$port"
 
@@ -154,4 +153,4 @@ for port in $(printf '%s\n' "$PORTS" | tr ',' ' '); do
 done
 
 log_info "Web enumeration complete for $TARGET"
-log_info "Saved outputs under $WEB_DIR"
+log_info "Saved outputs under $OUTPUT_BASE"

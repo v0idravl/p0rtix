@@ -21,8 +21,7 @@ if [ -z "$TARGET" ] || [ -z "$PORTS" ] || [ -z "$OUTPUT_BASE" ]; then
   usage
 fi
 
-SERVICE_DIR="$OUTPUT_BASE/services"
-mkdir -p "$SERVICE_DIR"
+mkdir -p "$OUTPUT_BASE"
 NMAP_STATS_EVERY="${NMAP_STATS_EVERY:-3m}"
 TCP_PORTS=()
 UDP_PORTS=()
@@ -74,7 +73,7 @@ log_info "Running lightweight non-web follow-up for $TARGET"
 if [ "${#TCP_PORTS[@]}" -gt 0 ]; then
   tcp_csv="$(printf '%s\n' "${TCP_PORTS[@]}" | sort -n | paste -sd, -)"
   log_info "Batch TCP baseline scan on ports: $tcp_csv"
-  run_scan_file "$SERVICE_DIR/${TARGET}_services_tcp_baseline.txt" \
+  run_scan_file "$OUTPUT_BASE/${TARGET}_services_tcp_baseline.txt" \
     nmap -n -sS -sV --version-light -sC -Pn -p "$tcp_csv"
 else
   log_info "No non-web TCP ports detected."
@@ -83,10 +82,10 @@ fi
 if [ "${#UDP_PORTS[@]}" -gt 0 ]; then
   udp_csv="$(printf '%s\n' "${UDP_PORTS[@]}" | sort -n | paste -sd, -)"
   log_info "Batch UDP version scan on ports: $udp_csv"
-  run_scan_file "$SERVICE_DIR/${TARGET}_services_udp_baseline.txt" \
+  run_scan_file "$OUTPUT_BASE/${TARGET}_services_udp_baseline.txt" \
     nmap -n -sU -sV --version-light -Pn -p "$udp_csv"
 else
   log_info "No non-web UDP ports detected."
 fi
 
-log_info "Non-web service outputs written to: $SERVICE_DIR"
+log_info "Non-web service outputs written to: $OUTPUT_BASE"
