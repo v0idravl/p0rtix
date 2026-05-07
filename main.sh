@@ -99,6 +99,49 @@ OUTPUT_BASE="$MACHINE_ROOT/output"
 
 log_info "Starting scan for $TARGET | Workspace: $MACHINE_ROOT | Output: $OUTPUT_BASE"
 
+scaffold_machine_dirs() {
+  mkdir -p "$MACHINE_ROOT/report" "$MACHINE_ROOT/loot" "$MACHINE_ROOT/exploit"
+
+  local report_file="$MACHINE_ROOT/report/report.md"
+
+  if [ -f "$report_file" ]; then
+    log_info "Report already exists, skipping: $report_file"
+    return
+  fi
+
+  cat > "$report_file" <<REPORT
+# ${MACHINE_NAME} — ${TARGET}
+
+**Date:** $(date +%F)
+**Target:** ${TARGET}
+**Status:** In Progress
+
+## Port Summary
+
+## Enumeration
+
+### Web
+
+### Services
+
+## Foothold
+
+## Privilege Escalation
+
+## Flags
+
+- User:
+- Root:
+
+## Notes
+
+REPORT
+
+  log_info "Report boilerplate created: $report_file"
+}
+
+scaffold_machine_dirs
+
 # Source ports.sh so WEB_PORTS, NON_WEB_PORTS, and NON_WEB_UDP_PORTS are set
 # directly in this scope — no intermediate port files needed.
 source "$SCRIPT_DIR/ports.sh"
