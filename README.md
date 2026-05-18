@@ -1,142 +1,130 @@
 # p0rtix
 
-A small, opinionated first-pass recon toolkit for quickly identifying exposed services and obvious web surface area.
+Automated recon and enumeration for CTF / OSCP / pentest lab environments.
 
-## Scope
+Built around a personal methodology reference ([hakiki](https://github.com/v0idravl/hakiki)) — covers
+port discovery, per-service enumeration, web directory/vhost busting, crawling, and SSL inspection.
+Results are written to a single `findings.md` as the scan progresses, with all raw tool output
+archived separately so nothing is lost.
 
-`p0rtix` is intentionally capped at initial recon.
+---
 
-It does:
-- Full TCP port discovery
-- Top 100 UDP discovery
-- Lightweight TCP service classification
-- Basic non-web follow-up scans
-- Basic web follow-up scans
-- End-of-run summary of discovered ports by category
+## Features
 
-It does not try to do:
-- Workspace bootstrapping
-- Report template downloads
-- Deep service-specific helper automation
-- Default NSE-heavy follow-up
-- Directory brute forcing
-- Full exploitation prep
+- Full TCP SYN scan + top-100 UDP with automatic confirmation of open|filtered ports
+- Service classification — routes web ports to web enumeration, everything else to per-service handlers
+- **Web:** headers, WhatWeb fingerprint, redirect detection, SSL cert SAN extraction, directory bust, vhost bust, crawl (scope-filtered)
+- **Services:** FTP, SSH, SMTP, DNS, RPC/NFS, MSRPC, SMB, SNMP, LDAP, Rsync, MSSQL, Oracle, MySQL, RDP, PostgreSQL, WinRM, Redis, MongoDB
+- Reactive follow-up — discovered vhosts and SSL SANs prompt for `/etc/hosts` addition, then get fully enumerated
+- Scope enforcement — crawl and follow-up scans never touch out-of-scope hosts
+- Single `findings.md` updated in real time (key findings only)
+- `raw/` directory with every tool's full output, each file headed by the exact command
+- Auto-installs missing tools via `apt` or `go install`
 
-## Project Structure
+---
 
-```text
-p0rtix/
-├── main.sh       # Orchestrates the first-pass recon workflow
-├── ports.sh      # Discovery and web/non-web classification
-├── services.sh   # Lightweight batch follow-up for non-web ports
-├── web.sh        # Lightweight follow-up for web ports
-├── log_utils.sh  # Shared logging, scan wrapper, and service extraction helpers
-└── README.md
-```
+## Requirements
 
-## Dependencies
+- **Python 3.10+**
+- **Root** (required for nmap SYN scans and `/etc/hosts` writes)
+- Kali Linux recommended — most tools already present
 
-Required:
-- `nmap`
+Core tools (required, installed automatically if missing):
 
-Optional:
-- `curl` for HTTP headers and `robots.txt`
-- `whatweb` for web fingerprinting
+| Tool | Purpose |
+|------|---------|
+| `nmap` | Port discovery and service scripts |
+| `curl` | HTTP probing |
+| `ffuf` | Directory and vhost busting |
 
-Install on Debian/Ubuntu:
+Optional tools (used when present, skipped gracefully otherwise):
 
-```bash
-sudo apt update
-sudo apt install nmap curl whatweb
-```
+`whatweb` · `gospider` · `testssl.sh` · `nxc` · `smbclient` · `smbmap` · `onesixtyone` · `snmpwalk` · `ldapsearch` · `dig` · `dnsrecon` · `mysql` · `redis-cli` · `rsync` · `showmount` · `rpcinfo` · `impacket-rpcdump` · `smtp-user-enum` · `searchsploit` · `openssl`
+
+---
 
 ## Usage
 
-Run the full workflow:
-
 ```bash
-./main.sh <target-ip-or-hostname> [project-root-dir] [machine-nickname]
+sudo python3 p0rtix.py <ip> [--domain DOMAIN] [--name NAME] [--workspace DIR] [--workers N]
 ```
 
-Examples:
+### Examples
 
 ```bash
-./main.sh 10.10.11.34
-./main.sh 10.10.11.34 /home/user/Projects/htb lame
+# IP only
+sudo python3 p0rtix.py 10.10.11.34
+
+# IP + domain (enables vhost busting)
+sudo python3 p0rtix.py 10.10.11.34 --domain test.htb
+
+# Full options
+sudo python3 p0rtix.py 10.10.11.34 --domain test.htb --name lame --workspace ~/Projects/htb --workers 8
 ```
 
-You must provide the target explicitly. If `project-root-dir` is omitted, the repository directory is used. If `machine-nickname` is omitted, a sanitized form of the target is used.
+### Arguments
 
-## Environment Variables
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `ip` | — | Target IP address |
+| `--domain` | — | Primary domain for vhost busting |
+| `--name` | domain or IP | Output directory name |
+| `--workspace` | `.` | Root directory for all output |
+| `--workers` | `6` | Parallel enumeration threads |
 
-| Variable | Default | Description |
-|---|---|---|
-| `NMAP_STATS_EVERY` | `3m` | How often nmap prints progress stats |
-| `NMAP_MIN_RATE` | `2000` | Minimum packet rate for the full TCP discovery scan |
-| `NO_COLOR` | unset | Set to any value to disable coloured log output |
+---
 
 ## Output Structure
 
-Results are written under:
-
-```text
-<project-root>/<machine-name>/output/
-├── scans/
-├── services/
-└── web/
+```
+<workspace>/<name>/
+├── findings.md        ← primary read surface (live-updated during scan)
+├── raw/               ← full tool output, each file headed by the exact command
+│   ├── 01_full_tcp.{nmap,gnmap,xml}
+│   ├── 02_udp_top100.{nmap,gnmap,xml}
+│   ├── 03_udp_confirmed.{nmap,gnmap,xml}
+│   ├── 04_tcp_services.{nmap,gnmap,xml}
+│   ├── 05_smb_445_nmap_enum.txt
+│   ├── 06_web_http_10_10_11_34_headers.txt
+│   └── ...
+├── report/
+│   └── report.md      ← writeup template (pre-populated)
+├── loot/              ← credentials, hashes, interesting files
+└── exploit/           ← payloads, custom exploits
 ```
 
-Typical outputs:
+### findings.md format
 
-- `output/scans/full_tcp.*`
-- `output/scans/top_100_udp.*`
-- `output/scans/udp_confirmed.*`
-- `output/scans/open_tcp_services.nmap`
-- `output/services/<target>_services_tcp_baseline.txt`
-- `output/services/<target>_services_udp_baseline.txt`
-- `output/web/<target>_<port>_baseline.txt`
-- `output/web/<target>_<port>_headers.txt`
-- `output/web/<target>_<port>_robots.txt`
-- `output/web/<target>_<port>_whatweb.txt`
+Each service gets its own section with the generating command noted above its output:
 
-## What Each Script Does
+```markdown
+### TCP 445 — SMB
 
-### `main.sh`
-- Validates arguments and dependencies
-- Creates the output directory tree
-- Runs discovery, then routes results to service and web follow-ups
-- Prints a summary of discovered web, service, and UDP ports on completion
+#### SMB Enum
+> `nmap --script smb-os-discovery,smb-enum-shares,smb-enum-users,smb-security-mode -p 445 10.10.11.34`
 
-### `ports.sh`
-- Runs a full TCP scan
-- Runs a top 100 UDP scan
-- Runs a lightweight TCP service classification scan
-- Splits open TCP ports into web and non-web buckets
-- Web bucket covers standard ports (80, 443, 8080, 8443, …) plus common dev/alt ports (3000, 5000, 9090, …)
+- **MS17-010 (EternalBlue): VULNERABLE**
+- Shares: IPC$ (READ), Data (READ), ADMIN$ (NO ACCESS)
 
-### `services.sh`
-- Runs one batch TCP baseline follow-up scan for non-web TCP ports
-- Runs one batch UDP version follow-up scan for discovered non-web UDP ports
+#### Vhost Bust
+> `ffuf -u http://10.10.11.34 -H "Host: FUZZ.test.htb" -w subdomains-top1million-5000.txt -fs 892`
 
-### `web.sh`
-- Runs a baseline `-sC -sV` scan for each detected web port
-- Chooses `http` or `https` heuristically based on service name and port
-- Captures HTTP headers when `curl` is available
-- Fetches `robots.txt` when `curl` is available (follows redirects)
-- Runs `whatweb` when installed
+- **admin.test.htb** — status 200, size 4823
+```
 
-### `log_utils.sh`
-- `log_info` / `log_warn` — coloured status output (`[*]` / `[!]`), `NO_COLOR`-aware
-- `run_scan_file` — shared nmap wrapper used by `services.sh` and `web.sh`
-- `extract_detected_service` — parses an nmap `-oN` file to retrieve a service name for a given port
+---
 
-## Notes
+## Scope Enforcement
 
-- The default workflow is meant to be fast and low-complexity.
-- Deeper enumeration is expected to be manual or handled by separate tooling.
-- Missing optional tools are reported and skipped cleanly.
-- Lower `NMAP_MIN_RATE` on flaky VPN connections to reduce packet loss.
+p0rtix will not scan any host that is not:
+- The target IP, **or**
+- The explicitly provided domain / any subdomain of it (`*.domain`), **or**
+- A hostname that resolves to the target IP
+
+Crawled external URLs are surfaced in `findings.md` under *External Links* but are never touched by any tool.
+
+---
 
 ## License
 
-This project is for educational and authorized testing purposes only. Use responsibly and lawfully.
+For educational and authorized testing purposes only. Use responsibly and lawfully.
