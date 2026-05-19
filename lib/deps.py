@@ -1,6 +1,8 @@
+import os
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 # Tool name → install instructions.
 # "apt"  — installed with: apt install -y <pkg>
@@ -135,14 +137,41 @@ def _apt_install(pkg: str, tool: str):
 
 def _go_install(pkg: str, tool: str):
     if not shutil.which("go"):
-        print(f"    [!] go not found — cannot install {tool} ({pkg})")
-        return
+        print(f"    [go] go not found — installing golang-go via apt...")
+        r = subprocess.run(["apt", "install", "-y", "golang-go"],
+                           capture_output=True, text=True)
+        if r.returncode != 0 or not shutil.which("go"):
+            print(f"    [!] golang-go install failed — cannot install {tool}")
+            return
+        print(f"    [+] Go installed")
+
+    # Resolve GOPATH so we can find the binary after install
+    gopath_result = subprocess.run(["go", "env", "GOPATH"],
+                                   capture_output=True, text=True)
+    gopath = gopath_result.stdout.strip() or str(Path.home() / "go")
+    gobin = Path(gopath) / "bin"
+
     print(f"    [go] Installing {pkg}...")
-    result = subprocess.run(["go", "install", pkg], capture_output=True, text=True)
+    env = os.environ.copy()
+    env["PATH"] = env.get("PATH", "") + f":{gobin}"
+    result = subprocess.run(["go", "install", pkg],
+                            capture_output=True, text=True, env=env)
     if result.returncode != 0:
         print(f"    [!] go install {pkg} failed: {result.stderr.strip()}")
-    else:
+        return
+
+    # Symlink into /usr/local/bin so the tool is in PATH for this and future runs
+    tool_bin = gobin / tool
+    if tool_bin.exists():
+        symlink = Path(f"/usr/local/bin/{tool}")
+        if not symlink.exists():
+            try:
+                symlink.symlink_to(tool_bin)
+            except OSError:
+                pass  # already exists or no permission (shouldn't happen as root)
         print(f"    [+] Installed {tool}")
+    else:
+        print(f"    [!] go install succeeded but {tool} not found in {gobin}")
 
 
 def _pip_install(pkg: str, tool: str):
