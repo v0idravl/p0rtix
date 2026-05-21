@@ -2,3 +2,5 @@ output/
 *.log
 *.tmp
 *.swp
+CLAUDE.md
+__pycache__/
