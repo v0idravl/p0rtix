@@ -27,6 +27,18 @@ class FindingsSink:
     def _write(self, text: str):
         raise NotImplementedError
 
+    def add_summary(self, item: str):
+        """Record a high-signal finding for the executive summary. No-op in base."""
+        pass
+
+    def absorb(self, buf: "ServiceBuffer"):
+        """Merge a completed ServiceBuffer's content and summary into this sink."""
+        content = buf.render()
+        if content:
+            self._write(content)
+        for item in buf.drain_summary():
+            self.add_summary(item)
+
     def h3(self, title: str):    self._write(f"\n### {title}\n")
     def h4(self, title: str):    self._write(f"\n#### {title}\n")
     def cmd(self, command: str): self._write(f"\n> `{command}`\n")
@@ -74,6 +86,7 @@ class Findings(FindingsSink):
     def __init__(self, path: Path, ip: str, domain: str | None):
         self._path = path
         self._lock = threading.Lock()
+        self._summary: list[str] = []
         self._write_header(ip, domain)
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -81,13 +94,23 @@ class Findings(FindingsSink):
     def h2(self, title: str):
         self._write(f"\n{_THICK}\n## {title}\n{_THICK}\n")
 
+    def add_summary(self, item: str):
+        with self._lock:
+            self._summary.append(item)
+
     def flush_service_buffer(self, buf: "ServiceBuffer"):
         """Append a completed service buffer to findings (call in port order)."""
+        for item in buf.drain_summary():
+            self.add_summary(item)
         content = buf.render()
         if content.strip():
             self._write(f"\n{_THIN}\n{content}")
 
     def finalize(self):
+        if self._summary:
+            self._write(f"\n{_THICK}\n## Key Findings\n{_THICK}\n")
+            for item in self._summary:
+                self._write(f"- {item}\n")
         footer = (
             f"\n{_THICK}\n"
             f"  p0rtix — scan complete                    by v0idravl\n"
@@ -126,12 +149,20 @@ class ServiceBuffer(FindingsSink):
     """
 
     def __init__(self, port: int, proto: str):
-        self.port  = port
-        self.proto = proto
+        self.port    = port
+        self.proto   = proto
         self._chunks: list[str] = []
+        self._summary: list[str] = []
 
     def _write(self, text: str):
         self._chunks.append(text)
+
+    def add_summary(self, item: str):
+        self._summary.append(item)
+
+    def drain_summary(self) -> list[str]:
+        items, self._summary = self._summary, []
+        return items
 
     def render(self) -> str:
         return "".join(self._chunks)

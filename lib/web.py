@@ -18,6 +18,14 @@ _WEB_EXTENSIONS = ".php,.txt,.html,.bak,.zip,.old,.xml,.json,.config,.asp,.aspx,
 # ffuf result line: "path    [Status: 200, Size: 1234, ...]"
 _FFUF_RE = re.compile(r"^(\S+)\s+\[Status:\s*(\d+),\s*Size:\s*(\d+).*?\]", re.MULTILINE)
 
+# Patterns that look like secrets embedded in JS source
+_JS_SECRET_RE = re.compile(
+    r'(?:api[_-]?key|apikey|api[_-]?secret|client[_-]?secret|access[_-]?token|'
+    r'auth[_-]?token|secret[_-]?key|private[_-]?key|password|passwd|bearer|jwt|'
+    r'x-api-key|Authorization)\s*[=:]\s*["\']([^"\']{8,80})["\']',
+    re.IGNORECASE,
+)
+
 # Paths that indicate sensitive content if they return 200
 _SENSITIVE_PATHS = [
     ("/.git/HEAD",             ".git exposed (use git-dumper)"),
@@ -149,6 +157,10 @@ def enumerate_web(
     # ── 14. API endpoint discovery ────────────────────────────────────────────
     if "ffuf" in available:
         _api_bust(base_url, runner, findings)
+
+    # ── 14b. Parameter discovery ──────────────────────────────────────────────
+    if "arjun" in available:
+        _param_fuzz(base_url, runner, findings)
 
     # ── 15. cewl custom wordlist + targeted dir bust ──────────────────────────
     if "cewl" in available and "ffuf" in available:
@@ -316,6 +328,7 @@ def _check_sensitive_files(base_url: str, runner: Runner, findings: Findings,
         findings.h4("Sensitive Files")
         for path, label in found:
             findings.bullet(f"**{label}**: `{base_url}{path}`")
+            findings.add_summary(f"**{label}** exposed at `{base_url}{path}`")
             if ".git/HEAD" in path and "git-dumper" in available:
                 git_out_dir = str(runner.ws.loot_dir / f"git_dump_{_label(base_url)}")
                 cmd = ["git-dumper", f"{base_url}/.git/", git_out_dir]
@@ -405,6 +418,7 @@ def _check_adcs(base_url: str, ip: str, runner: Runner, findings: Findings):
     if found:
         findings.h4("ADCS (AD Certificate Services)")
         findings.bullet("**ADCS web enrollment detected!**")
+        findings.add_summary(f"**ADCS web enrollment** at `{base_url}` — check ESC1-8")
         for path, code in found:
             findings.bullet(f"  `{base_url}{path}` — HTTP {code}")
         findings.note(
@@ -521,6 +535,7 @@ def _check_jenkins(base_url: str, runner: Runner, findings: Findings):
 
     if any(p == "/script" and c == "200" for p, _, c in found):
         findings.bullet("**CRITICAL: Script console accessible without auth — RCE**")
+        findings.add_summary(f"**CRITICAL: Jenkins /script RCE** at `{base_url}/script`")
         findings.note(
             f"Execute OS commands: POST to `{base_url}/script` with "
             f"`script=println(['id'].execute().text)`"
@@ -694,6 +709,10 @@ def _crawl(base_url: str, scope: Scope, runner: Runner, findings: Findings):
 
     in_scope, out_of_scope = _parse_gospider(out, scope)
 
+    js_urls = [u for u in in_scope if u.lower().endswith(".js")]
+    if js_urls:
+        _scrape_js(js_urls, runner, findings)
+
     if in_scope:
         findings.bullet(f"**In-scope URLs:** {len(in_scope)}")
         for url in sorted(set(in_scope))[:30]:
@@ -717,6 +736,57 @@ def _parse_gospider(output: str, scope: Scope) -> tuple[list[str], list[str]]:
         if line.startswith("http") and line not in raw_urls:
             raw_urls.append(line)
     return scope.filter_urls(raw_urls)
+
+
+# ── JS file analysis ─────────────────────────────────────────────────────────
+
+def _scrape_js(js_urls: list[str], runner: Runner, findings: Findings):
+    if not js_urls:
+        return
+    findings.h4("JS File Analysis")
+    any_finding = False
+    for url in js_urls[:20]:
+        result = subprocess.run(
+            ["curl", "-sk", "--max-time", "10", url],
+            capture_output=True, text=True,
+        )
+        content = result.stdout
+        if not content.strip():
+            continue
+        matches = _JS_SECRET_RE.findall(content)
+        endpoints = list(dict.fromkeys(
+            m for m in re.findall(r'["\'](/[a-zA-Z0-9/_-]{3,60})["\']', content)
+            if len(m) > 3
+        ))
+        if matches:
+            any_finding = True
+            findings.bullet(f"**`{url}`** — possible secrets:")
+            for val in matches[:5]:
+                findings.bullet(f"  ⚠ `{val[:60]}`")
+                findings.add_summary(f"⚠ Possible secret in JS `{url.split('/')[-1]}`: `{val[:40]}...`")
+        if endpoints:
+            any_finding = True
+            findings.bullet(f"**`{url}`** — endpoints: {', '.join(f'`{e}`' for e in endpoints[:8])}")
+    if not any_finding:
+        findings.bullet("No obvious secrets or novel endpoints found in JS files.")
+
+
+# ── Parameter discovery ───────────────────────────────────────────────────────
+
+def _param_fuzz(base_url: str, runner: Runner, findings: Findings):
+    findings.h4("Parameter Discovery (arjun)")
+    cmd = ["arjun", "-u", base_url, "--stable", "-oT", "/dev/stdout"]
+    findings.cmd(" ".join(cmd))
+    out = runner.run(cmd, f"web_{_label(base_url)}_arjun", timeout=300)
+    params = re.findall(r"\[([+!])\]\s+(\w+)", out)
+    found = [p for flag, p in params if flag == "+"]
+    if found:
+        findings.bullet(f"**Parameters:** {', '.join(f'`{p}`' for p in found)}")
+        findings.add_summary(f"Arjun found parameters on {base_url}: {', '.join(found)}")
+    elif out.strip() and "[" in out:
+        findings.code_block(_trim(out))
+    else:
+        findings.bullet("No parameters found.")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

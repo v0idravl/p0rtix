@@ -44,6 +44,10 @@ class Workspace:
         self._users_lock = threading.Lock()
         self.discovered_domain: str = ""
         self._domain_lock = threading.Lock()
+        self.lockout_threshold: int = -1
+        self._policy_lock = threading.Lock()
+        self._known_creds: set[str] = set()
+        self._creds_lock = threading.Lock()
 
         self._setup()
 
@@ -59,6 +63,24 @@ class Workspace:
         with self._counter_lock:
             self._raw_counter += 1
             return f"{self._raw_counter:02d}_{label}"
+
+    def set_lockout_threshold(self, n: int):
+        """Thread-safe: store the password policy lockout threshold (once)."""
+        with self._policy_lock:
+            if self.lockout_threshold == -1:
+                self.lockout_threshold = n
+
+    def add_cred(self, text: str):
+        """Thread-safe append of a discovered credential candidate to loot/creds_found.txt."""
+        text = text.strip()
+        if not text:
+            return
+        with self._creds_lock:
+            if text in self._known_creds:
+                return
+            self._known_creds.add(text)
+            with open(self.loot_dir / "creds_found.txt", "a") as f:
+                f.write(text + "\n")
 
     def set_discovered_domain(self, domain: str):
         """Thread-safe: store the first domain found during enumeration."""

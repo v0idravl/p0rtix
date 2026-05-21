@@ -6,9 +6,10 @@ Failures are caught and logged without aborting the scan.
 """
 import re
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from lib.findings import FindingsSink as Findings
+from lib.findings import FindingsSink as Findings, ServiceBuffer
 from lib.models import Discovery, Service
 from lib.runner import Runner
 
@@ -335,29 +336,7 @@ def _parse_lookupsid(output: str, findings: Findings) -> list[str]:
 
 # ── SMB (139, 445) ────────────────────────────────────────────────────────────
 
-def _smb(ip, service, runner, findings, available):
-    port = service.port
-
-    # SMB2 signing status — unsigned = relay attacks viable
-    cmd_sign = ["nmap", "--script", "smb2-security-mode", "-p", str(port), ip]
-    out_sign = runner.run(cmd_sign, f"smb_{port}_signing")
-    findings.cmd(" ".join(cmd_sign))
-    if "Message signing enabled but not required" in out_sign:
-        findings.bullet("**SMB signing: NOT required — relay attacks (ntlmrelayx) viable**")
-    elif "Message signing enabled and required" in out_sign:
-        findings.bullet("SMB signing: required — relay attacks not viable")
-    else:
-        findings.code_block(_trim(out_sign))
-
-    # OS discovery + share/user enum
-    cmd_enum = ["nmap", "--script",
-                "smb-os-discovery,smb-enum-shares,smb-enum-users,smb-security-mode",
-                "-p", str(port), ip]
-    out_enum = runner.run(cmd_enum, f"smb_{port}_nmap_enum")
-    findings.cmd(" ".join(cmd_enum))
-    findings.code_block(_trim(out_enum))
-
-    # Vulnerability checks
+def _smb_run_vulns(ip: str, port: int, runner: Runner, buf: Findings) -> None:
     vuln_scripts = (
         "smb-vuln-ms17-010,"
         "smb-vuln-cve2009-3103,"
@@ -365,76 +344,112 @@ def _smb(ip, service, runner, findings, available):
         "smb-vuln-ms10-061,"
         "smb-double-pulsar-backdoor"
     )
-    cmd_vuln = ["nmap", "--script", vuln_scripts,
-                "--script-args", "unsafe=1", "-p", str(port), ip]
-    out_vuln = runner.run(cmd_vuln, f"smb_{port}_nmap_vuln")
-    findings.cmd(" ".join(cmd_vuln))
-    for line in out_vuln.splitlines():
+    cmd = ["nmap", "--script", vuln_scripts,
+           "--script-args", "unsafe=1", "-p", str(port), ip]
+    out = runner.run(cmd, f"smb_{port}_nmap_vuln")
+    buf.cmd(" ".join(cmd))
+    for line in out.splitlines():
         if "VULNERABLE" in line:
-            findings.bullet(f"**{line.strip()}**")
-    findings.code_block(_trim(out_vuln))
+            buf.bullet(f"**{line.strip()}**")
+    buf.code_block(_trim(out))
 
-    # Zerologon (CVE-2020-1472) — nxc module is safe (non-destructive check)
-    if "nxc" in available:
-        cmd_zl = ["nxc", "smb", ip, "-M", "zerologon"]
-        out_zl = runner.run(cmd_zl, f"smb_{port}_zerologon", timeout=60)
-        findings.cmd(" ".join(cmd_zl))
-        if "VULNERABLE" in out_zl.upper():
-            findings.bullet("**VULNERABLE to Zerologon (CVE-2020-1472)**")
-        elif out_zl.strip():
-            findings.bullet(f"Zerologon: not vulnerable")
-        findings.code_block(_trim(out_zl))
 
-    # Null session enumeration
-    readable_shares: list[str] = []
+def _smb_run_zerologon(ip: str, port: int, runner: Runner, buf: Findings) -> None:
+    cmd = ["nxc", "smb", ip, "-M", "zerologon"]
+    out = runner.run(cmd, f"smb_{port}_zerologon", timeout=60)
+    buf.cmd(" ".join(cmd))
+    if "VULNERABLE" in out.upper():
+        buf.bullet("**VULNERABLE to Zerologon (CVE-2020-1472)**")
+        buf.add_summary("**VULNERABLE to Zerologon (CVE-2020-1472)**")
+    else:
+        buf.bullet("Zerologon: not vulnerable")
+    buf.code_block(_trim(out))
 
-    if "nxc" in available:
-        cmd_null = ["nxc", "smb", ip, "-u", "", "-p", ""]
-        out_null = runner.run(cmd_null, f"smb_{port}_nxc_null")
-        findings.cmd(" ".join(cmd_null))
-        findings.code_block(_trim(out_null))
 
-        cmd_shares = ["nxc", "smb", ip, "-u", "", "-p", "", "--shares"]
-        out_shares = runner.run(cmd_shares, f"smb_{port}_nxc_shares")
-        findings.cmd(" ".join(cmd_shares))
-        readable_shares = _parse_nxc_shares(out_shares, findings)
+def _smb_run_null_session(ip: str, port: int, runner: Runner,
+                          buf: Findings, available: set) -> None:
+    cmd_null = ["nxc", "smb", ip, "-u", "", "-p", ""]
+    out_null = runner.run(cmd_null, f"smb_{port}_nxc_null")
+    buf.cmd(" ".join(cmd_null))
+    buf.code_block(_trim(out_null))
 
-        cmd_users = ["nxc", "smb", ip, "-u", "", "-p", "", "--users"]
-        out_users = runner.run(cmd_users, f"smb_{port}_nxc_users")
-        findings.cmd(" ".join(cmd_users))
-        _parse_nxc_users(out_users, findings, runner)
+    cmd_shares = ["nxc", "smb", ip, "-u", "", "-p", "", "--shares"]
+    out_shares = runner.run(cmd_shares, f"smb_{port}_nxc_shares")
+    buf.cmd(" ".join(cmd_shares))
+    readable_shares = _parse_nxc_shares(out_shares, buf)
+    if readable_shares:
+        buf.add_summary(f"SMB: anonymous read access — shares: {', '.join(readable_shares)}")
 
-    if "smbmap" in available:
-        cmd_smbmap = ["smbmap", "-H", ip]
-        out_smbmap = runner.run(cmd_smbmap, f"smb_{port}_smbmap")
-        findings.cmd(" ".join(cmd_smbmap))
-        findings.code_block(_trim(out_smbmap))
+    cmd_users = ["nxc", "smb", ip, "-u", "", "-p", "", "--users"]
+    out_users = runner.run(cmd_users, f"smb_{port}_nxc_users")
+    buf.cmd(" ".join(cmd_users))
+    _parse_nxc_users(out_users, buf, runner)
 
     if "smbclient" in available:
         cmd_list = ["smbclient", "-N", "-L", f"\\\\{ip}"]
         out_list = runner.run(cmd_list, f"smb_{port}_smbclient_list")
-        findings.cmd(" ".join(cmd_list))
-        findings.code_block(_trim(out_list))
+        buf.cmd(" ".join(cmd_list))
+        buf.code_block(_trim(_strip_smb1_noise(out_list)))
 
-    # SID-brute user enumeration via null session
     if "impacket-lookupsid" in available:
         cmd_sid = ["impacket-lookupsid", f"anonymous:@{ip}"]
         out_sid = runner.run(cmd_sid, f"smb_{port}_lookupsid", timeout=60)
-        findings.cmd(" ".join(cmd_sid))
-        users = _parse_lookupsid(out_sid, findings)
+        buf.cmd(" ".join(cmd_sid))
+        users = _parse_lookupsid(out_sid, buf)
         for u in users:
             runner.ws.add_user(u)
 
-    # enum4linux-ng — comprehensive Windows/Samba enumeration
-    if "enum4linux-ng" in available:
-        cmd_e4l = ["enum4linux-ng", "-A", ip]
-        out_e4l = runner.run(cmd_e4l, f"smb_{port}_enum4linux_ng", timeout=300)
-        findings.cmd(" ".join(cmd_e4l))
-        _parse_enum4linux(out_e4l, findings, runner)
-
-    # Share spidering — list contents of READ-accessible shares
     if readable_shares:
-        _smb_spider(ip, readable_shares, runner, findings, available)
+        _smb_spider(ip, readable_shares, runner, buf, available)
+
+
+def _smb_run_enum4linux(ip: str, port: int, runner: Runner, buf: Findings) -> None:
+    cmd = ["enum4linux-ng", "-A", ip]
+    out = runner.run(cmd, f"smb_{port}_enum4linux_ng", timeout=300)
+    buf.cmd(" ".join(cmd))
+    _parse_enum4linux(out, buf, runner)
+
+
+def _smb(ip, service, runner, findings, available):
+    port = service.port
+
+    # Signing check — fast sequential, determines relay attack viability upfront
+    cmd_sign = ["nmap", "--script", "smb2-security-mode", "-p", str(port), ip]
+    out_sign = runner.run(cmd_sign, f"smb_{port}_signing")
+    findings.cmd(" ".join(cmd_sign))
+    if "Message signing enabled but not required" in out_sign:
+        findings.bullet("**SMB signing: NOT required — relay attacks (ntlmrelayx) viable**")
+        findings.add_summary("SMB signing NOT required — ntlmrelayx relay attacks viable")
+    elif "Message signing enabled and required" in out_sign:
+        findings.bullet("SMB signing: required — relay attacks not viable")
+    else:
+        findings.code_block(_trim(out_sign))
+
+    # Parallel: vuln scan + zerologon + null session enum + enum4linux-ng
+    buf_vuln = ServiceBuffer(port, "tcp")
+    buf_zl   = ServiceBuffer(port, "tcp") if "nxc" in available else None
+    buf_null = ServiceBuffer(port, "tcp") if "nxc" in available else None
+    buf_e4l  = ServiceBuffer(port, "tcp") if "enum4linux-ng" in available else None
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futs = {pool.submit(_smb_run_vulns, ip, port, runner, buf_vuln): "vulns"}
+        if buf_zl is not None:
+            futs[pool.submit(_smb_run_zerologon, ip, port, runner, buf_zl)] = "zerologon"
+        if buf_null is not None:
+            futs[pool.submit(_smb_run_null_session, ip, port, runner, buf_null, available)] = "null"
+        if buf_e4l is not None:
+            futs[pool.submit(_smb_run_enum4linux, ip, port, runner, buf_e4l)] = "enum4linux"
+
+        for fut in as_completed(futs):
+            try:
+                fut.result()
+            except Exception as exc:
+                findings.note(f"SMB sub-task '{futs[fut]}' error: {exc}")
+
+    # Flush in deterministic order: vulns → zerologon → null session → enum4linux
+    for buf in [buf_vuln, buf_zl, buf_null, buf_e4l]:
+        if buf:
+            findings.absorb(buf)
 
     return []
 
@@ -664,7 +679,7 @@ def _ldap(ip, service, runner, findings, available):
     # 2. Password policy
     out_pp = lq("password_policy", "(objectClass=domain)",
                 "minPwdLength", "maxPwdAge", "lockoutThreshold", "lockoutDuration", "pwdProperties")
-    _parse_password_policy(out_pp, findings)
+    _parse_password_policy(out_pp, findings, runner.ws)
 
     # 3. Users
     out_users = lq("users", "(objectClass=person)",
@@ -690,6 +705,7 @@ def _ldap(ip, service, runner, findings, available):
     asrep = re.findall(r"sAMAccountName:\s+(.+)", out_asrep)
     if asrep:
         findings.bullet(f"**AS-REP roastable (no pre-auth required): {', '.join(asrep)}**")
+        findings.add_summary(f"AS-REP roastable accounts (LDAP UAC flag): {', '.join(asrep)}")
         findings.note(f"Crack with: `impacket-GetNPUsers {domain}/ -no-pass -dc-ip {ip} -request -format hashcat`")
 
     # Derive domain from base DN if --domain wasn't provided, and persist it
@@ -790,7 +806,7 @@ def _ldap(ip, service, runner, findings, available):
     return []
 
 
-def _parse_password_policy(output: str, findings: Findings):
+def _parse_password_policy(output: str, findings: Findings, ws=None):
     fields = {
         "minPwdLength":     "Min password length",
         "lockoutThreshold": "Lockout threshold",
@@ -800,7 +816,18 @@ def _parse_password_policy(output: str, findings: Findings):
     for attr, label in fields.items():
         m = re.search(rf"^{attr}:\s+(.+)", output, re.MULTILINE)
         if m:
-            findings.bullet(f"{label}: `{m.group(1).strip()}`")
+            val = m.group(1).strip()
+            if attr == "lockoutThreshold" and ws is not None:
+                try:
+                    n = int(val)
+                    ws.set_lockout_threshold(n)
+                    if n == 0:
+                        findings.bullet(f"**{label}: `{val}` — NO LOCKOUT — spraying is safe**")
+                        findings.add_summary("Password policy: **no account lockout** — spraying is safe")
+                        continue
+                except ValueError:
+                    pass
+            findings.bullet(f"{label}: `{val}`")
 
 
 def _extract_ldap_base(output: str) -> str:
@@ -851,6 +878,8 @@ def _parse_ldap_users(output: str, findings: Findings, runner: Runner):
             stripped = d.strip()
             if _looks_like_credential(stripped):
                 findings.bullet(f"  ⚠ **Possible credential:** `{stripped}`")
+                findings.add_summary(f"⚠ Possible credential in LDAP description: `{stripped}`")
+                runner.ws.add_cred(stripped)
             else:
                 findings.bullet(f"  `{stripped}`")
 
@@ -1426,6 +1455,11 @@ _NAME_MAP: dict[str, object] = {
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _strip_smb1_noise(output: str) -> str:
+    skip = ("Reconnecting with SMB1", "Unable to connect with SMB1", "SMB1 disabled")
+    return "\n".join(l for l in output.splitlines() if not any(s in l for s in skip))
+
 
 def _trim(output: str, max_lines: int = 80) -> str:
     lines = output.strip().splitlines()

@@ -30,8 +30,15 @@ class Runner:
     def run(self, cmd: list[str], label: str, timeout: int = 300) -> str:
         """
         Run a command, capture output, save to raw/, return stdout as string.
+        On resume (raw file already exists from a prior scan), returns cached output.
         Failures are recorded in the raw file but do not raise exceptions.
         """
+        existing = next(self._ws.raw_dir.glob(f"*_{label}.txt"), None)
+        if existing:
+            cached = existing.read_text()
+            sep = "# " + "=" * 60 + "\n\n"
+            return cached.split(sep, 1)[-1] if sep in cached else cached
+
         raw_path = self._ws.raw_dir / f"{self._ws.next_raw_label(label)}.txt"
         cmd_str = shlex.join(cmd)
 
