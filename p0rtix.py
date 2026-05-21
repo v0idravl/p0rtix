@@ -220,6 +220,24 @@ def main():
         for buf, _ in sorted(followup_futures.values(), key=lambda x: (x[0].port, x[0].proto)):
             findings.flush_service_buffer(buf)
 
+    # ── Loot summary ──────────────────────────────────────────────────────────
+    users_file = ws.loot_dir / "users.txt"
+    creds_file = ws.loot_dir / "creds_found.txt"
+    user_count = (
+        sum(1 for _ in users_file.open())
+        if users_file.exists() and users_file.stat().st_size > 0 else 0
+    )
+    cred_count = (
+        sum(1 for _ in creds_file.open())
+        if creds_file.exists() and creds_file.stat().st_size > 0 else 0
+    )
+    if user_count or cred_count:
+        findings.h2("Loot")
+        if user_count:
+            findings.bullet(f"**{user_count} unique user(s)** — `{users_file}`")
+        if cred_count:
+            findings.bullet(f"**{cred_count} credential(s)** — `{creds_file}`")
+
     # ── searchsploit on nmap XML ───────────────────────────────────────────────
     if "searchsploit" in available:
         nmap_xml = ws.raw_dir / "04_tcp_services.xml"
@@ -237,7 +255,7 @@ def main():
     print(f"[+] Findings  : {ws.findings_path}")
     print(f"[+] Raw data  : {ws.raw_dir}/")
     print(f"[+] Loot      : {ws.loot_dir}/")
-    print(f"{'=' * 60}")
+    print("─" * 60)
 
 
 def _run_post_domain_checks(
@@ -276,8 +294,6 @@ def _run_post_domain_checks(
                         hf.write(line.strip() + "\n")
             findings.bullet(f"**Hash saved:** `{hash_file}` — `hashcat -m 18200 {hash_file} /usr/share/wordlists/rockyou.txt`")
             findings.add_summary(f"**AS-REP hash(es) in `loot/asrep.hash`** — crack: `hashcat -m 18200`")
-        else:
-            findings.bullet("AS-REP roasting: no vulnerable accounts in user list")
 
     # Kerbrute username validation against the discovered user list
     if "kerbrute" in available:
@@ -287,8 +303,6 @@ def _run_post_domain_checks(
         valid = re.findall(r"VALID USERNAME:\s+(\S+)", out2)
         if valid:
             findings.bullet(f"**kerbrute confirmed ({len(valid)} valid):** {', '.join(valid)}")
-        else:
-            findings.bullet("kerbrute: no additional valid usernames confirmed")
 
     findings.note(
         f"Kerberoasting (needs creds): "
@@ -429,8 +443,6 @@ def _write_searchsploit(output: str, findings: Findings):
             findings.bullet(line)
         if len(kept) > 25:
             findings.note(f"{len(kept) - 25} additional results omitted — run `searchsploit --nmap` manually")
-    else:
-        findings.note("No searchsploit matches.")
 
 
 if __name__ == "__main__":

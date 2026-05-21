@@ -397,8 +397,6 @@ def _run_testssl(ip: str, port: int, runner: Runner, findings: Findings):
         findings.bullet("**testssl findings:**")
         for line in hits[:20]:
             findings.bullet(f"  {line}")
-    else:
-        findings.bullet("testssl.sh: no critical findings")
 
 
 # ── ADCS probe ────────────────────────────────────────────────────────────────
@@ -678,9 +676,6 @@ def _vhost_bust(ip: str, port: int, scheme: str, domain: str,
         findings.bullet(f"**`{full}`** — {status} ({size}b)")
         found.append(full)
 
-    if not found:
-        findings.bullet("No vhosts found.")
-
     return found
 
 
@@ -767,8 +762,6 @@ def _scrape_js(js_urls: list[str], runner: Runner, findings: Findings):
         if endpoints:
             any_finding = True
             findings.bullet(f"**`{url}`** — endpoints: {', '.join(f'`{e}`' for e in endpoints[:8])}")
-    if not any_finding:
-        findings.bullet("No obvious secrets or novel endpoints found in JS files.")
 
 
 # ── Parameter discovery ───────────────────────────────────────────────────────
@@ -785,17 +778,12 @@ def _param_fuzz(base_url: str, runner: Runner, findings: Findings):
         findings.add_summary(f"Arjun found parameters on {base_url}: {', '.join(found)}")
     elif out.strip() and "[" in out:
         findings.code_block(_trim(out))
-    else:
-        findings.bullet("No parameters found.")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _print_ffuf(output: str, findings: Findings):
     results = _FFUF_RE.findall(output)
-    if not results:
-        findings.bullet("No results.")
-        return
     for path, status, size in results:
         findings.bullet(f"`/{path}` — {status} ({size}b)")
 

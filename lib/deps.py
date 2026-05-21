@@ -46,7 +46,6 @@ TOOLS: dict[str, dict] = {
     "kerbrute":              {"github": {"repo": "ropnop/kerbrute",         "pattern": "kerbrute_linux_{arch}",     "binary": "kerbrute"},  "required": False},
     "impacket-GetNPUsers":   {"apt": "python3-impacket",                "required": False},
     "impacket-GetUserSPNs":  {"apt": "python3-impacket",                "required": False},
-    "impacket-lookupsid":    {"apt": "python3-impacket",                "required": False},
 
     # DNS
     "dig":                   {"apt": "dnsutils",                        "required": False},

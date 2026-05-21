@@ -67,8 +67,6 @@ def _ftp(ip, service, runner, findings, available):
             findings.code_block(result.stdout.strip())
         else:
             findings.bullet("**Anonymous FTP: ALLOWED** (empty directory)")
-    else:
-        findings.bullet("Anonymous FTP: denied")
 
     return []
 
@@ -148,12 +146,6 @@ def _dns(ip, service, runner, findings, available):
 
     domain = service.hostname
     if domain:
-        cmd2 = ["dig", "axfr", f"@{ip}", domain]
-        out2 = runner.run(cmd2, f"dns_axfr_{domain}")
-        findings.cmd(" ".join(cmd2))
-        if "XFR size" in out2 or "Transfer failed" not in out2:
-            findings.code_block(_trim(out2))
-
         # SRV record enumeration — reveals DC, LDAP, Kerberos, etc.
         for srv in ["_ldap._tcp", "_kerberos._tcp", "_kpasswd._tcp", "_gc._tcp",
                     "_msdcs", "_sites"]:
@@ -204,17 +196,6 @@ def _kerberos(ip, service, runner, findings, available):
         )
         return []
 
-    cmd = [
-        "nmap", "--script", "krb5-enum-users",
-        "--script-args",
-        f"krb5-enum-users.realm={domain},"
-        "userdb=/usr/share/seclists/Usernames/top-usernames-shortlist.txt",
-        "-p", str(port), ip,
-    ]
-    out = runner.run(cmd, "krb_88_nmap")
-    findings.cmd(" ".join(cmd))
-    findings.code_block(_trim(out))
-
     if "kerbrute" in available:
         wl = _best_userlist()
         cmd2 = ["kerbrute", "userenum", "--dc", ip, "-d", domain, wl]
@@ -247,8 +228,6 @@ def _parse_kerbrute(output: str, findings: Findings, runner: Runner):
         findings.bullet(f"**Valid usernames ({len(valid)}):** {', '.join(valid)}")
         for user in valid:
             runner.ws.add_user(user.split("@")[0])
-    else:
-        findings.bullet("kerbrute: no valid usernames found")
 
 
 def _best_userlist() -> str:
@@ -320,19 +299,6 @@ def _msrpc(ip, service, runner, findings, available):
     return []
 
 
-def _parse_lookupsid(output: str, findings: Findings) -> list[str]:
-    users = []
-    for line in output.splitlines():
-        # Format: 500: DOMAIN\Administrator (SidTypeUser)
-        m = re.search(r"\d+:\s+\S+\\(\S+)\s+\(SidTypeUser\)", line)
-        if m:
-            users.append(m.group(1))
-    if users:
-        findings.bullet(f"**lookupsid users ({len(users)}):** {', '.join(users[:30])}")
-    else:
-        findings.code_block(_trim(output))
-    return users
-
 
 # ── SMB (139, 445) ────────────────────────────────────────────────────────────
 
@@ -361,9 +327,7 @@ def _smb_run_zerologon(ip: str, port: int, runner: Runner, buf: Findings) -> Non
     if "VULNERABLE" in out.upper():
         buf.bullet("**VULNERABLE to Zerologon (CVE-2020-1472)**")
         buf.add_summary("**VULNERABLE to Zerologon (CVE-2020-1472)**")
-    else:
-        buf.bullet("Zerologon: not vulnerable")
-    buf.code_block(_trim(out))
+        buf.code_block(_trim(out))
 
 
 def _smb_run_null_session(ip: str, port: int, runner: Runner,
@@ -384,20 +348,6 @@ def _smb_run_null_session(ip: str, port: int, runner: Runner,
     out_users = runner.run(cmd_users, f"smb_{port}_nxc_users")
     buf.cmd(" ".join(cmd_users))
     _parse_nxc_users(out_users, buf, runner)
-
-    if "smbclient" in available:
-        cmd_list = ["smbclient", "-N", "-L", f"\\\\{ip}"]
-        out_list = runner.run(cmd_list, f"smb_{port}_smbclient_list")
-        buf.cmd(" ".join(cmd_list))
-        buf.code_block(_trim(_strip_smb1_noise(out_list)))
-
-    if "impacket-lookupsid" in available:
-        cmd_sid = ["impacket-lookupsid", f"anonymous:@{ip}"]
-        out_sid = runner.run(cmd_sid, f"smb_{port}_lookupsid", timeout=60)
-        buf.cmd(" ".join(cmd_sid))
-        users = _parse_lookupsid(out_sid, buf)
-        for u in users:
-            runner.ws.add_user(u)
 
     if readable_shares:
         _smb_spider(ip, readable_shares, runner, buf, available)
@@ -625,7 +575,6 @@ def _snmp_v3(ip: str, runner: Runner, findings: Findings):
             findings.code_block(_trim(result.stdout))
             runner.ws.add_user(username)
             return  # Found one, stop trying
-    findings.bullet("SNMPv3: no common usernames accepted (noAuthNoPriv)")
 
 
 # ── LDAP (389, 636, 3268, 3269) ───────────────────────────────────────────────
@@ -754,9 +703,9 @@ def _ldap(ip, service, runner, findings, available):
                 if any(kw in line for kw in ("ESC", "Vulnerable", "[!]", "Template Name")):
                     findings.bullet(f"  `{line.strip()}`")
         else:
-            findings.bullet(
-                "certipy (guest): no results — needs credentials. "
-                f"With creds: `certipy find -u USER@{domain} -p PASS -dc-ip {ip} -vulnerable -stdout`"
+            findings.note(
+                f"certipy needs credentials: "
+                f"`certipy find -u USER@{domain} -p PASS -dc-ip {ip} -vulnerable -stdout`"
             )
 
     # 11. ldapdomaindump — structured HTML/JSON dump saved to loot/
@@ -775,8 +724,6 @@ def _ldap(ip, service, runner, findings, available):
         findings.cmd(" ".join(cmd_dump))
         if "error" not in out_dump.lower():
             findings.bullet(f"**ldapdomaindump:** saved to `{dump_dir}`")
-        else:
-            findings.bullet("ldapdomaindump: anonymous bind not sufficient — needs credentials")
 
     # 12. BloodHound collection (try anonymous — usually needs creds but worth attempting)
     if "bloodhound-python" in available and domain:
@@ -797,9 +744,8 @@ def _ldap(ip, service, runner, findings, available):
         if ".zip" in out_bh.lower():
             findings.bullet(f"**BloodHound data collected** — import zip from `{bh_dir}`")
         else:
-            findings.bullet("BloodHound: anonymous/guest collection failed — needs valid credentials")
             findings.note(
-                f"With creds: `bloodhound-python -d {domain} -u USER -p PASS "
+                f"BloodHound needs credentials: `bloodhound-python -d {domain} -u USER -p PASS "
                 f"-ns {ip} -c All --zip`"
             )
 
@@ -1053,8 +999,6 @@ def _mysql(ip, service, runner, findings, available):
         if result.returncode == 0:
             findings.bullet("**MySQL root (no password): ACCESSIBLE**")
             findings.code_block(result.stdout.strip())
-        else:
-            findings.bullet("MySQL root (no password): denied")
 
     return []
 
@@ -1094,8 +1038,6 @@ def _postgres(ip, service, runner, findings, available):
         if result.returncode == 0:
             findings.bullet("**PostgreSQL postgres (no password): ACCESSIBLE**")
             findings.code_block(result.stdout.strip())
-        else:
-            findings.bullet("PostgreSQL postgres (no password): denied")
 
     return []
 
@@ -1122,7 +1064,6 @@ def _vnc(ip, service, runner, findings, available):
     elif "Valid credentials" in out:
         findings.bullet("**VNC: default/weak credentials found — see nmap output**")
     else:
-        findings.bullet("VNC: authentication required")
         findings.note(f"Connect: `vncviewer {ip}:{service.port}`")
 
     return []
@@ -1167,8 +1108,6 @@ def _redis(ip, service, runner, findings, available):
             "Possible RCE: set dir/dbfilename to web root and write a shell, "
             "or write SSH key to /root/.ssh/authorized_keys"
         )
-    else:
-        findings.bullet("Redis: authentication required or connection failed")
 
     return []
 
@@ -1254,8 +1193,6 @@ def _ipmi(ip, service, runner, findings, available):
         if out2.strip() and "error" not in out2.lower():
             findings.bullet("**IPMI cipher 0: accepted — user list:**")
             findings.code_block(_trim(out2))
-        else:
-            findings.bullet("IPMI cipher 0 attempt: no response or auth required")
 
     findings.note(
         f"IPMI default credentials to try: ADMIN/ADMIN, admin/admin, root/calvin (iDRAC), "
@@ -1302,8 +1239,6 @@ def _memcached(ip, service, runner, findings, available):
                 f"Dump items from slab: "
                 f"`echo 'stats cachedump SLAB_ID 0' | nc -w 3 {ip} {port}`"
             )
-    else:
-        findings.bullet("Memcached: no response or SASL authentication required")
 
     return []
 
@@ -1336,9 +1271,6 @@ def _tftp(ip, service, runner, findings, available):
         if result.returncode == 0 and loot_path.stat().st_size > 0:
             found_files.append(target)
             findings.bullet(f"**TFTP: `{target}` readable** — saved to `{loot_path}`")
-
-    if not found_files:
-        findings.bullet("TFTP: no readable files found")
 
     return []
 
