@@ -3,7 +3,7 @@ import subprocess
 from pathlib import Path
 from urllib.parse import urlparse
 
-from lib.findings import Findings
+from lib.findings import FindingsSink as Findings
 from lib.hosts import HostsManager
 from lib.models import Discovery, Service
 from lib.runner import Runner
@@ -82,10 +82,19 @@ def enumerate_web(
     discoveries: list[Discovery] = []
 
     # ── 1. Headers + tech fingerprint ─────────────────────────────────────────
-    _fingerprint(base_url, runner, findings, available)
+    fp = _fingerprint(base_url, runner, findings, available)
 
     # ── 2. NTLM info disclosure (Windows/IIS auth header leaks hostname/domain) ─
     _check_ntlm_info(ip, port, runner, findings)
+
+    # Microsoft-HTTPAPI endpoints (WinRM, RPC-over-HTTP) never have web content.
+    # The fingerprint and NTLM check above are all that's useful; bail here.
+    if "microsoft-httpapi" in fp["server"].lower():
+        findings.note(
+            f"Microsoft-HTTPAPI endpoint — no web content to enumerate. "
+            f"WinRM: `evil-winrm -i {ip} -u USER -p PASS`"
+        )
+        return discoveries
 
     # ── 3. HTTP method probe ───────────────────────────────────────────────────
     _check_http_methods(base_url, runner, findings)
@@ -166,7 +175,7 @@ def enumerate_web(
 
 # ── Fingerprint ───────────────────────────────────────────────────────────────
 
-def _fingerprint(url: str, runner: Runner, findings: Findings, available: set[str]):
+def _fingerprint(url: str, runner: Runner, findings: Findings, available: set[str]) -> dict:
     findings.h4("Fingerprint")
 
     cmd = ["curl", "-sS", "-k", "-I", "-L", "--max-time", "15", url]
@@ -174,12 +183,31 @@ def _fingerprint(url: str, runner: Runner, findings: Findings, available: set[st
     findings.cmd(" ".join(cmd))
     _parse_interesting_headers(out, findings)
 
-    if "whatweb" in available:
+    meta = _parse_headers_meta(out)
+
+    # Skip whatweb on HTTPAPI — it always times out on WinRM/RPC endpoints
+    if "whatweb" in available and "microsoft-httpapi" not in meta["server"].lower():
         cmd2 = ["whatweb", "--no-errors", "-a", "3", url]
         out2 = runner.run(cmd2, f"web_{_label(url)}_whatweb", timeout=60)
         findings.cmd(" ".join(cmd2))
         if out2.strip():
             findings.code_block(out2.strip())
+
+    return meta
+
+
+def _parse_headers_meta(raw: str) -> dict:
+    meta = {"status": "", "server": ""}
+    for line in raw.splitlines():
+        if line.startswith("HTTP/"):
+            parts = line.split()
+            if len(parts) >= 2:
+                meta["status"] = parts[1]
+        elif ":" in line:
+            key, _, val = line.partition(":")
+            if key.strip().lower() == "server":
+                meta["server"] = val.strip()
+    return meta
 
 
 def _parse_interesting_headers(raw: str, findings: Findings):

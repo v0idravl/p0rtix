@@ -15,11 +15,12 @@ Requires root for SYN scans (-sS) and /etc/hosts writes.
 """
 import argparse
 import os
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from lib.deps import check_deps
-from lib.findings import Findings
+from lib.findings import Findings, ServiceBuffer
 from lib.hosts import HostsManager
 from lib.models import Discovery, Service
 from lib.nmap import run_port_discovery, run_service_scan
@@ -107,34 +108,38 @@ def main():
         if svc.port in AD_PORTS and args.domain and not svc.hostname:
             svc.hostname = args.domain
 
+    # Deduplicate sibling ports that map to the same handler to avoid running
+    # identical enumeration twice (e.g. SMB on 139+445, LDAP on 389+3268).
+    services = _dedup_services(services)
+
     # ── Phase 3: Parallel service + web enumeration ───────────────────────────
     print(f"\n[*] Starting parallel enumeration ({len(services)} service(s))...")
-    findings.h2("Service Findings")
 
-    web_services = [s for s in services if s.is_web]
+    web_services   = [s for s in services if s.is_web]
     other_services = [s for s in services if not s.is_web]
 
     all_discoveries: list[Discovery] = []
+    svc_futures: dict = {}  # future → (ServiceBuffer, label)
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futures: dict = {}
-
         for svc in web_services:
+            buf = ServiceBuffer(svc.port, svc.proto)
             f = pool.submit(
                 enumerate_web,
-                args.ip, svc, args.domain, runner, findings, scope, hosts, available,
+                args.ip, svc, args.domain, runner, buf, scope, hosts, available,
             )
-            futures[f] = f"web:{svc.port}"
+            svc_futures[f] = (buf, f"web:{svc.port}")
 
         for svc in other_services:
+            buf = ServiceBuffer(svc.port, svc.proto)
             f = pool.submit(
                 enumerate_service,
-                args.ip, svc, runner, findings, available,
+                args.ip, svc, runner, buf, available,
             )
-            futures[f] = f"service:{svc.port}"
+            svc_futures[f] = (buf, f"service:{svc.port}")
 
-        for future in as_completed(futures):
-            label = futures[future]
+        for future in as_completed(svc_futures):
+            buf, label = svc_futures[future]
             try:
                 result = future.result()
                 if result:
@@ -142,6 +147,26 @@ def main():
                 print(f"[+] Done: {label}")
             except Exception as exc:
                 print(f"[!] Error in {label}: {exc}")
+                buf.note(f"Enumeration error: {exc}")
+
+    # Flush service buffers to findings in port order (fixes parallel scrambling)
+    findings.h2("Service Findings")
+    for buf, _ in sorted(svc_futures.values(), key=lambda x: (x[0].port, x[0].proto)):
+        findings.flush_service_buffer(buf)
+
+    # ── Phase 3.5: Post-enum domain-dependent checks ──────────────────────────
+    # By now all parallel handlers have written to users.txt and set
+    # ws.discovered_domain (from LDAP base DN). Run domain-gated checks here
+    # with the complete user list instead of mid-scan inside each handler.
+    effective_domain = args.domain or ws.discovered_domain
+    if ws.discovered_domain and not args.domain:
+        print(f"\n[*] Domain discovered: {ws.discovered_domain}")
+        if not hosts.resolves(ws.discovered_domain):
+            print(f"[*] Domain not in /etc/hosts.")
+            hosts.prompt_add(args.ip, ws.discovered_domain)
+
+    if effective_domain:
+        _run_post_domain_checks(args.ip, effective_domain, runner, findings, ws, available)
 
     # ── Phase 4: Follow-up on discovered vhosts / SSL SANs / redirects ────────
     new_hosts: list[tuple[Discovery, Service]] = []
@@ -155,7 +180,6 @@ def main():
 
         print(f"\n[*] [{d.type.upper()}] Discovered: {d.hostname}  (via {d.source})")
         if hosts.prompt_add(args.ip, d.hostname):
-            # Build a minimal Service for this discovered host
             svc = Service(
                 port=d.port, proto="tcp", name=d.scheme,
                 version="", is_web=True, scheme=d.scheme,
@@ -165,25 +189,30 @@ def main():
 
     if new_hosts:
         print(f"\n[*] Follow-up enumeration on {len(new_hosts)} discovered host(s)...")
-        findings.h2("Discovered Hosts")
 
+        followup_futures: dict = {}
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
-            futures = {}
             for d, svc in new_hosts:
+                buf = ServiceBuffer(svc.port, svc.proto)
                 f = pool.submit(
                     enumerate_web,
-                    args.ip, svc, args.domain, runner, findings, scope, hosts, available,
+                    args.ip, svc, args.domain, runner, buf, scope, hosts, available,
                     is_followup=True,
                 )
-                futures[f] = d.hostname
+                followup_futures[f] = (buf, d.hostname)
 
-            for future in as_completed(futures):
-                label = futures[future]
+            for future in as_completed(followup_futures):
+                buf, label = followup_futures[future]
                 try:
                     future.result()
                     print(f"[+] Done: {label}")
                 except Exception as exc:
                     print(f"[!] Error in followup {label}: {exc}")
+                    buf.note(f"Enumeration error: {exc}")
+
+        findings.h2("Discovered Hosts")
+        for buf, _ in sorted(followup_futures.values(), key=lambda x: (x[0].port, x[0].proto)):
+            findings.flush_service_buffer(buf)
 
     # ── searchsploit on nmap XML ───────────────────────────────────────────────
     if "searchsploit" in available:
@@ -203,6 +232,83 @@ def main():
     print(f"[+] Raw data  : {ws.raw_dir}/")
     print(f"[+] Loot      : {ws.loot_dir}/")
     print(f"{'=' * 60}")
+
+
+def _run_post_domain_checks(
+    ip: str, domain: str, runner: Runner,
+    findings: Findings, ws: Workspace, available: set[str],
+):
+    """
+    Domain-gated checks that require the complete users.txt assembled
+    across all parallel handlers (LDAP + SMB + enum4linux-ng).
+    Runs sequentially after phase 3 so the user list is final.
+    """
+    users_file = ws.loot_dir / "users.txt"
+    if not users_file.exists() or users_file.stat().st_size == 0:
+        return
+
+    findings.h2("Post-Enumeration: Domain Checks")
+    findings.bullet(f"Domain: `{domain}` — user list: `{users_file}` ({sum(1 for _ in users_file.open())} accounts)")
+
+    # AS-REP roasting — full user list, catches accounts LDAP UAC flag missed
+    if "impacket-GetNPUsers" in available:
+        cmd = [
+            "impacket-GetNPUsers", f"{domain}/",
+            "-no-pass", "-dc-ip", ip,
+            "-request", "-format", "hashcat",
+            "-usersfile", str(users_file),
+        ]
+        findings.cmd(" ".join(cmd))
+        out = runner.run(cmd, "post_GetNPUsers", timeout=120)
+        if "$krb5asrep$" in out:
+            findings.bullet("**AS-REP roastable hash(es) found — crack with: `hashcat -m 18200`**")
+            findings.code_block(out.strip())
+        else:
+            findings.bullet("AS-REP roasting: no vulnerable accounts in user list")
+
+    # Kerbrute username validation against the discovered user list
+    if "kerbrute" in available:
+        cmd2 = ["kerbrute", "userenum", "--dc", ip, "-d", domain, str(users_file)]
+        findings.cmd(" ".join(cmd2))
+        out2 = runner.run(cmd2, "post_kerbrute_userenum", timeout=300)
+        valid = re.findall(r"VALID USERNAME:\s+(\S+)", out2)
+        if valid:
+            findings.bullet(f"**kerbrute confirmed ({len(valid)} valid):** {', '.join(valid)}")
+        else:
+            findings.bullet("kerbrute: no additional valid usernames confirmed")
+
+    findings.note(
+        f"Kerberoasting (needs creds): "
+        f"`impacket-GetUserSPNs {domain}/USER:PASS -dc-ip {ip} -request -outputfile spns.txt`"
+    )
+
+
+def _dedup_services(services: list[Service]) -> list[Service]:
+    """
+    When sibling ports share the same handler, keep only the primary one.
+    The port table in findings still shows all ports; only the handler dispatch is deduped.
+    """
+    open_tcp = {s.port for s in services if s.proto == "tcp"}
+    open_udp = {s.port for s in services if s.proto == "udp"}
+    drop: set[tuple[int, str]] = set()
+
+    if 445 in open_tcp and 139 in open_tcp:   # SMB: 445 supersedes 139
+        drop.add((139, "tcp"))
+    if 389 in open_tcp and 3268 in open_tcp:  # LDAP GC mirrors 389 in single-domain forests
+        drop.add((3268, "tcp"))
+    if 636 in open_tcp and 3269 in open_tcp:  # LDAPS GC mirrors 636
+        drop.add((3269, "tcp"))
+    if 88 in open_tcp and 88 in open_udp:     # Kerberos: TCP and UDP hit same handler
+        drop.add((88, "udp"))
+    if 53 in open_udp and 53 in open_tcp:     # DNS: UDP is primary; TCP rarely adds more
+        drop.add((53, "tcp"))
+
+    if not drop:
+        return services
+
+    for port, proto in sorted(drop):
+        print(f"[*] Dedup: skipping {proto.upper()} {port} (covered by sibling port)")
+    return [s for s in services if (s.port, s.proto) not in drop]
 
 
 def _write_searchsploit(output: str, findings: Findings):

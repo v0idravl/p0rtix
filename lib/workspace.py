@@ -42,6 +42,8 @@ class Workspace:
         self._counter_lock = threading.Lock()
         self._known_users: set[str] = set()
         self._users_lock = threading.Lock()
+        self.discovered_domain: str = ""
+        self._domain_lock = threading.Lock()
 
         self._setup()
 
@@ -57,6 +59,13 @@ class Workspace:
         with self._counter_lock:
             self._raw_counter += 1
             return f"{self._raw_counter:02d}_{label}"
+
+    def set_discovered_domain(self, domain: str):
+        """Thread-safe: store the first domain found during enumeration."""
+        with self._domain_lock:
+            if not self.discovered_domain and domain:
+                self.discovered_domain = domain
+                (self.loot_dir / "domain.txt").write_text(domain + "\n")
 
     def add_user(self, username: str):
         """Thread-safe append of a discovered username to loot/users.txt (deduped)."""

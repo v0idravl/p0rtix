@@ -8,7 +8,7 @@ from lib.workspace import Workspace
 
 # Ports that should be treated as web regardless of the service name nmap reports
 _WEB_PORTS = {
-    80, 81, 280, 443, 591, 593, 3000, 4848, 5000,
+    80, 81, 280, 443, 591, 3000, 4848, 5000,
     7001, 7443, 8000, 8008, 8080, 8081, 8082, 8088,
     8443, 8888, 9000, 9090, 9443,
 }
@@ -16,9 +16,14 @@ _WEB_PORTS = {
 # Service name substrings that indicate HTTP/HTTPS regardless of port
 _WEB_NAMES = {"http", "https", "ssl/http", "http-alt", "http-proxy", "sun-answerbook"}
 
+# Service names that look HTTP-ish but are actually RPC transports — not web targets
+_RPC_HTTP_NAMES = {"ncacn_http", "http-rpc-epmap"}
+
 
 def _is_web(port: int, service_name: str) -> bool:
     name = service_name.lower()
+    if any(n == name for n in _RPC_HTTP_NAMES):
+        return False
     if any(n in name for n in _WEB_NAMES):
         return True
     return port in _WEB_PORTS

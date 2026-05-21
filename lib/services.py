@@ -8,7 +8,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from lib.findings import Findings
+from lib.findings import FindingsSink as Findings
 from lib.models import Discovery, Service
 from lib.runner import Runner
 
@@ -196,21 +196,23 @@ def _kerberos(ip, service, runner, findings, available):
     port = service.port
     domain = service.hostname  # set by orchestrator from --domain
 
-    realm = domain or ip
+    if not domain:
+        findings.note(
+            "No `--domain` provided — Kerberos enumeration skipped. "
+            "Re-run with `--domain DOMAIN` to enable kerbrute, krb5-enum-users, and AS-REP roasting."
+        )
+        return []
+
     cmd = [
         "nmap", "--script", "krb5-enum-users",
         "--script-args",
-        f"krb5-enum-users.realm={realm},"
+        f"krb5-enum-users.realm={domain},"
         "userdb=/usr/share/seclists/Usernames/top-usernames-shortlist.txt",
         "-p", str(port), ip,
     ]
     out = runner.run(cmd, "krb_88_nmap")
     findings.cmd(" ".join(cmd))
     findings.code_block(_trim(out))
-
-    if not domain:
-        findings.note("No `--domain` provided — kerbrute and impacket checks skipped.")
-        return []
 
     if "kerbrute" in available:
         wl = _best_userlist()
@@ -314,15 +316,6 @@ def _msrpc(ip, service, runner, findings, available):
         findings.cmd(" ".join(cmd2))
         findings.code_block(_trim(out2))
 
-    # SID-brute user enumeration via null session
-    if "impacket-lookupsid" in available:
-        cmd3 = ["impacket-lookupsid", f"anonymous:@{ip}"]
-        out3 = runner.run(cmd3, f"msrpc_{service.port}_lookupsid", timeout=60)
-        findings.cmd(" ".join(cmd3))
-        users = _parse_lookupsid(out3, findings)
-        for u in users:
-            runner.ws.add_user(u)
-
     return []
 
 
@@ -335,6 +328,8 @@ def _parse_lookupsid(output: str, findings: Findings) -> list[str]:
             users.append(m.group(1))
     if users:
         findings.bullet(f"**lookupsid users ({len(users)}):** {', '.join(users[:30])}")
+    else:
+        findings.code_block(_trim(output))
     return users
 
 
@@ -362,14 +357,13 @@ def _smb(ip, service, runner, findings, available):
     findings.cmd(" ".join(cmd_enum))
     findings.code_block(_trim(out_enum))
 
-    # Vulnerability checks — includes Zerologon (CVE-2020-1472)
+    # Vulnerability checks
     vuln_scripts = (
         "smb-vuln-ms17-010,"
         "smb-vuln-cve2009-3103,"
         "smb-vuln-ms10-054,"
         "smb-vuln-ms10-061,"
-        "smb-double-pulsar-backdoor,"
-        "smb-vuln-cve-2020-1472"
+        "smb-double-pulsar-backdoor"
     )
     cmd_vuln = ["nmap", "--script", vuln_scripts,
                 "--script-args", "unsafe=1", "-p", str(port), ip]
@@ -379,6 +373,17 @@ def _smb(ip, service, runner, findings, available):
         if "VULNERABLE" in line:
             findings.bullet(f"**{line.strip()}**")
     findings.code_block(_trim(out_vuln))
+
+    # Zerologon (CVE-2020-1472) — nxc module is safe (non-destructive check)
+    if "nxc" in available:
+        cmd_zl = ["nxc", "smb", ip, "-M", "zerologon"]
+        out_zl = runner.run(cmd_zl, f"smb_{port}_zerologon", timeout=60)
+        findings.cmd(" ".join(cmd_zl))
+        if "VULNERABLE" in out_zl.upper():
+            findings.bullet("**VULNERABLE to Zerologon (CVE-2020-1472)**")
+        elif out_zl.strip():
+            findings.bullet(f"Zerologon: not vulnerable")
+        findings.code_block(_trim(out_zl))
 
     # Null session enumeration
     readable_shares: list[str] = []
@@ -443,6 +448,8 @@ def _parse_nxc_shares(output: str, findings: Findings) -> list[str]:
             m = re.search(r"\b([A-Za-z0-9_$.-]+)\s+READ", line, re.IGNORECASE)
             if m and m.group(1).upper() not in ("IPC$",):
                 readable.append(m.group(1))
+    if not readable:
+        findings.code_block(_trim(output))
     return readable
 
 
@@ -452,6 +459,8 @@ def _parse_nxc_users(output: str, findings: Findings, runner: Runner):
         findings.bullet(f"**SMB users:** {', '.join(users)}")
         for u in users:
             runner.ws.add_user(u)
+    else:
+        findings.code_block(_trim(output))
 
 
 def _parse_enum4linux(output: str, findings: Findings, runner: Runner):
@@ -683,6 +692,13 @@ def _ldap(ip, service, runner, findings, available):
         findings.bullet(f"**AS-REP roastable (no pre-auth required): {', '.join(asrep)}**")
         findings.note(f"Crack with: `impacket-GetNPUsers {domain}/ -no-pass -dc-ip {ip} -request -format hashcat`")
 
+    # Derive domain from base DN if --domain wasn't provided, and persist it
+    # so the post-enum phase can use it for GetNPUsers / kerbrute with the
+    # complete user list (assembled from all parallel handlers).
+    effective_domain = domain or _dn_to_domain(base_dn)
+    if effective_domain and not gc_mode:
+        runner.ws.set_discovered_domain(effective_domain)
+
     # 7. Unconstrained delegation
     out_uncons = lq("unconstrained_delegation",
                     "(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=524288))",
@@ -792,6 +808,35 @@ def _extract_ldap_base(output: str) -> str:
     return m.group(1).strip() if m else ""
 
 
+def _dn_to_domain(base_dn: str) -> str:
+    parts = re.findall(r"DC=([^,]+)", base_dn, re.IGNORECASE)
+    return ".".join(parts) if parts else ""
+
+
+_DESC_BOILERPLATE = {
+    "built-in account for administering the computer/domain",
+    "built-in account for guest access to the computer/domain",
+    "a user account managed by the system.",
+    "key distribution center service account",
+}
+
+def _looks_like_credential(desc: str) -> bool:
+    d = desc.strip()
+    lower = d.lower()
+    if any(lower.startswith(b[:35]) for b in _DESC_BOILERPLATE):
+        return False
+    if len(d) < 4 or len(d) > 80:
+        return False
+    if d.endswith(".") and len(d) > 20:  # sentence, not a password
+        return False
+    if " " not in d:                     # single token — suspicious
+        return True
+    # Multi-word but short and has digit or special char
+    if len(d) <= 30 and re.search(r'[\d!@#$%^&*()\-_=+\[\]{}|;:,.<>?/]', d):
+        return True
+    return False
+
+
 def _parse_ldap_users(output: str, findings: Findings, runner: Runner):
     accounts = re.findall(r"sAMAccountName:\s+(.+)", output)
     descriptions = re.findall(r"description:\s+(.+)", output)
@@ -803,7 +848,11 @@ def _parse_ldap_users(output: str, findings: Findings, runner: Runner):
     if descriptions:
         findings.bullet("**User descriptions (check for passwords):**")
         for d in descriptions[:10]:
-            findings.bullet(f"  `{d.strip()}`")
+            stripped = d.strip()
+            if _looks_like_credential(stripped):
+                findings.bullet(f"  ⚠ **Possible credential:** `{stripped}`")
+            else:
+                findings.bullet(f"  `{stripped}`")
 
 
 def _parse_ldap_computers(output: str, findings: Findings):

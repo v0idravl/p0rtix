@@ -1,13 +1,18 @@
+import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
+import urllib.request
+import zipfile
 from pathlib import Path
 
 # Tool name → install instructions.
-# "apt"  — installed with: apt install -y <pkg>
-# "go"   — installed with: go install <pkg>
-# "pip"  — installed with: pip3 install <pkg>
+# "apt"     — installed with: apt install -y <pkg>
+# "go"      — installed with: go install <pkg>
+# "pip"     — installed with: pip3 install <pkg>
+# "github"  — downloaded as a pre-built binary from GitHub releases
 # required=True → abort if missing; False → skip gracefully
 TOOLS: dict[str, dict] = {
     # Core — scan cannot run without these
@@ -17,7 +22,7 @@ TOOLS: dict[str, dict] = {
 
     # Web
     "whatweb":               {"apt": "whatweb",                         "required": False},
-    "gospider":              {"go":  "github.com/jaeles-project/gospider@latest", "required": False},
+    "gospider":              {"github": {"repo": "jaeles-project/gospider",  "pattern": "gospider_linux_{arch}.zip",  "binary": "gospider"},  "required": False},
     "testssl.sh":            {"apt": "testssl.sh",                      "required": False},
     "wpscan":                {"apt": "wpscan",                          "required": False},
 
@@ -38,7 +43,7 @@ TOOLS: dict[str, dict] = {
     "certipy":               {"pip": "certipy-ad",                      "required": False},
 
     # Kerberos
-    "kerbrute":              {"go":  "github.com/ropnop/kerbrute@latest", "required": False},
+    "kerbrute":              {"github": {"repo": "ropnop/kerbrute",         "pattern": "kerbrute_linux_{arch}",     "binary": "kerbrute"},  "required": False},
     "impacket-GetNPUsers":   {"apt": "python3-impacket",                "required": False},
     "impacket-GetUserSPNs":  {"apt": "python3-impacket",                "required": False},
     "impacket-lookupsid":    {"apt": "python3-impacket",                "required": False},
@@ -120,10 +125,64 @@ def check_deps() -> set[str]:
 def _install(tool: str, meta: dict):
     if "apt" in meta:
         _apt_install(meta["apt"], tool)
+    elif "github" in meta:
+        _github_install(tool, **meta["github"])
     elif "go" in meta:
         _go_install(meta["go"], tool)
     elif "pip" in meta:
         _pip_install(meta["pip"], tool)
+
+
+def _github_install(tool: str, repo: str, pattern: str, binary: str):
+    """Download a pre-built binary from the latest GitHub release."""
+    machine = platform.machine().lower()
+    arch = {"x86_64": "amd64", "aarch64": "arm64"}.get(machine, machine)
+    filename = pattern.format(arch=arch)
+    dest = Path(f"/usr/local/bin/{tool}")
+
+    api_url = f"https://api.github.com/repos/{repo}/releases/latest"
+    print(f"    [github] Installing {tool} from {repo}...")
+    try:
+        req = urllib.request.Request(api_url, headers={"User-Agent": "p0rtix"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            release = json.loads(resp.read())
+
+        asset = next(
+            (a for a in release.get("assets", []) if a["name"] == filename),
+            None,
+        )
+        if asset is None:
+            # Try case-insensitive / partial match
+            asset = next(
+                (a for a in release.get("assets", [])
+                 if arch in a["name"].lower() and "linux" in a["name"].lower()),
+                None,
+            )
+        if asset is None:
+            print(f"    [!] No matching release asset for {filename} in {repo}")
+            return
+
+        download_url = asset["browser_download_url"]
+        tmp = Path(f"/tmp/{asset['name']}")
+        urllib.request.urlretrieve(download_url, tmp)
+
+        if tmp.suffix == ".zip":
+            with zipfile.ZipFile(tmp) as z:
+                names = z.namelist()
+                target = next((n for n in names if Path(n).name == binary), names[0])
+                extracted = Path("/tmp") / Path(target).name
+                with z.open(target) as src, open(extracted, "wb") as out:
+                    out.write(src.read())
+            tmp.unlink()
+            tmp = extracted
+
+        dest.write_bytes(tmp.read_bytes())
+        dest.chmod(0o755)
+        tmp.unlink(missing_ok=True)
+        print(f"    [+] Installed {tool}")
+
+    except Exception as exc:
+        print(f"    [!] GitHub install failed for {tool}: {exc}")
 
 
 def _apt_install(pkg: str, tool: str):
