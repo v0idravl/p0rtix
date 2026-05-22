@@ -332,25 +332,48 @@ def _smb_run_zerologon(ip: str, port: int, runner: Runner, buf: Findings) -> Non
 
 def _smb_run_null_session(ip: str, port: int, runner: Runner,
                           buf: Findings, available: set) -> None:
+    # Null session probe — always run, reveals domain/hostname regardless
     cmd_null = ["nxc", "smb", ip, "-u", "", "-p", ""]
     out_null = runner.run(cmd_null, f"smb_{port}_nxc_null")
     buf.cmd(" ".join(cmd_null))
     buf.code_block(_trim(out_null))
 
+    # Share enumeration: null session first, fall back to Guest if ACCESS_DENIED
+    auth_user, auth_pass = "", ""
+    readable_shares: list[str] = []
+
     cmd_shares = ["nxc", "smb", ip, "-u", "", "-p", "", "--shares"]
     out_shares = runner.run(cmd_shares, f"smb_{port}_nxc_shares")
     buf.cmd(" ".join(cmd_shares))
     readable_shares = _parse_nxc_shares(out_shares, buf)
-    if readable_shares:
-        buf.add_summary(f"SMB: anonymous read access — shares: {', '.join(readable_shares)}")
 
-    cmd_users = ["nxc", "smb", ip, "-u", "", "-p", "", "--users"]
+    if not readable_shares and "STATUS_ACCESS_DENIED" in out_shares:
+        cmd_guest = ["nxc", "smb", ip, "-u", "Guest", "-p", ""]
+        out_guest = runner.run(cmd_guest, f"smb_{port}_nxc_guest")
+        buf.cmd(" ".join(cmd_guest))
+        buf.code_block(_trim(out_guest))
+
+        if "[+]" in out_guest:
+            cmd_guest_shares = ["nxc", "smb", ip, "-u", "Guest", "-p", "", "--shares"]
+            out_guest_shares = runner.run(cmd_guest_shares, f"smb_{port}_nxc_shares_guest")
+            buf.cmd(" ".join(cmd_guest_shares))
+            readable_shares = _parse_nxc_shares(out_guest_shares, buf)
+            if readable_shares:
+                auth_user, auth_pass = "Guest", ""
+
+    if readable_shares:
+        label = "Guest" if auth_user else "anonymous"
+        buf.add_summary(f"SMB: {label} read access — shares: {', '.join(readable_shares)}")
+
+    # User enumeration with best available auth
+    cmd_users = ["nxc", "smb", ip, "-u", auth_user, "-p", auth_pass, "--users"]
     out_users = runner.run(cmd_users, f"smb_{port}_nxc_users")
     buf.cmd(" ".join(cmd_users))
     _parse_nxc_users(out_users, buf, runner)
 
     if readable_shares:
-        _smb_spider(ip, readable_shares, runner, buf, available)
+        _smb_spider(ip, readable_shares, runner, buf, available,
+                    user=auth_user, password=auth_pass)
 
 
 def _smb_run_enum4linux(ip: str, port: int, runner: Runner, buf: Findings) -> None:
@@ -450,17 +473,21 @@ def _parse_enum4linux(output: str, findings: Findings, runner: Runner):
 
 
 def _smb_spider(ip: str, shares: list[str], runner: Runner,
-                findings: Findings, available: set[str]):
+                findings: Findings, available: set[str],
+                user: str = "", password: str = ""):
     """Recursively list and download interesting files from READ-accessible shares."""
     loot_dir = runner.ws.loot_dir / "smb"
     loot_dir.mkdir(parents=True, exist_ok=True)
+
+    smbclient_auth = ["-U", f"{user}%{password}"] if user else ["-N"]
+    smbmap_auth    = ["-u", user, "-p", password] if user else []
 
     findings.h4("Share Spidering")
     for share in shares:
         findings.bullet(f"Spidering share: **{share}**")
 
         if "smbclient" in available:
-            cmd = ["smbclient", f"\\\\{ip}\\{share}", "-N", "-c", "recurse; ls"]
+            cmd = ["smbclient", f"\\\\{ip}\\{share}", *smbclient_auth, "-c", "recurse; ls"]
             out = runner.run(cmd, f"smb_spider_{share}_list", timeout=60)
             findings.cmd(" ".join(cmd))
             if out.strip() and "NT_STATUS_ACCESS_DENIED" not in out:
@@ -468,11 +495,10 @@ def _smb_spider(ip: str, shares: list[str], runner: Runner,
 
         # smbmap recursive listing with download of interesting files
         if "smbmap" in available:
-            cmd2 = ["smbmap", "-H", ip, "-r", share, "--no-write-check", "-q"]
+            cmd2 = ["smbmap", "-H", ip, *smbmap_auth, "-r", share, "--no-write-check", "-q"]
             out2 = runner.run(cmd2, f"smb_spider_{share}_smbmap", timeout=60)
             findings.cmd(" ".join(cmd2))
             if out2.strip() and "NT_STATUS_ACCESS_DENIED" not in out2:
-                # Surface interesting files
                 for line in out2.splitlines():
                     if re.search(
                         r"\.(txt|pdf|doc|docx|xls|xlsx|config|ini|conf|xml|log|bak|"
@@ -481,10 +507,10 @@ def _smb_spider(ip: str, shares: list[str], runner: Runner,
                     ):
                         findings.bullet(f"  Interesting: `{line.strip()}`")
 
-        # Try nxc spider_plus module for automated file download
+        # nxc spider_plus for automated file download
         if "nxc" in available:
             cmd3 = [
-                "nxc", "smb", ip, "-u", "", "-p", "",
+                "nxc", "smb", ip, "-u", user, "-p", password,
                 "-M", "spider_plus",
                 "-o", f"DOWNLOAD_FLAG=True", f"OUTPUT_FOLDER={str(loot_dir)}",
                 "MAX_FILE_SIZE=5000000",
