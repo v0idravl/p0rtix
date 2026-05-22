@@ -94,7 +94,7 @@ def main():
     # ── Setup ─────────────────────────────────────────────────────────────────
     available = check_deps()
 
-    ws = Workspace(args.ip, args.domain, args.name, args.workspace)
+    ws = Workspace(args.ip, args.domain, args.name, args.workspace, mode=args.mode)
     findings = Findings(ws.findings_path, args.ip, args.domain)
     set_verbose(args.verbose)
     runner = Runner(ws)

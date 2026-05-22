@@ -23,7 +23,7 @@ class Workspace:
         raw/              ← full tool output with command headers
     """
 
-    def __init__(self, ip: str, domain: str | None, name: str | None, workspace: str):
+    def __init__(self, ip: str, domain: str | None, name: str | None, workspace: str, mode: str = "scan"):
         self.ip = ip
         self.domain = domain
 
@@ -31,11 +31,12 @@ class Workspace:
         self.name = _slugify(slug)
 
         self.machine_dir = Path(workspace).resolve() / self.name
-        self.raw_dir = self.machine_dir / "raw"
+        prefix = f"{mode}_" if mode != "scan" else ""
+        self.raw_dir = self.machine_dir / f"{prefix}raw"
         self.loot_dir = self.machine_dir / "loot"
         self.exploit_dir = self.machine_dir / "exploit"
         self.report_dir = self.machine_dir / "report"
-        self.findings_path = self.machine_dir / "findings.md"
+        self.findings_path = self.machine_dir / f"{prefix}findings.md"
         self.report_path = self.report_dir / "report.md"
         self.bloodhound_dir = self.loot_dir / "bloodhound"
 
@@ -99,6 +100,18 @@ class Workspace:
                 self._known_creds.add(entry)
                 with (self.loot_dir / "valid_creds.txt").open("a") as fh:
                     fh.write(entry + "\n")
+
+    def append_hash_file(self, filename: str, new_hashes: list[str]) -> int:
+        """Append unique hashes to loot/<filename>. Returns count of newly added hashes."""
+        path = self.loot_dir / filename
+        existing: set[str] = set()
+        if path.exists():
+            existing = set(path.read_text().splitlines())
+        unique = [h for h in new_hashes if h.strip() and h.strip() not in existing]
+        if unique:
+            with path.open("a") as fh:
+                fh.write("\n".join(unique) + "\n")
+        return len(unique)
 
     def add_user(self, username: str):
         """Thread-safe append of a discovered username to loot/users.txt (deduped)."""
