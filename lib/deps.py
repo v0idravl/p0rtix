@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import os
 import platform
@@ -74,8 +75,18 @@ TOOLS: dict[str, dict] = {
     "searchsploit":          {"apt": "exploitdb",                       "required": False},
     "openssl":               {"apt": "openssl",                         "required": False},
     "git-dumper":            {"pip": "git-dumper",                      "required": False},
-    "anthropic":             {"pip": "anthropic",                       "required": False},
+    "anthropic":             {"pip": "anthropic", "library": True,       "required": False},
 }
+
+
+# Extended search path so sudo runs find pipx/pip binaries in user .local/bin
+_SEARCH_PATH = os.environ.get("PATH", "") + ":/root/.local/bin:" + str(Path.home() / ".local/bin")
+
+
+def _is_available(tool: str, meta: dict) -> bool:
+    if meta.get("library"):
+        return importlib.util.find_spec(tool) is not None
+    return shutil.which(tool, path=_SEARCH_PATH) is not None
 
 
 def check_deps() -> set[str]:
@@ -87,7 +98,7 @@ def check_deps() -> set[str]:
     missing_optional: list[str] = []
 
     for tool, meta in TOOLS.items():
-        if not shutil.which(tool):
+        if not _is_available(tool, meta):
             (missing_required if meta["required"] else missing_optional).append(tool)
 
     if missing_optional:
@@ -118,7 +129,7 @@ def check_deps() -> set[str]:
         else:
             sys.exit(1)
 
-    available = {tool for tool in TOOLS if shutil.which(tool)}
+    available = {tool for tool, meta in TOOLS.items() if _is_available(tool, meta)}
     return available
 
 
@@ -130,7 +141,7 @@ def _install(tool: str, meta: dict):
     elif "go" in meta:
         _go_install(meta["go"], tool)
     elif "pip" in meta:
-        _pip_install(meta["pip"], tool)
+        _pip_install(meta["pip"], tool, library=meta.get("library", False))
 
 
 def _github_install(tool: str, repo: str, pattern: str, binary: str):
@@ -233,13 +244,44 @@ def _go_install(pkg: str, tool: str):
         print(f"    [!] go install succeeded but {tool} not found in {gobin}")
 
 
-def _pip_install(pkg: str, tool: str):
+def _symlink_pipx(tool: str) -> None:
+    """Symlink a pipx-installed binary into /usr/local/bin so sudo PATH finds it."""
+    for base in (Path("/root/.local/bin"), Path.home() / ".local/bin"):
+        candidate = base / tool
+        if candidate.exists():
+            symlink = Path(f"/usr/local/bin/{tool}")
+            if not symlink.exists():
+                try:
+                    symlink.symlink_to(candidate)
+                except OSError:
+                    pass
+            return
+
+
+def _pip_install(pkg: str, tool: str, library: bool = False) -> None:
     print(f"    [pip] Installing {pkg}...")
-    # Try pipx first (cleaner for standalone tools), fall back to pip3
+
+    if library:
+        # Libraries must be importable in the running interpreter — skip pipx
+        for cmd in (
+            ["pip3", "install", "--quiet", pkg],
+            ["pip3", "install", "--quiet", "--break-system-packages", pkg],
+        ):
+            if shutil.which(cmd[0]):
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode == 0:
+                    print(f"    [+] Installed {tool}")
+                    return
+        print(f"    [!] pip install {pkg} failed — install manually: pip3 install {pkg}")
+        return
+
+    # CLI tools: try pipx first (isolated env), fall back to pip3
     for installer in (["pipx", "install"], ["pip3", "install", "--quiet"]):
         if shutil.which(installer[0]):
             result = subprocess.run([*installer, pkg], capture_output=True, text=True)
             if result.returncode == 0:
+                if installer[0] == "pipx":
+                    _symlink_pipx(tool)
                 print(f"    [+] Installed {tool} via {installer[0]}")
                 return
     print(f"    [!] pip install {pkg} failed — install manually: pip3 install {pkg}")
