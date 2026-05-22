@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -31,6 +32,29 @@ def _error_lines(text: str) -> str:
         line for line in text.strip().splitlines()
         if any(m in line for m in ("[!]", "ERROR", "error:", "FAIL", "Could not", "strongerAuth"))
     )
+
+
+def _parse_ldapdomaindump_users(out_dir: str, ws: Workspace) -> int:
+    """Parse domain_users.html from ldapdomaindump and populate ws users.txt. Returns count added."""
+    user_file = Path(out_dir) / "domain_users.html"
+    if not user_file.exists():
+        return 0
+    html = user_file.read_text(errors="replace")
+
+    # Locate the sAMAccountName column index from <th> headers
+    headers = [re.sub(r"<[^>]+>", "", h).strip().lower()
+               for h in re.findall(r"<th[^>]*>(.*?)</th>", html, re.IGNORECASE | re.DOTALL)]
+    sam_idx = next((i for i, h in enumerate(headers) if "samaccountname" in h), 0)
+
+    count = 0
+    for row in re.finditer(r"<tr[^>]*>(.*?)</tr>", html, re.IGNORECASE | re.DOTALL):
+        cells = re.findall(r"<td[^>]*>(.*?)</td>", row.group(1), re.IGNORECASE | re.DOTALL)
+        if len(cells) > sam_idx:
+            name = re.sub(r"<[^>]+>", "", cells[sam_idx]).strip()
+            if name:
+                ws.add_user(name)
+                count += 1
+    return count
 
 
 # ── Credential loading ────────────────────────────────────────────────────────
@@ -144,12 +168,22 @@ def _ad_core(
                     print(f"    [!] ldapdomaindump failed (LDAP + LDAPS)")
                 else:
                     findings.bullet(f"Full dump saved to `loot/ldapdomaindump/`")
-                    print(f"    [+] ldapdomaindump (LDAPS) complete")
+                    added = _parse_ldapdomaindump_users(out_dir, ws)
+                    if added:
+                        findings.bullet(f"**{added} domain users** extracted from dump → `loot/users.txt`")
+                        print(f"    [+] ldapdomaindump (LDAPS) complete — {added} users added to users.txt")
+                    else:
+                        print(f"    [+] ldapdomaindump (LDAPS) complete")
             else:
                 print(f"    [!] ldapdomaindump error")
         else:
             findings.bullet(f"Full dump saved to `loot/ldapdomaindump/`")
-            print(f"    [+] ldapdomaindump complete")
+            added = _parse_ldapdomaindump_users(out_dir, ws)
+            if added:
+                findings.bullet(f"**{added} domain users** extracted from dump → `loot/users.txt`")
+                print(f"    [+] ldapdomaindump complete — {added} users added to users.txt")
+            else:
+                print(f"    [+] ldapdomaindump complete")
 
     # 2. Kerberoasting — SPN accounts → crackable hashes
     if "impacket-GetUserSPNs" in available:
@@ -230,7 +264,7 @@ def _ad_core(
         findings.h4("BloodHound Collection")
         findings.cmd(" ".join(cmd))
         out = runner.run(cmd, "creds_bloodhound", timeout=300)
-        zips = list(Path(bh_dir).glob("*.zip"))
+        zips = list(Path(bh_dir).rglob("*.zip"))
         if zips:
             findings.bullet(f"**BloodHound data** → `loot/bloodhound/{zips[0].name}`")
             findings.add_summary("BloodHound collection complete — import zip into BloodHound GUI")

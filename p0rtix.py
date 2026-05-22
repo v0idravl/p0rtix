@@ -138,6 +138,8 @@ def main():
         run_creds_mode(args.ip, args.domain, creds, services, runner, findings, ws, available)
 
         findings.finalize()
+        if args.analyze:
+            analyze_findings(ws, args.ip, args.domain, model=args.model, mode="creds")
         sudo_user = os.environ.get("SUDO_USER")
         if sudo_user:
             subprocess.run(["chown", "-R", f"{sudo_user}:", str(ws.machine_dir)],

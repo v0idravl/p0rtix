@@ -9,8 +9,9 @@ def analyze_findings(
     ip: str,
     domain: str | None,
     model: str = "claude-sonnet-4-6",
+    mode: str = "scan",
 ) -> None:
-    """Send findings.md + loot to Claude and stream back pentest analysis."""
+    """Send findings + loot to Claude and stream back pentest analysis."""
     try:
         import anthropic
     except ImportError:
@@ -23,28 +24,80 @@ def analyze_findings(
         return
 
     if not ws.findings_path.exists():
-        print("[!] findings.md not found — skipping AI analysis")
+        print(f"[!] {ws.findings_path.name} not found — skipping AI analysis")
         return
 
     findings_content = ws.findings_path.read_text()
-
-    loot_parts: list[str] = []
-    users_path = ws.loot_dir / "users.txt"
-    creds_path = ws.loot_dir / "creds_found.txt"
-    if users_path.exists():
-        users = users_path.read_text().strip()
-        if users:
-            loot_parts.append(f"Discovered users:\n{users}")
-    if creds_path.exists():
-        creds = creds_path.read_text().strip()
-        if creds:
-            loot_parts.append(f"Discovered credentials:\n{creds}")
-    loot_section = "\n\n".join(loot_parts) if loot_parts else "None"
-
     domain_str = domain or "N/A"
     today = date.today().isoformat()
 
-    prompt = f"""You are an expert penetration tester reviewing automated reconnaissance output from a stealthy, coverage-focused scan.
+    # Derive output path from the findings filename (creds_findings.md → creds_analysis.md)
+    analysis_path = ws.findings_path.parent / ws.findings_path.name.replace("findings", "analysis")
+
+    if mode == "creds":
+        loot_parts = _build_creds_loot(ws)
+        prompt = _creds_prompt(ip, domain_str, today, findings_content, loot_parts)
+    else:
+        loot_parts = _build_scan_loot(ws)
+        prompt = _scan_prompt(ip, domain_str, today, findings_content, loot_parts)
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    print(f"\n[*] Sending {ws.findings_path.name} to Claude ({model}) for analysis...")
+    print("=" * 60)
+
+    chunks: list[str] = []
+    with client.messages.stream(
+        model=model,
+        max_tokens=4096,
+        messages=[{"role": "user", "content": prompt}],
+    ) as stream:
+        for text in stream.text_stream:
+            print(text, end="", flush=True)
+            chunks.append(text)
+
+    print("\n" + "=" * 60)
+
+    full_analysis = "".join(chunks)
+    header = f"# AI Analysis — {ip}\n\n*Model: {model} | Mode: {mode} | Date: {today}*\n\n"
+    analysis_path.write_text(header + full_analysis + "\n")
+    print(f"[+] Analysis saved → {analysis_path}")
+
+
+def _build_scan_loot(ws: Workspace) -> str:
+    parts: list[str] = []
+    for filename, label in (
+        ("users.txt", "Discovered users"),
+        ("creds_found.txt", "Discovered credentials"),
+    ):
+        p = ws.loot_dir / filename
+        if p.exists():
+            content = p.read_text().strip()
+            if content:
+                parts.append(f"{label}:\n{content}")
+    return "\n\n".join(parts) if parts else "None"
+
+
+def _build_creds_loot(ws: Workspace) -> str:
+    parts: list[str] = []
+    for filename, label in (
+        ("valid_creds.txt", "Validated credentials"),
+        ("users.txt", "Domain users"),
+        ("kerberoast.hash", "Kerberoastable hashes (hashcat -m 13100)"),
+        ("asrep.hash", "AS-REP hashes (hashcat -m 18200)"),
+        ("ntlm.hash", "NTLM hashes (hashcat -m 1000 / pass-the-hash)"),
+        ("creds_found.txt", "Additional credentials found"),
+    ):
+        p = ws.loot_dir / filename
+        if p.exists():
+            content = p.read_text().strip()
+            if content:
+                parts.append(f"{label}:\n{content}")
+    return "\n\n".join(parts) if parts else "None"
+
+
+def _scan_prompt(ip: str, domain_str: str, today: str, findings: str, loot: str) -> str:
+    return f"""You are an expert penetration tester reviewing automated reconnaissance output from a stealthy, coverage-focused scan.
 
 Rules:
 - Do not allude to or reference whether this target resembles any specific known environment, named machine, or published writeup. Draw conclusions only from the scan data below.
@@ -67,30 +120,38 @@ Ordered list of next steps that can be executed right now with the access and in
 **Scan date:** {today}
 
 --- FINDINGS ---
-{findings_content}
+{findings}
 
 --- LOOT ---
-{loot_section}"""
+{loot}"""
 
-    client = anthropic.Anthropic(api_key=api_key)
-    analysis_path = ws.machine_dir / "analysis.md"
 
-    print(f"\n[*] Sending findings to Claude ({model}) for analysis...")
-    print("=" * 60)
+def _creds_prompt(ip: str, domain_str: str, today: str, findings: str, loot: str) -> str:
+    return f"""You are an expert penetration tester reviewing credentialed Active Directory enumeration output from an automated tool.
 
-    chunks: list[str] = []
-    with client.messages.stream(
-        model=model,
-        max_tokens=4096,
-        messages=[{"role": "user", "content": prompt}],
-    ) as stream:
-        for text in stream.text_stream:
-            print(text, end="", flush=True)
-            chunks.append(text)
+Rules:
+- Do not allude to or reference whether this target resembles any specific known environment, named machine, or published writeup. Draw conclusions only from the data below.
+- Every recommendation must be immediately actionable using only the artifacts present in the findings (valid credentials, hashes, user lists, share names, ADCS templates, etc.). Do not suggest steps that require artifacts not present. If a technique requires something not yet found, omit it entirely.
+- Be specific: cite exact usernames, share names, hash types, ESC numbers, and complete tool commands grounded in the evidence.
 
-    print("\n" + "=" * 60)
+Analyse the findings below and respond with exactly these three sections:
 
-    full_analysis = "".join(chunks)
-    header = f"# AI Analysis — {ip}\n\n*Model: {model} | Date: {today}*\n\n"
-    analysis_path.write_text(header + full_analysis + "\n")
-    print(f"[+] Analysis saved → {analysis_path}")
+## Executive Summary
+2–3 sentences describing the current access level, what was enumerated with the provided credentials, and the overall position in the engagement.
+
+## Standout Findings
+Bullet every significant item: valid credentials and their access level (standard user vs admin vs Pwn3d!), Kerberoastable and AS-REP roastable accounts, NTLM hashes obtained, ADCS misconfigurations (ESC1–ESC8), accessible SMB shares and any notable files, BloodHound shortest-path attack paths if referenced, any existing domain-admin or local-admin access.
+
+## Recommended Next Steps
+Ordered list of the highest-value actions from the current position. Prioritise domain compromise and credential escalation paths. Each step must cite specific evidence (e.g. "Admin SMB (`Pwn3d!`) for `administrator` → lateral movement with `impacket-psexec {domain_str}/administrator:PASS@{ip}`"). Omit any step whose prerequisites are absent from the findings.
+
+---
+**Target IP:** {ip}
+**Domain:** {domain_str}
+**Date:** {today}
+
+--- FINDINGS ---
+{findings}
+
+--- LOOT ---
+{loot}"""
