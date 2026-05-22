@@ -67,6 +67,14 @@ def parse_args() -> argparse.Namespace:
                    help="Claude model for --analyze (default: claude-sonnet-4-6)")
     p.add_argument("--verbose", "-v", action="store_true",
                    help="show inline notes and searchsploit results in findings.md")
+    p.add_argument("--mode", choices=["scan", "creds"], default="scan",
+                   help="scan = full recon (default); creds = credentialed AD enum")
+    p.add_argument("-u", "--username", metavar="USER",
+                   help="Single username for --mode creds")
+    p.add_argument("-p", "--password", metavar="PASS",
+                   help="Single password for --mode creds")
+    p.add_argument("--creds", metavar="FILE",
+                   help="File of username:password pairs (one per line) for --mode creds")
     return p.parse_args()
 
 
@@ -77,6 +85,11 @@ def main():
     if os.geteuid() != 0:
         print("[!] p0rtix requires root — re-run with: sudo python3 p0rtix.py ...")
         sys.exit(1)
+
+    if args.mode == "creds" and not args.username and not args.creds:
+        sys.exit("[!] --mode creds requires -u/-p or --creds <file>")
+    if args.mode == "creds" and not args.domain:
+        print("[!] Warning: --domain not set; AD tools will have limited scope")
 
     # ── Setup ─────────────────────────────────────────────────────────────────
     available = check_deps()
@@ -98,6 +111,38 @@ def main():
     print(f"[*] Target    : {args.ip}" + (f"   Domain: {args.domain}" if args.domain else ""))
     print(f"[*] Workers   : {args.workers}")
     print()
+
+    # ── Creds mode dispatch ───────────────────────────────────────────────────
+    if args.mode == "creds":
+        from lib.credsmode import load_creds, run_creds_mode
+        from lib.nmap import parse_service_xml
+
+        creds = load_creds(args.username, args.password, args.creds)
+        if not creds:
+            sys.exit("[!] No valid credentials parsed from provided input.")
+
+        services: list = []
+        tcp_xml = next(ws.raw_dir.glob("*_tcp_services.xml"), None)
+        udp_xml = next(ws.raw_dir.glob("*_udp_confirmed.xml"), None)
+        if tcp_xml:
+            services.extend(parse_service_xml(tcp_xml, "tcp"))
+            print(f"[*] Loaded {len(services)} TCP services from {tcp_xml.name}")
+        if udp_xml:
+            udp_svcs = parse_service_xml(udp_xml, "udp")
+            services.extend(udp_svcs)
+            if udp_svcs:
+                print(f"[*] Loaded {len(udp_svcs)} UDP services from {udp_xml.name}")
+        if not services:
+            print("[!] No prior nmap XML found — per-service enumeration will be skipped")
+
+        run_creds_mode(args.ip, args.domain, creds, services, runner, findings, ws, available)
+
+        findings.finalize()
+        sudo_user = os.environ.get("SUDO_USER")
+        if sudo_user:
+            subprocess.run(["chown", "-R", f"{sudo_user}:", str(ws.machine_dir)],
+                           capture_output=True)
+        sys.exit(0)
 
     # ── Phase 1: Port discovery ───────────────────────────────────────────────
     ports = run_port_discovery(args.ip, runner, ws, findings)

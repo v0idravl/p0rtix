@@ -204,3 +204,8 @@ def _write_port_table(services: list[Service], findings: Findings):
 
 def _fmt_ports(ports: list[int]) -> str:
     return ", ".join(str(p) for p in sorted(ports)) if ports else "none"
+
+
+def parse_service_xml(xml_path: Path, proto: str = "tcp") -> list[Service]:
+    """Load Service objects from a saved nmap XML file (e.g. for --mode creds)."""
+    return _parse_xml_services(xml_path, proto)

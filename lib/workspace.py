@@ -37,6 +37,7 @@ class Workspace:
         self.report_dir = self.machine_dir / "report"
         self.findings_path = self.machine_dir / "findings.md"
         self.report_path = self.report_dir / "report.md"
+        self.bloodhound_dir = self.loot_dir / "bloodhound"
 
         self._raw_counter = 0
         self._counter_lock = threading.Lock()
@@ -52,7 +53,8 @@ class Workspace:
         self._setup()
 
     def _setup(self):
-        for d in (self.raw_dir, self.loot_dir, self.exploit_dir, self.report_dir):
+        for d in (self.raw_dir, self.loot_dir, self.exploit_dir, self.report_dir,
+                  self.bloodhound_dir):
             d.mkdir(parents=True, exist_ok=True)
 
         if not self.report_path.exists():
@@ -88,6 +90,15 @@ class Workspace:
             if not self.discovered_domain and domain:
                 self.discovered_domain = domain
                 (self.loot_dir / "domain.txt").write_text(domain + "\n")
+
+    def add_valid_cred(self, user: str, password: str, service: str) -> None:
+        """Thread-safe: record a confirmed credential pair with the service it was validated against."""
+        entry = f"{user}:{password}  [{service}]"
+        with self._creds_lock:
+            if entry not in self._known_creds:
+                self._known_creds.add(entry)
+                with (self.loot_dir / "valid_creds.txt").open("a") as fh:
+                    fh.write(entry + "\n")
 
     def add_user(self, username: str):
         """Thread-safe append of a discovered username to loot/users.txt (deduped)."""
