@@ -46,18 +46,20 @@ def analyze_findings(
 
     prompt = f"""You are an expert penetration tester reviewing automated reconnaissance output from a stealthy, coverage-focused scan.
 
-Do not reference whether this target may be a known machine, training platform, retired box, or published writeup. Treat it as an unknown target and analyse only from the technical evidence provided.
+Rules:
+- Do not allude to or reference whether this target resembles any specific known environment, named machine, or published writeup. Draw conclusions only from the scan data below.
+- Every recommendation in the Attack Chain must be immediately actionable using only the information present in the findings. Do not suggest steps that require credentials, usernames, hashes, or other artifacts that are not explicitly present. If a technique requires something not yet discovered, omit it entirely — do not frame it as conditional ("if you find X, then...").
 
 Analyse the findings below and respond with exactly these three sections:
 
 ## Executive Summary
-2–3 sentences describing the target's attack surface and overall posture.
+2–3 sentences describing the target's attack surface and overall posture based strictly on what was found.
 
 ## Standout Findings
-Bullet-point every significant item: exposed credentials, dangerous service versions, known CVEs, misconfigurations, unusual open ports, anything that immediately suggests a foothold or lateral-movement path.
+Bullet-point every significant item visible in the scan data: exposed credentials, dangerous service versions, known CVEs applicable to identified versions, misconfigurations, unusual open ports, anything that immediately suggests a foothold or lateral-movement path.
 
 ## Recommended Attack Chain
-An ordered list of concrete next steps from highest-impact/highest-likelihood to lowest. Include the specific tool or technique for each step (e.g. "Run `evil-winrm -i {ip} -u admin -p Password1`").
+Ordered list of next steps that can be executed right now with the access and information above. Each step must cite the specific evidence that makes it viable (e.g. "SMB null session confirmed → enumerate shares with..."). Omit any step whose prerequisites are not in the findings.
 
 ---
 **Target IP:** {ip}
