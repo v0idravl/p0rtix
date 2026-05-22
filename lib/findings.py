@@ -6,6 +6,13 @@ _W     = 80
 _THIN  = "─" * _W   # service-block separator
 _THICK = "═" * _W   # major-section separator
 
+_VERBOSE = False
+
+
+def set_verbose(v: bool) -> None:
+    global _VERBOSE
+    _VERBOSE = v
+
 _BANNER = (
     r"         )         )           " + "\n"
     r"      ( /( (    ( /( (      )  " + "\n"
@@ -43,7 +50,12 @@ class FindingsSink:
     def h4(self, title: str):    self._write(f"\n#### {title}\n")
     def cmd(self, command: str): self._write(f"\n> `{command}`\n")
     def bullet(self, text: str): self._write(f"- {text}\n")
-    def note(self, text: str):   self._write(f"\n> **Note:** {text}\n")
+    def note(self, text: str):
+        notes = getattr(self, '_notes_log', None)
+        if notes is not None:
+            notes.append(text)
+        if _VERBOSE:
+            self._write(f"\n> **Note:** {text}\n")
     def blank(self):             self._write("\n")
 
     def code_block(self, content: str, lang: str = ""):
@@ -87,6 +99,7 @@ class Findings(FindingsSink):
         self._path = path
         self._lock = threading.Lock()
         self._summary: list[str] = []
+        self._notes_log: list[str] = []
         self._write_header(ip, domain)
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -102,6 +115,7 @@ class Findings(FindingsSink):
         """Append a completed service buffer to findings (call in port order)."""
         for item in buf.drain_summary():
             self.add_summary(item)
+        self._notes_log.extend(buf.drain_notes())
         content = buf.render()
         if content.strip():
             self._write(f"\n{_THIN}\n{content}")
@@ -111,6 +125,10 @@ class Findings(FindingsSink):
             self._write(f"\n{_THICK}\n## Key Findings\n{_THICK}\n")
             for item in self._summary:
                 self._write(f"- {item}\n")
+        if self._notes_log and not _VERBOSE:
+            self._write(f"\n{_THICK}\n## Notices\n{_THICK}\n")
+            for note in sorted(set(self._notes_log)):
+                self._write(f"- {note}\n")
         footer = (
             f"\n{_THICK}\n"
             f"  p0rtix — scan complete                    by v0idravl\n"
@@ -153,6 +171,7 @@ class ServiceBuffer(FindingsSink):
         self.proto   = proto
         self._chunks: list[str] = []
         self._summary: list[str] = []
+        self._notes_log: list[str] = []
 
     def _write(self, text: str):
         self._chunks.append(text)
@@ -163,6 +182,11 @@ class ServiceBuffer(FindingsSink):
     def drain_summary(self) -> list[str]:
         items, self._summary = self._summary, []
         return items
+
+    def drain_notes(self) -> list[str]:
+        prefixed = [f"{self.proto.upper()} {self.port}: {n}" for n in self._notes_log]
+        self._notes_log = []
+        return prefixed
 
     def render(self) -> str:
         return "".join(self._chunks)

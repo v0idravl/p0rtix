@@ -46,6 +46,8 @@ def analyze_findings(
 
     prompt = f"""You are an expert penetration tester reviewing automated reconnaissance output from a stealthy, coverage-focused scan.
 
+Do not reference whether this target may be a known machine, training platform, retired box, or published writeup. Treat it as an unknown target and analyse only from the technical evidence provided.
+
 Analyse the findings below and respond with exactly these three sections:
 
 ## Executive Summary

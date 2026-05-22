@@ -16,18 +16,19 @@ Requires root for SYN scans (-sS) and /etc/hosts writes.
 import argparse
 import os
 import re
+import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from lib.analyze import analyze_findings
 from lib.deps import check_deps
-from lib.findings import Findings, ServiceBuffer
+from lib.findings import Findings, ServiceBuffer, set_verbose
 from lib.hosts import HostsManager
 from lib.models import Discovery, Service
 from lib.nmap import run_port_discovery, run_service_scan
 from lib.runner import Runner
 from lib.scope import Scope
 from lib.services import enumerate_service
-from lib.analyze import analyze_findings
 from lib.web import enumerate_web
 from lib.workspace import Workspace
 
@@ -64,6 +65,8 @@ def parse_args() -> argparse.Namespace:
                    help="send findings.md to Claude API for AI analysis (requires ANTHROPIC_API_KEY; use sudo -E to preserve env)")
     p.add_argument("--model", default="claude-sonnet-4-6", metavar="MODEL",
                    help="Claude model for --analyze (default: claude-sonnet-4-6)")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="show inline notes and searchsploit results in findings.md")
     return p.parse_args()
 
 
@@ -80,6 +83,7 @@ def main():
 
     ws = Workspace(args.ip, args.domain, args.name, args.workspace)
     findings = Findings(ws.findings_path, args.ip, args.domain)
+    set_verbose(args.verbose)
     runner = Runner(ws)
     hosts = HostsManager()
     scope = Scope(args.ip, args.domain)
@@ -244,7 +248,7 @@ def main():
             findings.bullet(f"**{cred_count} credential(s)** — `{creds_file}`")
 
     # ── searchsploit on nmap XML ───────────────────────────────────────────────
-    if "searchsploit" in available:
+    if args.verbose and "searchsploit" in available:
         nmap_xml = ws.raw_dir / "04_tcp_services.xml"
         if nmap_xml.exists():
             findings.h2("searchsploit")
@@ -257,6 +261,12 @@ def main():
     findings.finalize()
     if args.analyze:
         analyze_findings(ws, args.ip, args.domain, model=args.model)
+
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user:
+        subprocess.run(["chown", "-R", f"{sudo_user}:", str(ws.machine_dir)],
+                       capture_output=True)
+
     print(f"\n{'=' * 60}")
     print(f"[+] Scan complete")
     print(f"[+] Findings  : {ws.findings_path}")
