@@ -1,6 +1,6 @@
 # p0rtix
 
-Automated recon and enumeration for CTF / OSCP / pentest lab environments.
+Stealthy, coverage-focused recon and enumeration. Finds everything available on a remote host while keeping as low a profile as possible.
 
 Built around a personal methodology reference ([hakiki](https://github.com/v0idravl/hakiki)) — covers
 port discovery, per-service enumeration, web directory/vhost busting, crawling, and SSL inspection.
