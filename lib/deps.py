@@ -74,6 +74,7 @@ TOOLS: dict[str, dict] = {
     "searchsploit":          {"apt": "exploitdb",                       "required": False},
     "openssl":               {"apt": "openssl",                         "required": False},
     "git-dumper":            {"pip": "git-dumper",                      "required": False},
+    "anthropic":             {"pip": "anthropic",                       "required": False},
 }
 
 
