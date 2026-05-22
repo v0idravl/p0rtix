@@ -61,7 +61,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--workers", type=int, default=6, metavar="N",
                    help="Parallel enumeration threads (default: 6)")
     p.add_argument("--analyze", "-A", action="store_true",
-                   help="send findings.md to Claude API for AI analysis (requires ANTHROPIC_API_KEY)")
+                   help="send findings.md to Claude API for AI analysis (requires ANTHROPIC_API_KEY; use sudo -E to preserve env)")
     p.add_argument("--model", default="claude-sonnet-4-6", metavar="MODEL",
                    help="Claude model for --analyze (default: claude-sonnet-4-6)")
     return p.parse_args()
