@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-p0rtix — automated recon and enumeration for CTF / OSCP / pentest labs
+p0rtix — stealthy, coverage-focused recon and enumeration
 
 Usage:
   sudo python3 p0rtix.py <ip> [--domain DOMAIN] [--name NAME]
@@ -27,6 +27,7 @@ from lib.nmap import run_port_discovery, run_service_scan
 from lib.runner import Runner
 from lib.scope import Scope
 from lib.services import enumerate_service
+from lib.analyze import analyze_findings
 from lib.web import enumerate_web
 from lib.workspace import Workspace
 
@@ -59,6 +60,10 @@ def parse_args() -> argparse.Namespace:
                    help="Root directory for all output (default: current directory)")
     p.add_argument("--workers", type=int, default=6, metavar="N",
                    help="Parallel enumeration threads (default: 6)")
+    p.add_argument("--analyze", "-A", action="store_true",
+                   help="send findings.md to Claude API for AI analysis (requires ANTHROPIC_API_KEY)")
+    p.add_argument("--model", default="claude-sonnet-4-6", metavar="MODEL",
+                   help="Claude model for --analyze (default: claude-sonnet-4-6)")
     return p.parse_args()
 
 
@@ -250,6 +255,8 @@ def main():
 
     # ── Wrap up ────────────────────────────────────────────────────────────────
     findings.finalize()
+    if args.analyze:
+        analyze_findings(ws, args.ip, args.domain, model=args.model)
     print(f"\n{'=' * 60}")
     print(f"[+] Scan complete")
     print(f"[+] Findings  : {ws.findings_path}")
