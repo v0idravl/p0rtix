@@ -67,8 +67,8 @@ def parse_args() -> argparse.Namespace:
                    help="Claude model for --analyze (default: claude-sonnet-4-6)")
     p.add_argument("--verbose", "-v", action="store_true",
                    help="show inline notes and searchsploit results in findings.md")
-    p.add_argument("--mode", choices=["scan", "creds"], default="scan",
-                   help="scan = full recon (default); creds = credentialed AD enum")
+    p.add_argument("--mode", default="scan",
+                   help="scan = full recon (default); creds = credentialed AD enum; scan,creds = both in one run")
     p.add_argument("-u", "--username", metavar="USER",
                    help="Single username for --mode creds")
     p.add_argument("-p", "--password", metavar="PASS",
@@ -86,15 +86,21 @@ def main():
         print("[!] p0rtix requires root — re-run with: sudo python3 p0rtix.py ...")
         sys.exit(1)
 
-    if args.mode == "creds" and not args.username and not args.creds:
-        sys.exit("[!] --mode creds requires -u/-p or --creds <file>")
-    if args.mode == "creds" and not args.domain:
+    _VALID_MODES = {"scan", "creds", "scan,creds"}
+    if args.mode not in _VALID_MODES:
+        sys.exit(f"[!] Invalid --mode '{args.mode}'. Choose: scan | creds | scan,creds")
+
+    _needs_creds = args.mode in ("creds", "scan,creds")
+    if _needs_creds and not args.username and not args.creds:
+        sys.exit("[!] --mode creds/scan,creds requires -u/-p or --creds <file>")
+    if _needs_creds and not args.domain:
         print("[!] Warning: --domain not set; AD tools will have limited scope")
 
     # ── Setup ─────────────────────────────────────────────────────────────────
     available = check_deps()
 
-    ws = Workspace(args.ip, args.domain, args.name, args.workspace, mode=args.mode)
+    ws = Workspace(args.ip, args.domain, args.name, args.workspace,
+                   mode="scan" if args.mode == "scan,creds" else args.mode)
     findings = Findings(ws.findings_path, args.ip, args.domain)
     set_verbose(args.verbose)
     runner = Runner(ws)
@@ -112,7 +118,7 @@ def main():
     print(f"[*] Workers   : {args.workers}")
     print()
 
-    # ── Creds mode dispatch ───────────────────────────────────────────────────
+    # ── Creds-only mode dispatch (scan,creds runs creds phase after scan below) ─
     if args.mode == "creds":
         from lib.credsmode import load_creds, run_creds_mode
         from lib.nmap import parse_service_xml
@@ -303,6 +309,16 @@ def main():
             out = runner.run(cmd, "searchsploit_nmap")
             findings.cmd(" ".join(cmd))
             _write_searchsploit(out, findings)
+
+    # ── Combined mode: run credentialed phase after scan ─────────────────────
+    if args.mode == "scan,creds":
+        from lib.credsmode import load_creds, run_creds_mode
+        creds_list = load_creds(args.username, args.password, args.creds)
+        if creds_list:
+            print(f"\n[*] Combined mode: starting credentialed phase as {creds_list[0][0]}...")
+            run_creds_mode(args.ip, args.domain, creds_list, services, runner, findings, ws, available)
+        else:
+            print("[!] Combined mode: no valid credentials — skipping creds phase")
 
     # ── Wrap up ────────────────────────────────────────────────────────────────
     findings.finalize()
