@@ -48,6 +48,7 @@ TOOLS: dict[str, dict] = {
     "impacket-GetNPUsers":   {"apt": "python3-impacket",                "required": False},
     "impacket-GetUserSPNs":  {"apt": "python3-impacket",                "required": False},
     "impacket-secretsdump":  {"apt": "python3-impacket",                "required": False},
+    "ntpdate":               {"apt": "ntpdate",                         "required": False},
 
     # DNS
     "dig":                   {"apt": "dnsutils",                        "required": False},
