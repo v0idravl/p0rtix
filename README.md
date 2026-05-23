@@ -15,11 +15,12 @@ archived separately so nothing is lost.
 - Service classification — routes web ports to web enumeration, everything else to per-service handlers
 - **Web:** headers, WhatWeb fingerprint, redirect detection, SSL cert SAN extraction, directory bust, vhost bust, crawl (scope-filtered)
 - **Services:** FTP, SSH, SMTP, DNS, RPC/NFS, MSRPC, SMB, SNMP, LDAP, Rsync, MSSQL, Oracle, MySQL, RDP, PostgreSQL, WinRM, Redis, MongoDB
+- **Creds mode** (`--mode creds` or `--mode scan,creds`) — authenticated AD enumeration: SMB validation, ldapdomaindump, Kerberoasting, AS-REP roasting, BloodHound collection, ADCS ESC1/ESC4 chain, secretsdump
 - Reactive follow-up — discovered vhosts and SSL SANs prompt for `/etc/hosts` addition, then get fully enumerated
 - Scope enforcement — crawl and follow-up scans never touch out-of-scope hosts
 - Single `findings.md` updated in real time (key findings only)
 - `raw/` directory with every tool's full output, each file headed by the exact command
-- Auto-installs missing tools via `apt` or `go install`
+- Auto-installs missing tools via `apt`, `pip`, or `go install`
 
 ---
 
@@ -39,27 +40,39 @@ Core tools (required, installed automatically if missing):
 
 Optional tools (used when present, skipped gracefully otherwise):
 
-`whatweb` · `gospider` · `testssl.sh` · `nxc` · `smbclient` · `smbmap` · `onesixtyone` · `snmpwalk` · `ldapsearch` · `dig` · `dnsrecon` · `mysql` · `redis-cli` · `rsync` · `showmount` · `rpcinfo` · `impacket-rpcdump` · `smtp-user-enum` · `searchsploit` · `openssl`
+**Web/general:** `whatweb` · `gospider` · `testssl.sh` · `wpscan` · `joomscan` · `droopescan` · `cewl` · `git-dumper` · `searchsploit` · `openssl`
+
+**SMB:** `nxc` · `smbclient` · `smbmap` · `enum4linux-ng`
+
+**Active Directory / Kerberos:** `ldapsearch` · `ldapdomaindump` · `bloodhound-python` · `certipy-ad` · `kerbrute` · `impacket-GetNPUsers` · `impacket-GetUserSPNs` · `impacket-secretsdump` · `impacket-rpcdump` · `ntpdate`
+
+**Other services:** `onesixtyone` · `snmpwalk` · `snmp-check` · `dig` · `dnsrecon` · `mysql` · `psql` · `redis-cli` · `rsync` · `showmount` · `rpcinfo` · `smtp-user-enum` · `ipmitool`
 
 ---
 
 ## Usage
 
 ```bash
-sudo python3 p0rtix.py <ip> [--domain DOMAIN] [--name NAME] [--workspace DIR] [--workers N]
+sudo python3 p0rtix.py <ip> [OPTIONS]
 ```
 
 ### Examples
 
 ```bash
-# IP only
+# Scan only — IP
 sudo python3 p0rtix.py 10.10.11.34
 
-# IP + domain (enables vhost busting)
+# Scan only — IP + domain (enables AD enumeration and vhost busting)
 sudo python3 p0rtix.py 10.10.11.34 --domain test.htb
 
-# Full options
-sudo python3 p0rtix.py 10.10.11.34 --domain test.htb --name lame --workspace ~/Projects/htb --workers 8
+# Scan only — full options
+sudo python3 p0rtix.py 10.10.11.34 --domain test.htb --name lame --workspace ~/htb --workers 8
+
+# Creds mode — authenticated AD enumeration against a prior scan workspace
+sudo python3 p0rtix.py 10.10.11.34 --domain test.htb --mode creds -u judith.mader -p judith09 --name certified --workspace ~/htb
+
+# Combined — full scan then credentialed phase in one run (recommended)
+sudo -E python3 p0rtix.py 10.10.11.34 --domain test.htb --mode scan,creds -u judith.mader -p judith09 --name certified --workspace ~/htb --analyze
 ```
 
 ### Arguments
@@ -67,10 +80,52 @@ sudo python3 p0rtix.py 10.10.11.34 --domain test.htb --name lame --workspace ~/P
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `ip` | — | Target IP address |
-| `--domain` | — | Primary domain for vhost busting |
+| `--domain` | — | Primary domain (enables AD tools and vhost busting) |
 | `--name` | domain or IP | Output directory name |
 | `--workspace` | `.` | Root directory for all output |
 | `--workers` | `6` | Parallel enumeration threads |
+| `--mode` | `scan` | `scan` · `creds` · `scan,creds` |
+| `-u / --username` | — | Username for creds mode |
+| `-p / --password` | — | Password for creds mode |
+| `--creds` | — | File of `user:pass` pairs for creds mode |
+| `--analyze` | off | Send `findings.md` to Claude API for AI triage (requires `ANTHROPIC_API_KEY`; use `sudo -E`) |
+| `--verbose` | off | Include notes and searchsploit output in `findings.md` |
+
+---
+
+## Creds Mode
+
+`--mode creds` runs authenticated AD enumeration against an existing scan workspace. `--mode scan,creds` does both in one invocation — preferred when you have credentials from the start.
+
+Requires `-u/-p` (single credential) or `--creds <file>` (one `user:pass` per line). `--domain` is strongly recommended.
+
+### What it does
+
+1. **SMB validation** — tests all credential pairs via nxc; identifies valid and admin accounts
+2. **AD core enumeration** (requires `--domain`):
+   - Clock sync to DC (`ntpdate`) — prevents Kerberos clock-skew failures
+   - Full domain dump (`ldapdomaindump`) — sAMAccountNames extracted to `loot/users.txt`
+   - Kerberoasting (`impacket-GetUserSPNs`) → `loot/kerberoast.hash`
+   - AS-REP roasting (`impacket-GetNPUsers`) → `loot/asrep.hash`
+   - BloodHound collection (`bloodhound-python`) → `loot/bloodhound/`
+   - ADCS template enumeration and ESC1/ESC4 exploitation chain (see below)
+   - Admin command execution and `secretsdump` if admin creds confirmed
+3. **Per-service enumeration** — SMB share listing + spider, WinRM, SSH, FTP, MSSQL, RDP
+
+### ADCS ESC chain
+
+When `certipy-ad` finds a vulnerable certificate template, p0rtix automatically chains:
+
+```
+certipy-ad find -vulnerable   →   detect ESC1/ESC4
+certipy-ad req                →   request cert as administrator@domain
+certipy-ad auth               →   authenticate with PFX → NT hash
+                              →   hash saved to loot/ntlm.hash + fed into cred-reuse
+```
+
+**ESC4** additionally patches the template first (`certipy-ad template -save-old`) and restores it after.
+
+If `-vulnerable` returns nothing despite enabled templates existing, a fallback scan runs with `-enabled` and saves the full JSON to `loot/certipy_full.json` for manual review.
 
 ---
 
