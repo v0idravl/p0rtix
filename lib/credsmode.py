@@ -445,17 +445,26 @@ def _ad_core(
             "-p", pw,
             "-dc-ip", ip,
             "-stdout",
+            "-vulnerable",
         ]
         print(f"    [*] ADCS (certipy-ad)...")
         findings.h4("ADCS Templates (certipy-ad)")
         findings.cmd(" ".join(cmd))
         out = runner.run(cmd, "creds_certipy", timeout=120)
         findings.code_block(_trim(out))
-        if "ESC" in out:
+
+        vuln_templates = _parse_adcs_find(out)
+        if vuln_templates:
+            for ca_name, tmpl, esc in vuln_templates:
+                findings.add_summary(f"ADCS {esc}: {tmpl} via {ca_name}")
+            print(f"    [+] {len(vuln_templates)} vulnerable ADCS template(s) — running chain")
+            for ca_name, tmpl, esc in vuln_templates:
+                _adcs_esc_chain(ip, domain, user, pw, ca_name, tmpl, esc, runner, findings, ws)
+        elif "ESC" in out:
             for line in out.splitlines():
                 if "ESC" in line:
                     findings.add_summary(f"ADCS vuln: {line.strip()}")
-            print(f"    [+] Vulnerable ADCS template found")
+            print(f"    [+] Vulnerable ADCS templates found (unparsed)")
         else:
             print(f"    [-] No vulnerable ADCS templates")
 
