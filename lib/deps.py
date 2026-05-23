@@ -5,6 +5,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import tarfile
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -23,7 +24,7 @@ TOOLS: dict[str, dict] = {
 
     # Web
     "whatweb":               {"apt": "whatweb",                         "required": False},
-    "gospider":              {"github": {"repo": "jaeles-project/gospider",  "pattern": "gospider_linux_{arch}.zip",  "binary": "gospider"},  "required": False},
+    "gospider":              {"github": {"repo": "jaeles-project/gospider",  "pattern": "gospider_linux_{arch}.tar.gz",  "binary": "gospider"},  "required": False},
     "testssl.sh":            {"apt": "testssl.sh",                      "required": False},
     "wpscan":                {"apt": "wpscan",                          "required": False},
 
@@ -42,6 +43,7 @@ TOOLS: dict[str, dict] = {
     "ldapdomaindump":        {"pip": "ldapdomaindump",                  "required": False},
     "bloodhound-python":     {"pip": "bloodhound",                      "required": False},
     "certipy-ad":            {"pip": "certipy-ad",                      "required": False},
+    "bloodyAD":              {"pip": "bloodyad",                        "required": False},
 
     # Kerberos
     "kerbrute":              {"github": {"repo": "ropnop/kerbrute",         "pattern": "kerbrute_linux_{arch}",     "binary": "kerbrute"},  "required": False},
@@ -186,6 +188,16 @@ def _github_install(tool: str, repo: str, pattern: str, binary: str):
                 extracted = Path("/tmp") / Path(target).name
                 with z.open(target) as src, open(extracted, "wb") as out:
                     out.write(src.read())
+            tmp.unlink()
+            tmp = extracted
+        elif tmp.name.endswith(".tar.gz") or tmp.suffix in (".tgz",):
+            with tarfile.open(tmp) as t:
+                names = t.getnames()
+                target = next((n for n in names if Path(n).name == binary), names[0])
+                member = t.getmember(target)
+                with t.extractfile(member) as src:
+                    extracted = Path("/tmp") / Path(target).name
+                    extracted.write_bytes(src.read())
             tmp.unlink()
             tmp = extracted
 
