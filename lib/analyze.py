@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import date
 
 from lib.workspace import Workspace
@@ -36,7 +37,9 @@ def analyze_findings(
 
     if mode == "creds":
         loot_parts = _build_creds_loot(ws)
-        prompt = _creds_prompt(ip, domain_str, today, findings_content, loot_parts)
+        scan_findings_path = ws.machine_dir / "findings.md"
+        scan_context = scan_findings_path.read_text() if scan_findings_path.exists() else ""
+        prompt = _creds_prompt(ip, domain_str, today, findings_content, loot_parts, scan_context)
     else:
         loot_parts = _build_scan_loot(ws)
         prompt = _scan_prompt(ip, domain_str, today, findings_content, loot_parts)
@@ -64,6 +67,18 @@ def analyze_findings(
     print(f"[+] Analysis saved → {analysis_path}")
 
 
+def _redact_creds(content: str) -> str:
+    """Replace password in 'user:password  [service]' and 'user:password' lines."""
+    lines = []
+    for line in content.splitlines():
+        m = re.match(r'^([^:]+):(\S+)(.*)', line)
+        if m:
+            lines.append(f"{m.group(1)}:[REDACTED]{m.group(3)}")
+        else:
+            lines.append(line)
+    return "\n".join(lines)
+
+
 def _build_scan_loot(ws: Workspace) -> str:
     parts: list[str] = []
     for filename, label in (
@@ -74,7 +89,8 @@ def _build_scan_loot(ws: Workspace) -> str:
         if p.exists():
             content = p.read_text().strip()
             if content:
-                parts.append(f"{label}:\n{content}")
+                redacted = _redact_creds(content) if filename == "creds_found.txt" else content
+                parts.append(f"{label}:\n{redacted}")
     return "\n\n".join(parts) if parts else "None"
 
 
@@ -92,7 +108,8 @@ def _build_creds_loot(ws: Workspace) -> str:
         if p.exists():
             content = p.read_text().strip()
             if content:
-                parts.append(f"{label}:\n{content}")
+                redacted = _redact_creds(content) if filename in ("valid_creds.txt", "creds_found.txt") else content
+                parts.append(f"{label}:\n{redacted}")
     return "\n\n".join(parts) if parts else "None"
 
 
@@ -126,7 +143,11 @@ Ordered list of next steps that can be executed right now with the access and in
 {loot}"""
 
 
-def _creds_prompt(ip: str, domain_str: str, today: str, findings: str, loot: str) -> str:
+def _creds_prompt(ip: str, domain_str: str, today: str, findings: str, loot: str, scan_context: str = "") -> str:
+    scan_section = (
+        f"\n--- PRIOR RECON FINDINGS (unauthenticated scan) ---\n{scan_context}\n"
+        if scan_context else ""
+    )
     return f"""You are an expert penetration tester reviewing credentialed Active Directory enumeration output from an automated tool.
 
 Rules:
@@ -143,15 +164,15 @@ Analyse the findings below and respond with exactly these three sections:
 Bullet every significant item: valid credentials and their access level (standard user vs admin vs Pwn3d!), Kerberoastable and AS-REP roastable accounts, NTLM hashes obtained, ADCS misconfigurations (ESC1–ESC8), accessible SMB shares and any notable files, BloodHound shortest-path attack paths if referenced, any existing domain-admin or local-admin access.
 
 ## Recommended Next Steps
-Ordered list of the highest-value actions from the current position. Prioritise domain compromise and credential escalation paths. Each step must cite specific evidence (e.g. "Admin SMB (`Pwn3d!`) for `administrator` → lateral movement with `impacket-psexec {domain_str}/administrator:PASS@{ip}`"). Omit any step whose prerequisites are absent from the findings.
+Ordered list of the highest-value actions from the current position. Prioritise domain compromise and credential escalation paths. Each step must cite specific evidence (e.g. "Admin SMB (`Pwn3d!`) for `administrator` → lateral movement with `impacket-psexec {domain_str}/administrator:[REDACTED]@{ip}`"). Omit any step whose prerequisites are absent from the findings.
 
 ---
 **Target IP:** {ip}
 **Domain:** {domain_str}
 **Date:** {today}
 
---- FINDINGS ---
+--- CREDENTIALED FINDINGS ---
 {findings}
-
+{scan_section}
 --- LOOT ---
 {loot}"""
