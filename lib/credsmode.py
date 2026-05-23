@@ -302,16 +302,16 @@ def _ad_core(
             print(f"    [!] BloodHound collection failed")
 
     # 5. ADCS template enumeration
-    if "certipy" in available:
+    if "certipy-ad" in available:
         cmd = [
-            "certipy", "find",
+            "certipy-ad", "find",
             "-u", f"{user}@{domain}",
             "-p", pw,
             "-dc-ip", ip,
             "-stdout",
         ]
-        print(f"    [*] ADCS (certipy)...")
-        findings.h4("ADCS Templates (certipy)")
+        print(f"    [*] ADCS (certipy-ad)...")
+        findings.h4("ADCS Templates (certipy-ad)")
         findings.cmd(" ".join(cmd))
         out = runner.run(cmd, "creds_certipy", timeout=120)
         findings.code_block(_trim(out))

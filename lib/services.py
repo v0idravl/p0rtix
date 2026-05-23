@@ -712,10 +712,10 @@ def _ldap(ip, service, runner, findings, available):
         findings.bullet(f"**AdminSDHolder-protected (privileged):** {', '.join(admins)}")
 
     # 10. ADCS — certipy template enumeration (attempt anon/guest, note creds path)
-    if "certipy" in available and domain:
-        findings.h4("ADCS (certipy)")
+    if "certipy-ad" in available and domain:
+        findings.h4("ADCS (certipy-ad)")
         cmd_certy = [
-            "certipy", "find",
+            "certipy-ad", "find",
             "-u", f"guest@{domain}",
             "-p", "",
             "-dc-ip", ip,
@@ -724,14 +724,14 @@ def _ldap(ip, service, runner, findings, available):
         findings.cmd(" ".join(cmd_certy))
         out_certy = runner.run(cmd_certy, f"ldap_{port}_certipy", timeout=120)
         if "ESC" in out_certy or "Vulnerable" in out_certy or "Template" in out_certy:
-            findings.bullet("**certipy found ADCS misconfigurations — see raw output**")
+            findings.bullet("**certipy-ad found ADCS misconfigurations — see raw output**")
             for line in out_certy.splitlines():
                 if any(kw in line for kw in ("ESC", "Vulnerable", "[!]", "Template Name")):
                     findings.bullet(f"  `{line.strip()}`")
         else:
             findings.note(
-                f"certipy needs credentials: "
-                f"`certipy find -u USER@{domain} -p PASS -dc-ip {ip} -vulnerable -stdout`"
+                f"certipy-ad needs credentials: "
+                f"`certipy-ad find -u USER@{domain} -p PASS -dc-ip {ip} -vulnerable -stdout`"
             )
 
     # 11. ldapdomaindump — structured HTML/JSON dump saved to loot/

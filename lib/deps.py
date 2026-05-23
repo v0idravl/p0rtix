@@ -41,7 +41,7 @@ TOOLS: dict[str, dict] = {
     "ldapsearch":            {"apt": "ldap-utils",                      "required": False},
     "ldapdomaindump":        {"pip": "ldapdomaindump",                  "required": False},
     "bloodhound-python":     {"pip": "bloodhound",                      "required": False},
-    "certipy":               {"pip": "certipy-ad",                      "required": False},
+    "certipy-ad":            {"pip": "certipy-ad",                      "required": False},
 
     # Kerberos
     "kerbrute":              {"github": {"repo": "ropnop/kerbrute",         "pattern": "kerbrute_linux_{arch}",     "binary": "kerbrute"},  "required": False},

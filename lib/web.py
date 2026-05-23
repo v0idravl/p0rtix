@@ -421,7 +421,7 @@ def _check_adcs(base_url: str, ip: str, runner: Runner, findings: Findings):
             findings.bullet(f"  `{base_url}{path}` — HTTP {code}")
         findings.note(
             f"Check for ESC1-8 vulnerabilities: "
-            f"`certipy find -u USER@DOMAIN -p PASS -dc-ip {ip} -vulnerable -stdout`"
+            f"`certipy-ad find -u USER@DOMAIN -p PASS -dc-ip {ip} -vulnerable -stdout`"
         )
 
 
