@@ -34,6 +34,31 @@ def _error_lines(text: str) -> str:
     )
 
 
+def _parse_adcs_find(out: str) -> list[tuple[str, str, str]]:
+    """Parse certipy-ad find -stdout output. Returns (ca_name, template_name, esc_variant) for ESC1/ESC4."""
+    results: list[tuple[str, str, str]] = []
+    current_template: str | None = None
+    current_ca: str | None = None
+    in_vulns = False
+
+    for line in out.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Template Name"):
+            current_template = stripped.split(":", 1)[-1].strip()
+            current_ca = None
+            in_vulns = False
+        elif stripped.startswith("Certificate Authorities") and ":" in stripped and current_template:
+            current_ca = stripped.split(":", 1)[-1].strip()
+        elif stripped.startswith("[!] Vulnerabilities"):
+            in_vulns = True
+        elif in_vulns and (stripped.startswith("ESC1") or stripped.startswith("ESC4")):
+            esc = stripped.split(":")[0].strip()
+            if current_template and current_ca:
+                results.append((current_ca, current_template, esc))
+
+    return results
+
+
 def _parse_ldapdomaindump_users(out_dir: str, ws: Workspace) -> int:
     """Parse domain_users.html from ldapdomaindump and populate ws users.txt. Returns count added."""
     user_file = Path(out_dir) / "domain_users.html"
