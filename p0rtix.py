@@ -330,8 +330,7 @@ def main():
         subprocess.run(["chown", "-R", f"{sudo_user}:", str(ws.machine_dir)],
                        capture_output=True)
 
-    print(f"\n{'=' * 60}")
-    print(f"[+] Scan complete")
+    _print_loot_summary(ws)
     print(f"[+] Findings  : {ws.findings_path}")
     print(f"[+] Raw data  : {ws.raw_dir}/")
     print(f"[+] Loot      : {ws.loot_dir}/")
@@ -458,6 +457,101 @@ def _run_cred_reuse(
                         f"`evil-winrm -i {ip} -u USER -p {password}`"
                     )
                     _save_valid_cred(ws, line.strip(), password)
+
+
+def _print_dir_tree(path, prefix: str = "", max_depth: int = 4, depth: int = 0):
+    if depth >= max_depth:
+        return
+    try:
+        entries = sorted(path.iterdir(), key=lambda e: (e.is_file(), e.name))
+    except PermissionError:
+        return
+    for i, entry in enumerate(entries):
+        connector = "└── " if i == len(entries) - 1 else "├── "
+        print(f"        {prefix}{connector}{entry.name}")
+        if entry.is_dir():
+            extension = "    " if i == len(entries) - 1 else "│   "
+            _print_dir_tree(entry, prefix + extension, max_depth, depth + 1)
+
+
+def _print_loot_summary(ws: "Workspace"):
+    from pathlib import Path
+
+    W = 60
+    print(f"\n{'═' * W}")
+    print(f"  LOOT SUMMARY")
+    print(f"{'═' * W}")
+
+    # Users
+    users_path = ws.loot_dir / "users.txt"
+    if users_path.exists():
+        users = [l.strip() for l in users_path.read_text().splitlines() if l.strip()]
+        if users:
+            print(f"\n  Users ({len(users)}):")
+            for u in users[:20]:
+                print(f"        {u}")
+            if len(users) > 20:
+                print(f"        ... ({len(users) - 20} more in loot/users.txt)")
+
+    # Hashes
+    hash_specs = [
+        ("kerberoast.hash", "Kerberoast ", 13100),
+        ("asrep.hash",      "AS-REP     ", 18200),
+        ("ntlm.hash",       "NTLM       ", 1000),
+    ]
+    hash_lines = []
+    for fname, label, mode in hash_specs:
+        hp = ws.loot_dir / fname
+        if hp.exists():
+            count = sum(1 for l in hp.read_text().splitlines() if l.strip())
+            if count:
+                hash_lines.append((label, count, fname, mode))
+
+    # LAPS hashes from creds_found
+    laps_path = ws.loot_dir / "creds_found.txt"
+    laps_count = 0
+    if laps_path.exists():
+        laps_count = sum(1 for l in laps_path.read_text().splitlines()
+                         if "LAPS" in l.upper() and l.strip())
+
+    if hash_lines or laps_count:
+        print(f"\n  Hashes:")
+        for label, count, fname, mode in hash_lines:
+            print(f"        {label} ({count})  → loot/{fname}  [hashcat -m {mode}]")
+        if laps_count:
+            print(f"        LAPS       ({laps_count})  → loot/creds_found.txt")
+
+    # SMB file tree
+    smb_root = ws.loot_dir / "creds_smb"
+    if smb_root.exists():
+        smb_files = list(smb_root.rglob("*"))
+        file_count = sum(1 for f in smb_files if f.is_file())
+        if file_count:
+            print(f"\n  SMB Files ({file_count}):")
+            print(f"        loot/creds_smb/")
+            _print_dir_tree(smb_root)
+
+    # Credentials
+    cred_files = [
+        ("valid_creds.txt",  "SMB/WinRM"),
+        ("creds_found.txt",  "loot"),
+    ]
+    cred_lines = []
+    for fname, label in cred_files:
+        cp = ws.loot_dir / fname
+        if cp.exists():
+            lines = [l.strip() for l in cp.read_text().splitlines() if l.strip()]
+            for l in lines:
+                cred_lines.append(f"{l}  ({label})")
+    if cred_lines:
+        seen = set()
+        print(f"\n  Credentials:")
+        for cl in cred_lines:
+            if cl not in seen:
+                seen.add(cl)
+                print(f"        {cl}")
+
+    print()
 
 
 def _save_valid_cred(ws: Workspace, line: str, password: str):

