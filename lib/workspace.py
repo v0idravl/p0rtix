@@ -62,6 +62,14 @@ class Workspace:
         if not self.report_path.exists():
             self._write_report_template()
 
+        # Pre-populate in-memory sets from any prior run so re-runs don't re-append duplicates
+        users_path = self.loot_dir / "users.txt"
+        if users_path.exists():
+            self._known_users = {u.strip() for u in users_path.read_text().splitlines() if u.strip()}
+        creds_path = self.loot_dir / "creds_found.txt"
+        if creds_path.exists():
+            self._known_creds = {c.strip() for c in creds_path.read_text().splitlines() if c.strip()}
+
     def next_raw_label(self, label: str) -> str:
         """Return a zero-padded numbered prefix for a raw output file."""
         with self._counter_lock:
