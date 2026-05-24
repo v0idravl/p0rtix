@@ -263,52 +263,56 @@ def _bloodyad_writable(
     """Return sAMAccountNames of user objects the current user has write access to."""
     if "bloodyAD" not in available:
         return []
-    cmd = [
-        "bloodyAD",
-        "--host", ip,
-        "-d", domain,
-        "-u", user,
-        "-p", pw,
-        "get", "writable",
-        "--otype", "USER",
-    ]
-    findings.h4("Writable AD Objects (bloodyAD)")
-    findings.cmd(" ".join(cmd))
-    out = runner.run(cmd, "creds_bloodyad_writable", timeout=60)
-    findings.code_block(_trim(out, lines=40))
 
     def _san(s: str) -> str:
         return re.sub(r"[\s._-]", "", s).lower()
 
-    targets: list[str] = []
-    current_sam: str | None = None
-    current_dn_cn: str | None = None
+    def _parse_writable(out: str, otype: str) -> list[str]:
+        results: list[str] = []
+        current_sam: str | None = None
+        current_dn_cn: str | None = None
 
-    def _emit() -> None:
-        name = current_sam or current_dn_cn
-        if (name and not name.endswith("$")
-                and _san(name) != _san(user)
-                and name not in targets):
-            targets.append(name)
+        def _emit() -> None:
+            name = current_sam or current_dn_cn
+            skip_self = _san(name) == _san(user) if name else True
+            if name and not skip_self and name not in results:
+                results.append(name)
 
-    for line in out.splitlines():
-        stripped = line.strip()
-        if stripped.lower().startswith("distinguishedname:"):
-            _emit()
-            current_sam = None
-            m_cn = re.search(r"CN=([^,]+)", stripped)
-            current_dn_cn = m_cn.group(1) if m_cn else None
-        elif stripped.lower().startswith("samaccountname:"):
-            current_sam = stripped.split(":", 1)[-1].strip()
-    _emit()
+        for line in out.splitlines():
+            s = line.strip()
+            if s.lower().startswith("distinguishedname:"):
+                _emit()
+                current_sam = None
+                m_cn = re.search(r"CN=([^,]+)", s)
+                current_dn_cn = m_cn.group(1) if m_cn else None
+            elif s.lower().startswith("samaccountname:"):
+                current_sam = s.split(":", 1)[-1].strip()
+        _emit()
+        return results
 
-    if targets:
-        findings.bullet(f"**Writable user objects:** {', '.join(f'`{t}`' for t in targets)}")
-        findings.add_summary(f"bloodyAD: write access over {', '.join(targets)}")
-        print(f"    [+] bloodyAD: writable over {', '.join(targets)}")
-    else:
-        print(f"    [-] bloodyAD: no writable user objects found")
-    return targets
+    findings.h4("Writable AD Objects (bloodyAD)")
+    all_targets: list[str] = []
+
+    for otype, label_suffix in (("USER", "writable"), ("GROUP", "writable_groups"), ("COMPUTER", "writable_computers")):
+        cmd = ["bloodyAD", "--host", ip, "-d", domain, "-u", user, "-p", pw,
+               "get", "writable", "--otype", otype]
+        findings.cmd(" ".join(cmd))
+        out = runner.run(cmd, f"creds_bloodyad_{label_suffix}", timeout=60)
+        findings.code_block(_trim(out, lines=30))
+        found = _parse_writable(out, otype)
+        # For users: exclude machine accounts; for computers: include (they end in $)
+        if otype != "COMPUTER":
+            found = [f for f in found if not f.endswith("$")]
+        if found:
+            findings.bullet(f"**Writable {otype.lower()} objects:** {', '.join(f'`{t}`' for t in found)}")
+            findings.add_summary(f"bloodyAD: write access over {otype.lower()}(s): {', '.join(found)}")
+            print(f"        [+] Writable {otype.lower()}: {', '.join(found)}")
+            if otype == "USER":
+                all_targets.extend(found)
+        else:
+            print(f"        [-] No writable {otype.lower()} objects")
+
+    return all_targets
 
 
 def _shadow_creds_chain(
@@ -791,7 +795,9 @@ def _ad_core(
                 "-ns", ip,
             ]
             findings.cmd(" ".join(cmd))
-            runner.run(cmd, label, timeout=300)
+            # Run from bh_dir so the zip is always written there regardless of
+            # bloodhound-python version (older versions write zip to CWD not -o dir)
+            runner.run(cmd, label, timeout=300, cwd=str(bh_dir))
             zips = sorted(bh_dir.rglob("*.zip"), key=lambda z: z.stat().st_size, reverse=True)
             good = [z for z in zips if z.stat().st_size > 1000]
             return good[0] if good else None
@@ -912,6 +918,25 @@ def _ad_core(
             print(f"    [+] Vulnerable ADCS templates found (unparsed)")
         else:
             print(f"    [-] No vulnerable ADCS templates")
+
+        # certipy BloodHound output — generates ADCS-aware edges for BloodHound CE
+        bh_out = ws.loot_dir / "certipy_bloodhound"
+        cmd_bh = [
+            "certipy-ad", "find",
+            "-u", f"{user}@{domain}",
+            "-p", pw,
+            "-dc-ip", ip,
+            "-bloodhound",
+            "-output", str(bh_out),
+        ]
+        findings.cmd(" ".join(cmd_bh))
+        runner.run(cmd_bh, "creds_certipy_bloodhound", timeout=120)
+        bh_files = list(bh_out.parent.glob(f"{bh_out.name}*.json"))
+        if bh_files:
+            findings.bullet(f"**Certipy BloodHound output** → `loot/certipy_bloodhound*.json` ({len(bh_files)} files)")
+            print(f"        [+] Certipy BloodHound output: {len(bh_files)} file(s)")
+        else:
+            print(f"        [-] Certipy BloodHound output: no files generated")
 
     # 6a. Admin command execution — enumerate target via SMB exec using admin creds
     if admin_smb:

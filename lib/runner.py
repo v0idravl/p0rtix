@@ -30,11 +30,13 @@ class Runner:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def run(self, cmd: list[str], label: str, timeout: int = 300) -> str:
+    def run(self, cmd: list[str], label: str, timeout: int = 300,
+            cwd: str | None = None) -> str:
         """
         Run a command, capture output, save to raw/, return stdout as string.
         On resume (raw file already exists from a prior scan), returns cached output.
         Failures are recorded in the raw file but do not raise exceptions.
+        cwd: working directory for the subprocess (default: inherit current).
         """
         existing = next(self._ws.raw_dir.glob(f"*_{label}.txt"), None)
         if existing:
@@ -48,15 +50,16 @@ class Runner:
 
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout
+                cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd
             )
             output = result.stdout
             if result.stderr.strip():
                 output += f"\n[stderr]\n{result.stderr}"
                 stderr_preview = result.stderr.strip().splitlines()[0][:200]
                 _log.warning("STDERR [%s]: %s", label, stderr_preview)
-        except subprocess.TimeoutExpired:
-            output = f"[TIMEOUT — command ran for {timeout}s without completing]\n"
+        except subprocess.TimeoutExpired as e:
+            partial = (e.stdout or "") + (e.stderr or "")
+            output = f"[TIMEOUT after {timeout}s — partial output below]\n{partial}"
             _log.error("TIMEOUT [%s] after %ds: %s", label, timeout, cmd_str)
         except FileNotFoundError:
             output = f"[ERROR — command not found: {cmd[0]}]\n"
