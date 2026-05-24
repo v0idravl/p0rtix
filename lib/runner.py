@@ -3,7 +3,10 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
+from lib.logger import get_logger
 from lib.workspace import Workspace
+
+_log = get_logger()
 
 
 class Runner:
@@ -41,6 +44,7 @@ class Runner:
 
         raw_path = self._ws.raw_dir / f"{self._ws.next_raw_label(label)}.txt"
         cmd_str = shlex.join(cmd)
+        _log.debug("RUN [%s]: %s", label, cmd_str)
 
         try:
             result = subprocess.run(
@@ -49,10 +53,14 @@ class Runner:
             output = result.stdout
             if result.stderr.strip():
                 output += f"\n[stderr]\n{result.stderr}"
+                stderr_preview = result.stderr.strip().splitlines()[0][:200]
+                _log.warning("STDERR [%s]: %s", label, stderr_preview)
         except subprocess.TimeoutExpired:
             output = f"[TIMEOUT — command ran for {timeout}s without completing]\n"
+            _log.error("TIMEOUT [%s] after %ds: %s", label, timeout, cmd_str)
         except FileNotFoundError:
             output = f"[ERROR — command not found: {cmd[0]}]\n"
+            _log.error("NOT FOUND [%s]: %s", label, cmd[0])
 
         self._save(raw_path, cmd_str, output)
         return output

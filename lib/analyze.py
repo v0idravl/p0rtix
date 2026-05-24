@@ -120,7 +120,7 @@ Rules:
 - Do not allude to or reference whether this target resembles any specific known environment, named machine, or published writeup. Draw conclusions only from the scan data below.
 - Every recommendation in the Attack Chain must be immediately actionable using only the information present in the findings. Do not suggest steps that require credentials, usernames, hashes, or other artifacts that are not explicitly present. If a technique requires something not yet discovered, omit it entirely — do not frame it as conditional ("if you find X, then...").
 
-Analyse the findings below and respond with exactly these three sections:
+Analyse the findings below and respond with exactly these four sections:
 
 ## Executive Summary
 2–3 sentences describing the target's attack surface and overall posture based strictly on what was found.
@@ -130,6 +130,9 @@ Bullet-point every significant item visible in the scan data: exposed credential
 
 ## Recommended Attack Chain
 Ordered list of next steps that can be executed right now with the access and information above. Each step must cite the specific evidence that makes it viable (e.g. "SMB null session confirmed → enumerate shares with..."). Omit any step whose prerequisites are not in the findings.
+
+## Tool Improvement Suggestions
+Review the raw output quality in this report — commands that failed, timed out, returned empty results, or had parser issues. Suggest specific, actionable improvements to the p0rtix automated tool: better arguments, smarter fallbacks, missing coverage, or additional tools that would help. Be concise and specific. Omit this section entirely if output quality is good with no obvious gaps.
 
 ---
 **Target IP:** {ip}
@@ -155,7 +158,7 @@ Rules:
 - Every recommendation must be immediately actionable using only the artifacts present in the findings (valid credentials, hashes, user lists, share names, ADCS templates, etc.). Do not suggest steps that require artifacts not present. If a technique requires something not yet found, omit it entirely.
 - Be specific: cite exact usernames, share names, hash types, ESC numbers, and complete tool commands grounded in the evidence.
 
-Analyse the findings below and respond with exactly these three sections:
+Analyse the findings below and respond with exactly these four sections:
 
 ## Executive Summary
 2–3 sentences describing the current access level, what was enumerated with the provided credentials, and the overall position in the engagement.
@@ -165,6 +168,9 @@ Bullet every significant item: valid credentials and their access level (standar
 
 ## Recommended Next Steps
 Ordered list of the highest-value actions from the current position. Prioritise domain compromise and credential escalation paths. Each step must cite specific evidence (e.g. "Admin SMB (`Pwn3d!`) for `administrator` → lateral movement with `impacket-psexec {domain_str}/administrator:[REDACTED]@{ip}`"). Omit any step whose prerequisites are absent from the findings.
+
+## Tool Improvement Suggestions
+Review the raw output quality in this report — commands that failed, timed out, returned empty results, or had parser issues. Suggest specific, actionable improvements to the p0rtix automated tool: better arguments, smarter fallbacks, missing coverage, or additional tools that would help. Be concise and specific. Omit this section entirely if output quality is good with no obvious gaps.
 
 ---
 **Target IP:** {ip}

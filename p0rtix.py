@@ -22,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from lib.analyze import analyze_findings
 from lib.deps import check_deps
+from lib.logger import get_logger, setup_logging
 from lib.findings import Findings, ServiceBuffer, set_verbose
 from lib.hosts import HostsManager
 from lib.models import Discovery, Service
@@ -101,6 +102,9 @@ def main():
 
     ws = Workspace(args.ip, args.domain, args.name, args.workspace,
                    mode="scan" if args.mode == "scan,creds" else args.mode)
+    setup_logging(ws.log_dir)
+    _log = get_logger()
+    _log.info("Target: %s  domain: %s  mode: %s", args.ip, args.domain or "none", args.mode)
     findings = Findings(ws.findings_path, args.ip, args.domain)
     set_verbose(args.verbose)
     runner = Runner(ws)

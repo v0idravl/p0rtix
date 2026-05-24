@@ -39,6 +39,7 @@ class Workspace:
         self.findings_path = self.machine_dir / f"{prefix}findings.md"
         self.report_path = self.report_dir / "report.md"
         self.bloodhound_dir = self.loot_dir / "bloodhound"
+        self.log_dir = self.machine_dir / "logs"
 
         self._raw_counter = 0
         self._counter_lock = threading.Lock()
@@ -55,7 +56,7 @@ class Workspace:
 
     def _setup(self):
         for d in (self.raw_dir, self.loot_dir, self.exploit_dir, self.report_dir,
-                  self.bloodhound_dir):
+                  self.bloodhound_dir, self.log_dir):
             d.mkdir(parents=True, exist_ok=True)
 
         if not self.report_path.exists():
