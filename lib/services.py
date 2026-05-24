@@ -183,8 +183,8 @@ def _kerberos(ip, service, runner, findings, available):
     Port 88 — Kerberos / Active Directory.
     Key operations (all unauthenticated):
       - nmap krb5-enum-users
-      - kerbrute username enumeration
-      - impacket-GetNPUsers AS-REP roasting (pre-auth disabled accounts)
+    Post-domain phase handles AS-REP roasting against discovered users.txt.
+    No wordlist-based username bruteforcing.
     """
     port = service.port
     domain = service.hostname  # set by orchestrator from --domain
@@ -192,18 +192,9 @@ def _kerberos(ip, service, runner, findings, available):
     if not domain:
         findings.note(
             "No `--domain` provided — Kerberos enumeration skipped. "
-            "Re-run with `--domain DOMAIN` to enable kerbrute, krb5-enum-users, and AS-REP roasting."
+            "Re-run with `--domain DOMAIN` to enable krb5-enum-users and AS-REP roasting."
         )
         return []
-
-    if "kerbrute" in available:
-        wl = _best_userlist()
-        out_file = str(runner.ws.loot_dir / "kerbrute_users.txt")
-        cmd2 = ["kerbrute", "userenum", "--dc", ip, "-d", domain,
-                "--output", out_file, wl]
-        findings.cmd(" ".join(cmd2))
-        out2 = runner.run(cmd2, "krb_kerbrute_userenum", timeout=300)
-        _parse_kerbrute(out2, findings, runner)
 
     findings.note(
         f"AS-REP roasting (run after user list is assembled): "
@@ -214,26 +205,6 @@ def _kerberos(ip, service, runner, findings, available):
         f"`impacket-GetUserSPNs {domain}/USER:PASS -dc-ip {ip} -request -outputfile kerberoast.txt`"
     )
     return []
-
-
-def _parse_kerbrute(output: str, findings: Findings, runner: Runner):
-    valid = re.findall(r"VALID USERNAME:\s+(\S+)", output)
-    if valid:
-        findings.bullet(f"**Valid usernames ({len(valid)}):** {', '.join(valid)}")
-        for user in valid:
-            runner.ws.add_user(user.split("@")[0])
-
-
-def _best_userlist() -> str:
-    candidates = [
-        "/usr/share/seclists/Usernames/xato-net-10-million-usernames-dup.txt",
-        "/usr/share/seclists/Usernames/Names/names.txt",
-        "/usr/share/seclists/Usernames/top-usernames-shortlist.txt",
-    ]
-    for wl in candidates:
-        if Path(wl).exists():
-            return wl
-    return candidates[-1]
 
 
 # ── POP3 (110, 995) ───────────────────────────────────────────────────────────
@@ -651,6 +622,11 @@ def _ldap(ip, service, runner, findings, available):
         cmd = ["ldapsearch", "-x", "-H", uri, "-b", base_dn, filt, *attrs]
         out = runner.run(cmd, f"ldap_{port}_{label}", timeout=60)
         findings.cmd(" ".join(cmd))
+        if not out.strip() or "# numEntries" not in out:
+            if "Operations error" in out or "Insufficient access rights" in out or "strongerAuth" in out:
+                findings.note(f"LDAP `{label}`: anonymous bind denied by server (Operations error / auth required)")
+            elif "No such object" in out:
+                findings.note(f"LDAP `{label}`: no matching objects")
         return out
 
     # 2. Password policy

