@@ -289,6 +289,9 @@ def _smb_run_zerologon(ip: str, port: int, runner: Runner, buf: Findings) -> Non
     cmd = ["nxc", "smb", ip, "-M", "zerologon"]
     out = runner.run(cmd, f"smb_{port}_zerologon", timeout=60)
     buf.cmd(" ".join(cmd))
+    if "can't concat str to bytes" in out or "TypeError" in out:
+        buf.note("Zerologon check failed (tool bug in nxc zerologon module — str/bytes type error). Run `nxc smb <ip> -M zerologon` manually to verify.")
+        return
     if "VULNERABLE" in out.upper():
         buf.bullet("**VULNERABLE to Zerologon (CVE-2020-1472)**")
         buf.add_summary("**VULNERABLE to Zerologon (CVE-2020-1472)**")

