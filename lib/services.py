@@ -711,28 +711,12 @@ def _ldap(ip, service, runner, findings, available):
     if admins:
         findings.bullet(f"**AdminSDHolder-protected (privileged):** {', '.join(admins)}")
 
-    # 10. ADCS — certipy template enumeration (attempt anon/guest, note creds path)
+    # 10. ADCS — certipy requires credentials; collected in creds mode
     if "certipy-ad" in available and domain:
-        findings.h4("ADCS (certipy-ad)")
-        cmd_certy = [
-            "certipy-ad", "find",
-            "-u", f"guest@{domain}",
-            "-p", "",
-            "-dc-ip", ip,
-            "-vulnerable", "-stdout",
-        ]
-        findings.cmd(" ".join(cmd_certy))
-        out_certy = runner.run(cmd_certy, f"ldap_{port}_certipy", timeout=120)
-        if "ESC" in out_certy or "Vulnerable" in out_certy or "Template" in out_certy:
-            findings.bullet("**certipy-ad found ADCS misconfigurations — see raw output**")
-            for line in out_certy.splitlines():
-                if any(kw in line for kw in ("ESC", "Vulnerable", "[!]", "Template Name")):
-                    findings.bullet(f"  `{line.strip()}`")
-        else:
-            findings.note(
-                f"certipy-ad needs credentials: "
-                f"`certipy-ad find -u USER@{domain} -p PASS -dc-ip {ip} -vulnerable -stdout`"
-            )
+        findings.note(
+            f"ADCS enumeration requires credentials — run with: "
+            f"`certipy-ad find -u USER@{domain} -p PASS -dc-ip {ip} -vulnerable -stdout`"
+        )
 
     # 11. ldapdomaindump — structured HTML/JSON dump saved to loot/
     if "ldapdomaindump" in available and domain:
@@ -751,29 +735,13 @@ def _ldap(ip, service, runner, findings, available):
         if "error" not in out_dump.lower():
             findings.bullet(f"**ldapdomaindump:** saved to `{dump_dir}`")
 
-    # 12. BloodHound collection (try anonymous — usually needs creds but worth attempting)
+    # 12. BloodHound — requires credentials; collected in creds mode
     if "bloodhound-python" in available and domain:
-        bh_dir = str(runner.ws.loot_dir / "bloodhound")
-        Path(bh_dir).mkdir(parents=True, exist_ok=True)
-        cmd_bh = [
-            "bloodhound-python",
-            "-d", domain,
-            "-u", "guest",
-            "-p", "",
-            "-ns", ip,
-            "-c", "All",
-            "--zip",
-            "-o", bh_dir,
-        ]
-        findings.cmd(" ".join(cmd_bh))
-        out_bh = runner.run(cmd_bh, f"ldap_{port}_bloodhound", timeout=300)
-        if ".zip" in out_bh.lower():
-            findings.bullet(f"**BloodHound data collected** — import zip from `{bh_dir}`")
-        else:
-            findings.note(
-                f"BloodHound needs credentials: `bloodhound-python -d {domain} -u USER -p PASS "
-                f"-ns {ip} -c All --zip`"
-            )
+        findings.note(
+            f"BloodHound requires credentials — run with: "
+            f"`bloodhound-python -d {domain} -u USER -p PASS "
+            f"-ns {ip} -c All --auth-method ntlm --zip`"
+        )
 
     return []
 

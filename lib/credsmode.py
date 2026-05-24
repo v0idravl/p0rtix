@@ -770,33 +770,47 @@ def _ad_core(
                 findings.bullet("No AS-REP roastable accounts found")
             print(f"    [-] No AS-REP roastable accounts")
 
-    # 4. BloodHound collection — use -ns for DNS resolution instead of -dc IP
+    # 4. BloodHound collection — NTLM auth avoids Kerberos hostname resolution failures
     if "bloodhound-python" in available:
-        bh_dir = str(ws.bloodhound_dir)
-        cmd = [
-            "bloodhound-python",
-            "-c", "All",
-            "-u", user,
-            "-p", pw,
-            "-d", domain,
-            "--dns-tcp",
-            "--zip",
-            "-o", bh_dir,
-            "-ns", ip,
-        ]
-        print(f"    [*] BloodHound collection...")
+        bh_dir = Path(ws.bloodhound_dir)
+        bh_dir.mkdir(parents=True, exist_ok=True)
         findings.h4("BloodHound Collection")
-        findings.cmd(" ".join(cmd))
-        out = runner.run(cmd, "creds_bloodhound", timeout=300)
-        zips = list(Path(bh_dir).rglob("*.zip"))
-        if zips:
-            findings.bullet(f"**BloodHound data** → `loot/bloodhound/{zips[0].name}`")
+        print(f"    [*] BloodHound collection (All)...")
+
+        def _bh_run(collection: str, label: str) -> "Path | None":
+            cmd = [
+                "bloodhound-python",
+                "-c", collection,
+                "-u", user,
+                "-p", pw,
+                "-d", domain,
+                "--auth-method", "ntlm",
+                "--dns-tcp",
+                "--zip",
+                "-o", str(bh_dir),
+                "-ns", ip,
+            ]
+            findings.cmd(" ".join(cmd))
+            runner.run(cmd, label, timeout=300)
+            zips = sorted(bh_dir.rglob("*.zip"), key=lambda z: z.stat().st_size, reverse=True)
+            good = [z for z in zips if z.stat().st_size > 1000]
+            return good[0] if good else None
+
+        zip_path = _bh_run("All", "creds_bloodhound")
+        if zip_path:
+            findings.bullet(f"**BloodHound data** → `loot/bloodhound/{zip_path.name}`")
             findings.add_summary("BloodHound collection complete — import zip into BloodHound GUI")
-            print(f"    [+] BloodHound zip: {zips[0].name}")
+            print(f"        [+] {zip_path.name}")
         else:
-            errors = _error_lines(out)
-            findings.code_block(errors or _trim(out, lines=20))
-            print(f"    [!] BloodHound collection failed")
+            print(f"        [-] All collection empty — retrying with DCOnly...")
+            zip_path = _bh_run("DCOnly", "creds_bloodhound_dconly")
+            if zip_path:
+                findings.bullet(f"**BloodHound data (DCOnly)** → `loot/bloodhound/{zip_path.name}`")
+                findings.add_summary("BloodHound DCOnly collection complete — import zip into BloodHound GUI")
+                print(f"        [+] {zip_path.name} (DCOnly)")
+            else:
+                findings.note("BloodHound collection produced no data — check LDAP connectivity and credentials")
+                print(f"        [!] BloodHound collection failed")
 
     # 5. LAPS / gMSA — read managed account credentials
     if "nxc" in available:

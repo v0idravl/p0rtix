@@ -47,7 +47,7 @@ class Runner:
                 cmd, capture_output=True, text=True, timeout=timeout
             )
             output = result.stdout
-            if result.returncode != 0 and result.stderr.strip():
+            if result.stderr.strip():
                 output += f"\n[stderr]\n{result.stderr}"
         except subprocess.TimeoutExpired:
             output = f"[TIMEOUT — command ran for {timeout}s without completing]\n"
