@@ -1151,7 +1151,7 @@ def _creds_winrm(
             ("net localgroup administrators",                                                                    f"creds_winrm_localadmins_{user}"),
             ('net group "Domain Admins" /domain',                                                               f"creds_winrm_domainadmins_{user}"),
             ("ipconfig /all",                                                                                    f"creds_winrm_ipconfig_{user}"),
-            ("Get-ComputerInfo | Select-Object CsName,OsName,OsVersion,CsDomainRole | Format-List",             f"creds_winrm_sysinfo_{user}"),
+            ('$env:COMPUTERNAME; [System.Environment]::OSVersion.VersionString; (Get-WmiObject Win32_ComputerSystem).DomainRole', f"creds_winrm_sysinfo_{user}"),
         ]
         for win_cmd, label in win_cmds:
             cmd2 = ["nxc", "winrm", ip, "-u", user, "-p", pw, "-X", win_cmd]

@@ -58,7 +58,11 @@ class Runner:
                 stderr_preview = result.stderr.strip().splitlines()[0][:200]
                 _log.warning("STDERR [%s]: %s", label, stderr_preview)
         except subprocess.TimeoutExpired as e:
-            partial = (e.stdout or "") + (e.stderr or "")
+            def _s(b: str | bytes | None) -> str:
+                if b is None:
+                    return ""
+                return b if isinstance(b, str) else b.decode("utf-8", errors="replace")
+            partial = _s(e.stdout) + _s(e.stderr)
             output = f"[TIMEOUT after {timeout}s — partial output below]\n{partial}"
             _log.error("TIMEOUT [%s] after %ds: %s", label, timeout, cmd_str)
         except FileNotFoundError:
