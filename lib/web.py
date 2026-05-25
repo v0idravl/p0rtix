@@ -10,10 +10,11 @@ from lib.models import Discovery, Service
 from lib.runner import Runner
 from lib.scope import Scope
 
-# SecLists paths
-_WORDLIST_DIRS  = "/usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt"
-_WORDLIST_VHOST = "/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt"
-_WORDLIST_API   = "/usr/share/seclists/Discovery/Web-Content/api/objects.txt"
+# SecLists paths — intentionally small; quick sweep only
+_WORDLIST_DIRS       = "/usr/share/seclists/Discovery/Web-Content/common.txt"
+_WORDLIST_DIRS_SMALL = "/usr/share/seclists/Discovery/Web-Content/raft-small-directories.txt"
+_WORDLIST_VHOST      = "/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt"
+_WORDLIST_API        = "/usr/share/seclists/Discovery/Web-Content/api/objects.txt"
 
 # ANSI escape sequence pattern
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[mKGHFABCDJsu]")
@@ -646,22 +647,26 @@ def _ffuf_extensions(fp: dict) -> list[str]:
 
 
 def _dir_bust(base_url: str, runner: Runner, findings: Findings, fp: dict):
-    if not _exists(_WORDLIST_DIRS):
-        findings.note(f"Wordlist missing: `{_WORDLIST_DIRS}` — skipping dir bust")
+    wl = _WORDLIST_DIRS if _exists(_WORDLIST_DIRS) else (
+        _WORDLIST_DIRS_SMALL if _exists(_WORDLIST_DIRS_SMALL) else None
+    )
+    if not wl:
+        findings.note("No dir-bust wordlist found — skipping")
         return
 
     findings.h4("Directory Bust")
+    # No extensions on the quick sweep — keeps it fast; cewl bust handles targeted ext probing
     cmd = [
         "ffuf", "-u", f"{base_url}/FUZZ",
-        "-w", _WORDLIST_DIRS,
+        "-w", wl,
         "-fc", "404",
         "-t", "40",
         "-timeout", "10",
         "-ic",
         "-noninteractive",
-    ] + _ffuf_extensions(fp)
+    ]
     findings.cmd(" ".join(cmd))
-    out = runner.run(cmd, f"web_{_label(base_url)}_ffuf_dirs", timeout=600)
+    out = runner.run(cmd, f"web_{_label(base_url)}_ffuf_dirs", timeout=300)
     _print_ffuf(out, findings)
 
 
@@ -770,7 +775,7 @@ def _vhost_bust(ip: str, port: int, scheme: str, domain: str,
     if baseline > 0:
         cmd += ["-fs", str(baseline)]
     findings.cmd(" ".join(cmd))
-    out = runner.run(cmd, f"web_{_label(url)}_ffuf_vhosts", timeout=600)
+    out = runner.run(cmd, f"web_{_label(url)}_ffuf_vhosts", timeout=300)
 
     found: list[str] = []
     for match in _FFUF_RE.finditer(out):
