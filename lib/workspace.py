@@ -45,6 +45,8 @@ class Workspace:
         self._counter_lock = threading.Lock()
         self._known_users: set[str] = set()
         self._users_lock = threading.Lock()
+        self._known_hostnames: set[str] = set()
+        self._hostnames_lock = threading.Lock()
         self.discovered_domain: str = ""
         self._domain_lock = threading.Lock()
         self.lockout_threshold: int = -1
@@ -121,6 +123,18 @@ class Workspace:
             with path.open("a") as fh:
                 fh.write("\n".join(unique) + "\n")
         return len(unique)
+
+    def add_hostname(self, fqdn: str):
+        """Thread-safe append of a discovered DC/host FQDN to loot/hostnames.txt (deduped)."""
+        fqdn = fqdn.strip().lower()
+        if not fqdn:
+            return
+        with self._hostnames_lock:
+            if fqdn in self._known_hostnames:
+                return
+            self._known_hostnames.add(fqdn)
+            with open(self.loot_dir / "hostnames.txt", "a") as f:
+                f.write(fqdn + "\n")
 
     def add_user(self, username: str):
         """Thread-safe append of a discovered username to loot/users.txt (deduped)."""

@@ -813,6 +813,43 @@ def _ad_core(
         findings.h4("BloodHound Collection")
         print(f"    [*] BloodHound collection (All)...")
 
+        def _bh_relocate_json() -> None:
+            """Move bloodhound JSON files from loot_dir into bh_dir if they landed outside it."""
+            import re as _re
+            bh_json_pattern = _re.compile(r"^\d{14}_\w+\.json$")
+            for f in ws.loot_dir.iterdir():
+                if f.is_file() and bh_json_pattern.match(f.name):
+                    dest = bh_dir / f.name
+                    if not dest.exists():
+                        f.replace(dest)
+
+        def _bh_find_zip(zip_name: str | None) -> "Path | None":
+            """Search bh_dir, loot_dir, and machine_dir for a bloodhound zip; relocate if needed."""
+            search_dirs = [bh_dir, ws.loot_dir, ws.machine_dir]
+            # Named zip first
+            if zip_name:
+                for d in search_dirs:
+                    candidate = d / zip_name
+                    if candidate.exists() and candidate.stat().st_size > 1000:
+                        if candidate.parent != bh_dir:
+                            dest = bh_dir / zip_name
+                            candidate.replace(dest)
+                            return dest
+                        return candidate
+            # Any large zip anywhere under machine_dir
+            all_zips = sorted(
+                (z for z in ws.machine_dir.rglob("*.zip") if z.stat().st_size > 1000),
+                key=lambda z: z.stat().st_size, reverse=True,
+            )
+            if all_zips:
+                z = all_zips[0]
+                if z.parent != bh_dir:
+                    dest = bh_dir / z.name
+                    z.replace(dest)
+                    return dest
+                return z
+            return None
+
         def _bh_run(collection: str, label: str) -> "Path | None":
             cmd = [
                 "bloodhound-python",
@@ -827,21 +864,16 @@ def _ad_core(
                 "-ns", ip,
             ]
             findings.cmd(" ".join(cmd))
-            # Run from bh_dir so the zip is always written there regardless of
-            # bloodhound-python version (older versions write zip to CWD not -o dir)
+            # Run from bh_dir so the zip lands there regardless of bloodhound-python version
             out = runner.run(cmd, label, timeout=300, cwd=str(bh_dir))
 
-            # Primary: parse the zip filename from "Compressing output into X.zip"
-            m = re.search(r"Compressing output into\s+(\S+\.zip)", out)
-            if m:
-                named = bh_dir / Path(m.group(1)).name
-                if named.exists() and named.stat().st_size > 1000:
-                    return named
+            # Relocate any JSON files that landed in loot_dir instead of bh_dir
+            _bh_relocate_json()
 
-            # Fallback: find the largest zip in the directory
-            zips = sorted(bh_dir.rglob("*.zip"), key=lambda z: z.stat().st_size, reverse=True)
-            good = [z for z in zips if z.stat().st_size > 1000]
-            return good[0] if good else None
+            # Parse zip filename from "Compressing output into X.zip"
+            m = re.search(r"Compressing output into\s+(\S+\.zip)", out)
+            zip_name = Path(m.group(1)).name if m else None
+            return _bh_find_zip(zip_name)
 
         zip_path = _bh_run("All", "creds_bloodhound")
         if zip_path:

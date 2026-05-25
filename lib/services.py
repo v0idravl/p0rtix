@@ -182,12 +182,20 @@ def _kerberos(ip, service, runner, findings, available):
     """
     Port 88 — Kerberos / Active Directory.
     Key operations (all unauthenticated):
-      - nmap krb5-enum-users
+      - NTP time sync (Kerberos requires < 5 min clock skew)
     Post-domain phase handles AS-REP roasting against discovered users.txt.
     No wordlist-based username bruteforcing.
     """
     port = service.port
     domain = service.hostname  # set by orchestrator from --domain
+
+    # Sync clock immediately — Kerberos attacks fail with > 5 min skew
+    if "ntpdate" in available:
+        subprocess.run(["timedatectl", "set-ntp", "false"], capture_output=True)
+        out_ntp = runner.run(["ntpdate", "-u", ip], "time_sync_ntpdate", timeout=30)
+        first = next((l for l in out_ntp.splitlines() if l.strip()), "")
+        findings.note(f"NTP sync to DC: {first.strip()}" if first else "NTP sync attempted")
+        print(f"    [*] Kerberos port detected — time synced to {ip}")
 
     if not domain:
         findings.note(
@@ -642,10 +650,11 @@ def _ldap(ip, service, runner, findings, available):
                    "sAMAccountName", "description", "mail", "userAccountControl", "memberOf")
     _parse_ldap_users(out_users, findings, runner)
 
-    # 4. Computers
+    # 4. Computers — store FQDNs for /etc/hosts auto-add in orchestrator
     out_comp = lq("computers", "(objectClass=computer)",
                   "sAMAccountName", "operatingSystem", "operatingSystemVersion", "dNSHostName")
-    _parse_ldap_computers(out_comp, findings)
+    for fqdn in _parse_ldap_computers(out_comp, findings):
+        runner.ws.add_hostname(fqdn)
 
     # 5. Groups
     out_grp = lq("groups", "(objectClass=group)", "cn", "description", "member")
@@ -795,7 +804,8 @@ def _parse_ldap_users(output: str, findings: Findings, runner: Runner):
                 findings.bullet(f"  `{stripped}`")
 
 
-def _parse_ldap_computers(output: str, findings: Findings):
+def _parse_ldap_computers(output: str, findings: Findings) -> list[str]:
+    """Parse computer objects. Returns list of dNSHostName FQDNs found."""
     hostnames = re.findall(r"dNSHostName:\s+(.+)", output)
     os_list = re.findall(r"operatingSystem:\s+(.+)", output)
     if hostnames:
@@ -805,6 +815,7 @@ def _parse_ldap_computers(output: str, findings: Findings):
         counts = Counter(os_list)
         findings.bullet("**Operating systems:** " +
                         ", ".join(f"{os} ×{n}" for os, n in counts.most_common(5)))
+    return [h.strip() for h in hostnames if h.strip()]
 
 
 # ── Rsync (873) ───────────────────────────────────────────────────────────────

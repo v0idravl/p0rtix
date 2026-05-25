@@ -231,6 +231,14 @@ def main():
             print(f"[*] Domain not in /etc/hosts.")
             hosts.prompt_add(args.ip, ws.discovered_domain)
 
+    # Add discovered DC/host FQDNs to /etc/hosts (found via LDAP dNSHostName)
+    hostnames_file = ws.loot_dir / "hostnames.txt"
+    if hostnames_file.exists():
+        for fqdn in hostnames_file.read_text().splitlines():
+            fqdn = fqdn.strip()
+            if fqdn and not hosts.is_known(fqdn):
+                hosts.prompt_add(args.ip, fqdn)
+
     if effective_domain:
         _run_post_domain_checks(args.ip, effective_domain, runner, findings, ws, available)
 
