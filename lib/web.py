@@ -1,3 +1,4 @@
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -13,7 +14,9 @@ from lib.scope import Scope
 _WORDLIST_DIRS  = "/usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt"
 _WORDLIST_VHOST = "/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt"
 _WORDLIST_API   = "/usr/share/seclists/Discovery/Web-Content/api/objects.txt"
-_WEB_EXTENSIONS = ".php,.txt,.html,.bak,.zip,.old,.xml,.json,.config,.asp,.aspx,.jsp"
+
+# ANSI escape sequence pattern
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[mKGHFABCDJsu]")
 
 # ffuf result line: "path    [Status: 200, Size: 1234, ...]"
 _FFUF_RE = re.compile(r"^(\S+)\s+\[Status:\s*(\d+),\s*Size:\s*(\d+).*?\]", re.MULTILINE)
@@ -90,6 +93,7 @@ def enumerate_web(
     discoveries: list[Discovery] = []
 
     # ── 1. Headers + tech fingerprint ─────────────────────────────────────────
+    print(f"    → fingerprint")
     fp = _fingerprint(base_url, runner, findings, available)
 
     # ── 2. NTLM info disclosure (Windows/IIS auth header leaks hostname/domain) ─
@@ -140,6 +144,11 @@ def enumerate_web(
     # ── 9. ADCS probe (relevant on any web port on a DC) ──────────────────────
     _check_adcs(base_url, ip, runner, findings)
 
+    # ── 9b. Next.js-specific enumeration ──────────────────────────────────────
+    if fp.get("is_nextjs"):
+        print(f"    → Next.js enumeration")
+        _check_nextjs(base_url, runner, findings)
+
     # ── 10. WordPress detection + wpscan ──────────────────────────────────────
     if "wpscan" in available:
         _wpscan(base_url, runner, findings)
@@ -152,10 +161,12 @@ def enumerate_web(
 
     # ── 13. Directory + file bust ──────────────────────────────────────────────
     if "ffuf" in available:
-        _dir_bust(base_url, runner, findings)
+        print(f"    → dir bust")
+        _dir_bust(base_url, runner, findings, fp)
 
     # ── 14. API endpoint discovery ────────────────────────────────────────────
     if "ffuf" in available:
+        print(f"    → API bust")
         _api_bust(base_url, runner, findings)
 
     # ── 14b. Parameter discovery ──────────────────────────────────────────────
@@ -164,12 +175,15 @@ def enumerate_web(
 
     # ── 15. cewl custom wordlist + targeted dir bust ──────────────────────────
     if "cewl" in available and "ffuf" in available:
+        print(f"    → cewl wordlist")
         cewl_wl = _run_cewl(base_url, runner, findings)
         if cewl_wl:
-            _dir_bust_cewl(base_url, cewl_wl, runner, findings)
+            print(f"    → cewl dir bust")
+            _dir_bust_cewl(base_url, cewl_wl, runner, findings, fp)
 
     # ── 16. Vhost bust ────────────────────────────────────────────────────────
     if not is_followup and domain and "ffuf" in available:
+        print(f"    → vhost bust")
         vhosts = _vhost_bust(ip, port, scheme, domain, runner, findings)
         for vh in vhosts:
             if scope.check(vh):
@@ -180,6 +194,7 @@ def enumerate_web(
 
     # ── 17. Crawl ─────────────────────────────────────────────────────────────
     if "gospider" in available:
+        print(f"    → crawl")
         _crawl(base_url, scope, runner, findings)
 
     return discoveries
@@ -202,14 +217,15 @@ def _fingerprint(url: str, runner: Runner, findings: Findings, available: set[st
         cmd2 = ["whatweb", "--no-errors", "-a", "3", url]
         out2 = runner.run(cmd2, f"web_{_label(url)}_whatweb", timeout=60)
         findings.cmd(" ".join(cmd2))
-        if out2.strip():
-            findings.code_block(out2.strip())
+        clean = _ANSI_RE.sub("", out2).strip()
+        if clean:
+            findings.code_block(clean)
 
     return meta
 
 
 def _parse_headers_meta(raw: str) -> dict:
-    meta = {"status": "", "server": ""}
+    meta = {"status": "", "server": "", "powered_by": "", "is_nextjs": False, "is_php": False}
     for line in raw.splitlines():
         if line.startswith("HTTP/"):
             parts = line.split()
@@ -217,8 +233,18 @@ def _parse_headers_meta(raw: str) -> dict:
                 meta["status"] = parts[1]
         elif ":" in line:
             key, _, val = line.partition(":")
-            if key.strip().lower() == "server":
-                meta["server"] = val.strip()
+            k = key.strip().lower()
+            v = val.strip()
+            if k == "server":
+                meta["server"] = v
+            elif k == "x-powered-by":
+                meta["powered_by"] = v
+                if "next.js" in v.lower():
+                    meta["is_nextjs"] = True
+                if "php" in v.lower():
+                    meta["is_php"] = True
+            elif k.startswith("x-nextjs"):
+                meta["is_nextjs"] = True
     return meta
 
 
@@ -542,9 +568,84 @@ def _check_jenkins(base_url: str, runner: Runner, findings: Findings):
         findings.bullet("**Jenkins REST API accessible (no auth)** — enum jobs/builds")
 
 
+# ── Next.js enumeration ───────────────────────────────────────────────────────
+
+def _check_nextjs(base_url: str, runner: Runner, findings: Findings):
+    """Extract Next.js build ID, probe _next/data routes, and dump __NEXT_DATA__."""
+    findings.h4("Next.js")
+
+    result = subprocess.run(
+        ["curl", "-sk", "--max-time", "15", base_url],
+        capture_output=True, text=True,
+    )
+    html = result.stdout
+
+    # Build ID — unlocks /_next/data/<buildId>/<page>.json routes
+    build_id: str | None = None
+    m = re.search(r'"buildId"\s*:\s*"([^"]+)"', html)
+    if m:
+        build_id = m.group(1)
+        findings.bullet(f"Build ID: `{build_id}`")
+
+    # Inline __NEXT_DATA__ JSON — contains props/pageProps passed to the page
+    m_data = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+    if m_data:
+        try:
+            nd = json.loads(m_data.group(1))
+            findings.bullet("**`__NEXT_DATA__`** present — inline page state:")
+            for key in ("props", "pageProps", "query", "runtimeConfig"):
+                val = nd.get(key)
+                if val:
+                    findings.bullet(f"  `{key}`: {str(val)[:300]}")
+        except Exception:
+            pass
+
+    # Probe /_next/data/<buildId>/index.json — pre-rendered page payload
+    if build_id:
+        data_url = f"{base_url}/_next/data/{build_id}/index.json"
+        r = subprocess.run(
+            ["curl", "-sk", "--max-time", "10", "-w", "\n%{http_code}", data_url],
+            capture_output=True, text=True,
+        )
+        lines = r.stdout.rsplit("\n", 1)
+        code = lines[-1].strip() if len(lines) > 1 else "000"
+        body = lines[0] if len(lines) > 1 else r.stdout
+        if code == "200":
+            findings.bullet(f"**Pre-rendered data exposed:** `/_next/data/{build_id}/index.json`")
+            findings.add_summary(f"Next.js pre-rendered data at `/_next/data/{build_id}/index.json`")
+            if body.strip():
+                findings.code_block(body[:800])
+
+    # Check accessibility of standard Next.js paths
+    for path in ("/_next/static/", "/_next/data/"):
+        r2 = subprocess.run(
+            ["curl", "-sk", "--max-time", "8", "-o", "/dev/null",
+             "-w", "%{http_code}", f"{base_url}{path}"],
+            capture_output=True, text=True,
+        )
+        code2 = r2.stdout.strip()
+        if code2 not in ("404", "000", ""):
+            findings.bullet(f"`{path}` — HTTP {code2}")
+
+
 # ── Directory bust ────────────────────────────────────────────────────────────
 
-def _dir_bust(base_url: str, runner: Runner, findings: Findings):
+def _ffuf_extensions(fp: dict) -> list[str]:
+    """Return appropriate ffuf -e extension args based on detected framework."""
+    server = fp.get("server", "").lower()
+    powered_by = fp.get("powered_by", "").lower()
+    if fp.get("is_nextjs"):
+        return ["-e", ".json"]
+    if fp.get("is_php") or "php" in powered_by:
+        return ["-e", ".php,.html,.txt,.xml,.json,.bak"]
+    if "iis" in server or "asp" in powered_by:
+        return ["-e", ".asp,.aspx,.html,.txt,.xml,.config"]
+    if "node" in server or "node" in powered_by or "express" in powered_by:
+        return ["-e", ".json"]
+    return ["-e", ".php,.html,.txt,.xml,.json"]
+
+
+def _dir_bust(base_url: str, runner: Runner, findings: Findings, fp: dict):
     if not _exists(_WORDLIST_DIRS):
         findings.note(f"Wordlist missing: `{_WORDLIST_DIRS}` — skipping dir bust")
         return
@@ -553,12 +654,12 @@ def _dir_bust(base_url: str, runner: Runner, findings: Findings):
     cmd = [
         "ffuf", "-u", f"{base_url}/FUZZ",
         "-w", _WORDLIST_DIRS,
-        "-e", _WEB_EXTENSIONS,
         "-fc", "404",
         "-t", "40",
         "-timeout", "10",
         "-ic",
-    ]
+        "-noninteractive",
+    ] + _ffuf_extensions(fp)
     findings.cmd(" ".join(cmd))
     out = runner.run(cmd, f"web_{_label(base_url)}_ffuf_dirs", timeout=600)
     _print_ffuf(out, findings)
@@ -584,18 +685,18 @@ def _run_cewl(base_url: str, runner: Runner, findings: Findings) -> str | None:
     return None
 
 
-def _dir_bust_cewl(base_url: str, wordlist: str, runner: Runner, findings: Findings):
+def _dir_bust_cewl(base_url: str, wordlist: str, runner: Runner, findings: Findings, fp: dict):
     """Second dir bust pass using the cewl-generated wordlist."""
     findings.h4("Directory Bust (cewl wordlist)")
     cmd = [
         "ffuf", "-u", f"{base_url}/FUZZ",
         "-w", wordlist,
-        "-e", _WEB_EXTENSIONS,
         "-fc", "404",
         "-t", "40",
         "-timeout", "10",
         "-ic",
-    ]
+        "-noninteractive",
+    ] + _ffuf_extensions(fp)
     findings.cmd(" ".join(cmd))
     out = runner.run(cmd, f"web_{_label(base_url)}_ffuf_cewl", timeout=300)
     _print_ffuf(out, findings)
@@ -629,6 +730,7 @@ def _api_bust(base_url: str, runner: Runner, findings: Findings):
             "-t", "40",
             "-timeout", "10",
             "-ic",
+            "-noninteractive",
         ]
         findings.cmd(" ".join(cmd))
         out = runner.run(
@@ -663,6 +765,7 @@ def _vhost_bust(ip: str, port: int, scheme: str, domain: str,
         "-t", "40",
         "-timeout", "10",
         "-ic",
+        "-noninteractive",
     ]
     if baseline > 0:
         cmd += ["-fs", str(baseline)]
@@ -783,9 +886,13 @@ def _param_fuzz(base_url: str, runner: Runner, findings: Findings):
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _print_ffuf(output: str, findings: Findings):
+    if "[TIMEOUT after" in output:
+        findings.note("ffuf timed out before completion — partial results only")
     results = _FFUF_RE.findall(output)
     for path, status, size in results:
         findings.bullet(f"`/{path}` — {status} ({size}b)")
+    if not results:
+        findings.note("No results")
 
 
 def _build_url(scheme: str, hostname: str, port: int) -> str:
