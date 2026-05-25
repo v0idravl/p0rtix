@@ -156,9 +156,7 @@ def _dns(ip, service, runner, findings, available):
                 findings.code_block(_trim(out3))
 
         if "dnsrecon" in available:
-            cmd4 = ["dnsrecon", "-d", domain, "-t", "axfr,std,brt",
-                    "-D", "/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt",
-                    "-n", ip]
+            cmd4 = ["dnsrecon", "-d", domain, "-t", "axfr,std", "-n", ip]
             out4 = runner.run(cmd4, f"dns_dnsrecon_{domain}", timeout=120)
             findings.cmd(" ".join(cmd4))
             findings.code_block(_trim(out4))
