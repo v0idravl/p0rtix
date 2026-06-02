@@ -1291,17 +1291,27 @@ def _tftp(ip, service, runner, findings, available):
 
 def _splunk(ip, service, runner, findings, available):
     port = service.port
-    scheme = "https" if port == 8089 else "http"
-    base = f"{scheme}://{ip}:{port}"
 
     findings.h4(f"Splunk ({'Management API' if port == 8089 else 'Web UI'})")
 
-    # Version check via REST API (no auth needed on many installations)
-    cmd = ["curl", "-sk", "--max-time", "10", f"{base}/services/server/info?output_mode=json"]
-    out = runner.run(cmd, f"splunk_{port}_info")
-    findings.cmd(" ".join(cmd))
+    # 8089 is HTTPS by default — try HTTPS first, fall back to HTTP
+    out = ""
+    used_scheme = "http"
+    schemes = ["https", "http"] if port == 8089 else ["http"]
+    for scheme in schemes:
+        base = f"{scheme}://{ip}:{port}"
+        cmd = ["curl", "-sk", "--max-time", "10", f"{base}/services/server/info?output_mode=json"]
+        out = runner.run(cmd, f"splunk_{port}_info_{scheme}")
+        if '"version"' in out or '"build"' in out or '"serverName"' in out:
+            used_scheme = scheme
+            findings.cmd(" ".join(cmd))
+            break
+        if scheme == schemes[-1]:
+            findings.cmd(" ".join(cmd))
 
-    if '"version"' in out or '"build"' in out:
+    base = f"{used_scheme}://{ip}:{port}"
+
+    if '"version"' in out or '"build"' in out or '"serverName"' in out:
         findings.bullet("**Splunk REST API accessible (no auth)**")
         m = re.search(r'"version"\s*:\s*"([^"]+)"', out)
         if m:

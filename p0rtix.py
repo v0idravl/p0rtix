@@ -67,7 +67,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model", default="claude-sonnet-4-6", metavar="MODEL",
                    help="Claude model for --analyze (default: claude-sonnet-4-6)")
     p.add_argument("--verbose", "-v", action="store_true",
-                   help="show inline notes and searchsploit results in findings.md")
+                   help="show inline enumeration notes in findings.md")
     p.add_argument("--deep", action="store_true",
                    help="extended web scanning: cewl wordlist, arjun param discovery, full API bust (slower)")
     p.add_argument("--mode", default="scan",

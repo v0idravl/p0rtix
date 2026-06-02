@@ -145,8 +145,8 @@ def enumerate_web(
     print(f"    → fingerprint")
     fp = _fingerprint(base_url, runner, findings, available)
 
-    # ── 2. NTLM info disclosure ────────────────────────────────────────────────
-    _check_ntlm_info(ip, port, runner, findings)
+    # ── 2. NTLM info disclosure — only probe IIS/Windows endpoints (saves ~10s/port on Linux) ──
+    _check_ntlm_info(ip, port, runner, findings, server_hint=fp.get("server", ""))
 
     # Microsoft-HTTPAPI: WinRM/RPC-over-HTTP — no web content to enumerate
     if "microsoft-httpapi" in fp["server"].lower():
@@ -345,11 +345,16 @@ def _parse_interesting_headers(raw: str, findings: Findings):
 
 # ── NTLM info disclosure ──────────────────────────────────────────────────────
 
-def _check_ntlm_info(ip: str, port: int, runner: Runner, findings: Findings):
+def _check_ntlm_info(ip: str, port: int, runner: Runner, findings: Findings,
+                     server_hint: str = ""):
     """
-    nmap http-ntlm-info script — Windows/IIS leaks NetBIOS computer name, DNS domain,
-    and product version in the NTLM authentication challenge even without valid creds.
+    nmap http-ntlm-info — leaks NetBIOS name, DNS domain, product version.
+    Only probes IIS/Windows endpoints — skip on nginx/Apache/etc to save ~10s per port.
     """
+    _windows_markers = ("iis", "microsoft", "asp", "httpapi", "windows", "iisexpress")
+    if server_hint and not any(m in server_hint.lower() for m in _windows_markers):
+        return
+
     cmd = ["nmap", "--script", "http-ntlm-info", "-p", str(port), ip]
     out = runner.run(cmd, f"web_{ip}_{port}_ntlm_info", timeout=30)
     ntlm_fields = ("NetBIOS_Computer_Name", "NetBIOS_Domain_Name",

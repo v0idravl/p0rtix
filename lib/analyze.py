@@ -119,6 +119,7 @@ def _scan_prompt(ip: str, domain_str: str, today: str, findings: str, loot: str)
 Rules:
 - Do not allude to or reference whether this target resembles any specific known environment, named machine, or published writeup. Draw conclusions only from the scan data below.
 - Every recommendation in the Attack Chain must be immediately actionable using only the information present in the findings. Do not suggest steps that require credentials, usernames, hashes, or other artifacts that are not explicitly present. If a technique requires something not yet discovered, omit it entirely — do not frame it as conditional ("if you find X, then...").
+- When exploit references appear in the "Exploit References" section, cite specific EDB IDs (e.g. EDB-XXXXX), GitHub PoC URLs if well-known, or Metasploit module paths rather than generic exploit category names.
 
 Analyse the findings below and respond with exactly these four sections:
 
@@ -129,7 +130,7 @@ Analyse the findings below and respond with exactly these four sections:
 Bullet-point every significant item visible in the scan data: exposed credentials, dangerous service versions, known CVEs applicable to identified versions, misconfigurations, unusual open ports, anything that immediately suggests a foothold or lateral-movement path.
 
 ## Recommended Attack Chain
-Ordered list of next steps that can be executed right now with the access and information above. Each step must cite the specific evidence that makes it viable (e.g. "SMB null session confirmed → enumerate shares with..."). Omit any step whose prerequisites are not in the findings.
+Ordered list of next steps that can be executed right now with the access and information above. Each step must cite the specific evidence that makes it viable (e.g. "SMB null session confirmed → enumerate shares with...") and where applicable reference the specific exploit (EDB ID, MSF module, or GitHub PoC). Omit any step whose prerequisites are not in the findings.
 
 ## Tool Improvement Suggestions
 Review the raw output quality in this report — commands that failed, timed out, returned empty results, or had parser issues. Suggest specific, actionable improvements to the p0rtix automated tool: better arguments, smarter fallbacks, missing coverage, or additional tools that would help. Be concise and specific. Omit this section entirely if output quality is good with no obvious gaps.
@@ -157,6 +158,7 @@ Rules:
 - Do not allude to or reference whether this target resembles any specific known environment, named machine, or published writeup. Draw conclusions only from the data below.
 - Every recommendation must be immediately actionable using only the artifacts present in the findings (valid credentials, hashes, user lists, share names, ADCS templates, etc.). Do not suggest steps that require artifacts not present. If a technique requires something not yet found, omit it entirely.
 - Be specific: cite exact usernames, share names, hash types, ESC numbers, and complete tool commands grounded in the evidence.
+- Where exploit references appear, cite specific EDB IDs, GitHub PoC URLs, or Metasploit module paths rather than generic categories.
 
 Analyse the findings below and respond with exactly these four sections:
 
