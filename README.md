@@ -53,7 +53,7 @@ Optional tools (used when present, skipped gracefully otherwise):
 ## Usage
 
 ```bash
-sudo python3 p0rtix.py <ip> [OPTIONS]
+sudo python3 p0rtix.py <ip | --targets FILE> [OPTIONS]
 ```
 
 ### Examples
@@ -68,6 +68,15 @@ sudo python3 p0rtix.py 10.10.11.34 --domain test.htb
 # Scan only — full options
 sudo python3 p0rtix.py 10.10.11.34 --domain test.htb --name lame --workspace ~/htb --workers 8
 
+# Multi-target — file with one entry per line: IP [domain [name]]
+sudo python3 p0rtix.py --targets hosts.txt --workspace ~/htb
+
+# Resume — continue a previous scan from where it left off
+sudo python3 p0rtix.py 10.10.11.34 --domain test.htb --continue --workspace ~/htb
+
+# Deep web scan — adds cewl wordlist, arjun param discovery, full API bust
+sudo python3 p0rtix.py 10.10.11.34 --domain test.htb --deep --workspace ~/htb
+
 # Creds mode — authenticated AD enumeration against a prior scan workspace
 sudo python3 p0rtix.py 10.10.11.34 --domain test.htb --mode creds -u judith.mader -p judith09 --name certified --workspace ~/htb
 
@@ -79,7 +88,8 @@ sudo -E python3 p0rtix.py 10.10.11.34 --domain test.htb --mode scan,creds -u jud
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `ip` | — | Target IP address |
+| `ip` | — | Target IP address (mutually exclusive with `--targets`) |
+| `--targets / -T` | — | File of targets, one per line: `IP [domain [name]]` |
 | `--domain` | — | Primary domain (enables AD tools and vhost busting) |
 | `--name` | domain or IP | Output directory name |
 | `--workspace` | `.` | Root directory for all output |
@@ -89,7 +99,11 @@ sudo -E python3 p0rtix.py 10.10.11.34 --domain test.htb --mode scan,creds -u jud
 | `-p / --password` | — | Password for creds mode |
 | `--creds` | — | File of `user:pass` pairs for creds mode |
 | `--analyze` | off | Send `findings.md` to Claude API for AI triage (requires `ANTHROPIC_API_KEY`; use `sudo -E`) |
+| `--model` | `claude-sonnet-4-6` | Claude model for `--analyze` |
 | `--verbose` | off | Include notes and searchsploit output in `findings.md` |
+| `--deep` | off | Extended web scanning: cewl wordlist, arjun param discovery, full API bust (slower) |
+| `--continue` | off | Resume a previous scan — skips completed phases |
+| `--rescan` | off | Force fresh nmap scans even when prior scan data exists |
 
 ---
 
