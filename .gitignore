@@ -4,3 +4,4 @@ output/
 *.swp
 CLAUDE.md
 __pycache__/
+samples/

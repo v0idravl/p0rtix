@@ -70,7 +70,8 @@ TOOLS: dict[str, dict] = {
     "enum4linux-ng":         {"apt": "enum4linux-ng",                   "required": False},
     "ipmitool":              {"apt": "ipmitool",                        "required": False},
 
-    # CMS scanners
+    # CMS / web tools
+    "arjun":                 {"pip": "arjun",                           "required": False},
     "joomscan":              {"apt": "joomscan",                        "required": False},
     "droopescan":            {"pip": "droopescan",                      "required": False},
     "cewl":                  {"apt": "cewl",                            "required": False},
