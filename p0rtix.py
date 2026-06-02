@@ -78,7 +78,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--deep", action="store_true",
                    help="extended web scanning: cewl wordlist, arjun param discovery, full API bust (slower)")
     p.add_argument("--continue", dest="continue_scan", action="store_true",
-                   help="resume a previous scan — skips port discovery and service scan if already done")
+                   help="resume a previous scan — skips completed phases (auto-detected if prior scan exists)")
+    p.add_argument("--rescan", action="store_true",
+                   help="force fresh nmap scans even when prior scan data exists")
     p.add_argument("--mode", default="scan",
                    help="scan = full recon (default); creds = credentialed AD enum; scan,creds = both in one run")
     p.add_argument("-u", "--username", metavar="USER",
@@ -148,10 +150,17 @@ def _run_single_scan(
         print(f"\n[*] Domain '{domain}' does not resolve.")
         hosts.prompt_add(ip, domain)
 
+    # Auto-use prior scan data if available — no flag needed.
+    # --rescan forces fresh nmap even when state exists.
+    _use_prior = (not getattr(args, "rescan", False)) and state.has_prior_scan
+
     print(f"\n[*] Workspace : {ws.machine_dir}")
     print(f"[*] Findings  : {ws.findings_path}")
     print(f"[*] Target    : {ip}" + (f"   Domain: {domain}" if domain else ""))
-    if args.continue_scan and state.exists:
+    if _use_prior:
+        print(f"[*] Prior scan : {state.summary()}")
+        print(f"[*]            → nmap phases skipped (use --rescan to force fresh scan)")
+    elif args.continue_scan and state.exists:
         print(f"[*] Resuming  : {state.summary()}")
     print(f"[*] Workers   : {args.workers}")
     print()
@@ -177,11 +186,11 @@ def _run_single_scan(
         return {"ip": ip, "domain": domain, "machine_dir": str(ws.machine_dir), "success": True}
 
     # ── Phase 1: Port discovery ───────────────────────────────────────────────
-    if args.continue_scan and state.is_done("port_discovery"):
+    if _use_prior or (args.continue_scan and state.is_done("port_discovery")):
         ports = state.get("ports", {"tcp": [], "udp": []})
-        print(f"[*] Skipping port discovery (done) — TCP: {ports['tcp']}, UDP: {ports['udp']}")
+        print(f"[*] Port discovery: using prior results — TCP {ports['tcp']}  UDP {ports['udp']}")
         findings.h2("Port Discovery")
-        findings.note(f"Resumed — ports from prior run: TCP {ports['tcp']} UDP {ports['udp']}")
+        findings.note(f"Using prior scan — TCP {ports['tcp']} UDP {ports['udp']}")
     else:
         ports = run_port_discovery(ip, runner, ws, findings)
         if not ports["tcp"] and not ports["udp"]:
@@ -193,9 +202,9 @@ def _run_single_scan(
         state.mark_done("port_discovery", ports=ports)
 
     # ── Phase 2: Service version scan ─────────────────────────────────────────
-    if args.continue_scan and state.is_done("service_scan"):
+    if _use_prior or (args.continue_scan and state.is_done("service_scan")):
         services = _reload_services_from_disk(ws)
-        print(f"[*] Skipping service scan (done) — loaded {len(services)} service(s) from XML")
+        print(f"[*] Service scan: using prior results — {len(services)} service(s) from XML")
         from lib.nmap import write_port_table
         write_port_table(services, findings)
     else:
@@ -209,7 +218,9 @@ def _run_single_scan(
     services = _dedup_services(services)
 
     # ── Phase 3: Parallel service + web enumeration ───────────────────────────
-    if args.continue_scan and state.is_done("enumeration"):
+    # Only skip enumeration on explicit --continue — always re-run when called fresh
+    # (e.g. a credentialed follow-up run should still re-enumerate web/services)
+    if args.continue_scan and not _use_prior and state.is_done("enumeration"):
         print("[*] Skipping enumeration phase (done)")
         all_discoveries: list[Discovery] = []
     else:
@@ -267,22 +278,24 @@ def _run_single_scan(
             if fqdn and not hosts.is_known(fqdn):
                 hosts.prompt_add(ip, fqdn)
 
-    if effective_domain and not (args.continue_scan and state.is_done("post_domain")):
+    _skip_post = args.continue_scan and not _use_prior and state.is_done("post_domain")
+    if effective_domain and not _skip_post:
         _run_post_domain_checks(ip, effective_domain, runner, findings, ws, available)
         state.mark_done("post_domain")
-    elif args.continue_scan and state.is_done("post_domain"):
+    elif _skip_post:
         print("[*] Skipping post-domain checks (done)")
 
     # ── Phase 3.6: Credential re-use ──────────────────────────────────────────
     creds_file = ws.loot_dir / "creds_found.txt"
     users_file = ws.loot_dir / "users.txt"
+    _skip_reuse = args.continue_scan and not _use_prior and state.is_done("cred_reuse")
     if (creds_file.exists() and users_file.exists() and creds_file.stat().st_size > 0
-            and not (args.continue_scan and state.is_done("cred_reuse"))):
+            and not _skip_reuse):
         _run_cred_reuse(ip, runner, findings, ws, services, available)
         state.mark_done("cred_reuse")
 
     # ── Phase 4: Follow-up on discovered vhosts / SSL SANs ────────────────────
-    if not (args.continue_scan and state.is_done("followup")):
+    if not (args.continue_scan and not _use_prior and state.is_done("followup")):
         new_hosts: list[tuple[Discovery, Service]] = []
         for d in all_discoveries:
             if hosts.is_known(d.hostname):

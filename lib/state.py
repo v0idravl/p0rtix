@@ -50,6 +50,11 @@ class ScanState:
     def get(self, key: str, default=None):
         return self._data.get(key, default)
 
+    @property
+    def has_prior_scan(self) -> bool:
+        """True if a previous unauthenticated scan completed port + service discovery."""
+        return self.is_done("port_discovery") and self.is_done("service_scan")
+
     def completed_phases(self) -> list[str]:
         return [p for p, v in self._data.get("phases", {}).items() if v]
 

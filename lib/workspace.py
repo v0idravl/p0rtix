@@ -71,6 +71,12 @@ class Workspace:
         creds_path = self.loot_dir / "creds_found.txt"
         if creds_path.exists():
             self._known_creds = {c.strip() for c in creds_path.read_text().splitlines() if c.strip()}
+        # Restore discovered domain from prior scan so creds/follow-up runs inherit it
+        domain_path = self.loot_dir / "domain.txt"
+        if domain_path.exists():
+            saved = domain_path.read_text().strip()
+            if saved:
+                self.discovered_domain = saved
 
     def next_raw_label(self, label: str) -> str:
         """Return a zero-padded numbered prefix for a raw output file."""
