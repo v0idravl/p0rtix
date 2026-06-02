@@ -352,7 +352,7 @@ def _check_ntlm_info(ip: str, port: int, runner: Runner, findings: Findings,
     Only probes IIS/Windows endpoints — skip on nginx/Apache/etc to save ~10s per port.
     """
     _windows_markers = ("iis", "microsoft", "asp", "httpapi", "windows", "iisexpress")
-    if server_hint and not any(m in server_hint.lower() for m in _windows_markers):
+    if not any(m in server_hint.lower() for m in _windows_markers):
         return
 
     cmd = ["nmap", "--script", "http-ntlm-info", "-p", str(port), ip]
@@ -920,7 +920,18 @@ def _dir_bust(base_url: str, runner: Runner, findings: Findings, fp: dict):
     ]
     findings.cmd(" ".join(cmd))
     out = runner.run(cmd, f"web_{_label(base_url)}_ffuf_dirs", timeout=int(_FFUF_TIMEOUT))
-    _print_ffuf(out, findings)
+    hits = _print_ffuf(out, findings)
+    # Fetch response body for 500 paths with non-trivial content — often reveals framework/CVE
+    for path, status, size in hits:
+        if status == "500" and int(size) > 150:
+            br = subprocess.run(
+                ["curl", "-sk", "--max-time", "10", f"{base_url}/{path}"],
+                capture_output=True, text=True,
+            )
+            body = br.stdout.strip()
+            if body:
+                findings.note(f"`/{path}` response body (500):")
+                findings.code_block(body[:800])
 
 
 # ── cewl custom wordlist generation ──────────────────────────────────────────
@@ -1143,14 +1154,16 @@ def _param_fuzz(base_url: str, runner: Runner, findings: Findings):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _print_ffuf(output: str, findings: Findings):
+def _print_ffuf(output: str, findings: Findings) -> list[tuple[str, str, str]]:
     if "[TIMEOUT after" in output:
         findings.note("ffuf timed out before completion — partial results only")
-    results = _FFUF_RE.findall(output)
+    cleaned = _ANSI_RE.sub("", output)
+    results = _FFUF_RE.findall(cleaned)
     for path, status, size in results:
         findings.bullet(f"`/{path}` — {status} ({size}b)")
     if not results:
         findings.note("No results")
+    return results
 
 
 def _build_url(scheme: str, hostname: str, port: int) -> str:
