@@ -26,10 +26,11 @@ from lib.logger import get_logger, setup_logging
 from lib.findings import Findings, ServiceBuffer, set_verbose
 from lib.hosts import HostsManager
 from lib.models import Discovery, Service
-from lib.nmap import run_port_discovery, run_service_scan
+from lib.nmap import run_port_discovery, run_service_scan, parse_service_xml
 from lib.runner import Runner
 from lib.scope import Scope
 from lib.services import enumerate_service
+from lib.state import ScanState
 from lib.web import enumerate_web
 from lib.workspace import Workspace
 
@@ -53,7 +54,13 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    p.add_argument("ip", help="Target IP address")
+
+    # Target — mutually exclusive: single IP or targets file
+    target_group = p.add_mutually_exclusive_group(required=True)
+    target_group.add_argument("ip", nargs="?", help="Target IP address")
+    target_group.add_argument("--targets", "-T", metavar="FILE",
+                              help="File of targets, one per line: IP [domain [name]]")
+
     p.add_argument("--domain", "-d", metavar="DOMAIN",
                    help="Primary domain for vhost busting (e.g. test.htb)")
     p.add_argument("--name", "-n", metavar="NAME",
@@ -70,6 +77,8 @@ def parse_args() -> argparse.Namespace:
                    help="show inline enumeration notes in findings.md")
     p.add_argument("--deep", action="store_true",
                    help="extended web scanning: cewl wordlist, arjun param discovery, full API bust (slower)")
+    p.add_argument("--continue", dest="continue_scan", action="store_true",
+                   help="resume a previous scan — skips port discovery and service scan if already done")
     p.add_argument("--mode", default="scan",
                    help="scan = full recon (default); creds = credentialed AD enum; scan,creds = both in one run")
     p.add_argument("-u", "--username", metavar="USER",
@@ -79,6 +88,304 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--creds", metavar="FILE",
                    help="File of username:password pairs (one per line) for --mode creds")
     return p.parse_args()
+
+
+def _parse_targets_file(path: str) -> list[tuple[str, str | None, str | None]]:
+    """
+    Parse a targets file into (ip, domain, name) tuples.
+    Format per line: IP [domain [name]]
+    Lines starting with # and blank lines are ignored.
+    """
+    targets: list[tuple[str, str | None, str | None]] = []
+    for line in open(path).read().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        ip = parts[0]
+        domain = parts[1] if len(parts) > 1 else None
+        name = parts[2] if len(parts) > 2 else None
+        targets.append((ip, domain, name))
+    return targets
+
+
+def _reload_services_from_disk(ws: "Workspace") -> list[Service]:
+    """Re-parse service objects from saved nmap XML files (used by --continue)."""
+    services: list[Service] = []
+    tcp_xml = next(ws.raw_dir.glob("*_tcp_services.xml"), None)
+    udp_xml = next(ws.raw_dir.glob("*_udp_confirmed.xml"), None)
+    if tcp_xml:
+        services.extend(parse_service_xml(tcp_xml, "tcp"))
+    if udp_xml:
+        services.extend(parse_service_xml(udp_xml, "udp"))
+    return services
+
+
+def _run_single_scan(
+    ip: str,
+    domain: str | None,
+    name: str | None,
+    args: argparse.Namespace,
+    available: set[str],
+) -> dict:
+    """
+    Full scan pipeline for one target. Returns a summary dict for multi-target reporting.
+    Honours --continue to skip port discovery and service scan if state file says they're done.
+    """
+    ws = Workspace(ip, domain, name, args.workspace,
+                   mode="scan" if args.mode == "scan,creds" else args.mode)
+    state = ScanState(ws.machine_dir)
+    setup_logging(ws.log_dir)
+    _log = get_logger()
+    _log.info("Target: %s  domain: %s  mode: %s", ip, domain or "none", args.mode)
+    findings = Findings(ws.findings_path, ip, domain)
+    set_verbose(args.verbose)
+    runner = Runner(ws)
+    hosts = HostsManager()
+    scope = Scope(ip, domain)
+
+    if domain and not hosts.resolves(domain):
+        print(f"\n[*] Domain '{domain}' does not resolve.")
+        hosts.prompt_add(ip, domain)
+
+    print(f"\n[*] Workspace : {ws.machine_dir}")
+    print(f"[*] Findings  : {ws.findings_path}")
+    print(f"[*] Target    : {ip}" + (f"   Domain: {domain}" if domain else ""))
+    if args.continue_scan and state.exists:
+        print(f"[*] Resuming  : {state.summary()}")
+    print(f"[*] Workers   : {args.workers}")
+    print()
+
+    # ── Creds-only dispatch ───────────────────────────────────────────────────
+    if args.mode == "creds":
+        from lib.credsmode import load_creds, run_creds_mode
+        creds = load_creds(args.username, args.password, args.creds)
+        if not creds:
+            print("[!] No valid credentials parsed — skipping creds mode for this target")
+            return {"ip": ip, "domain": domain, "machine_dir": str(ws.machine_dir), "success": False}
+
+        services: list[Service] = _reload_services_from_disk(ws)
+        if not services:
+            print("[!] No prior nmap XML found — per-service enumeration will be limited")
+
+        run_creds_mode(ip, domain, creds, services, runner, findings, ws, available)
+        findings.finalize()
+        if args.analyze:
+            analyze_findings(ws, ip, domain, model=args.model, mode="creds")
+        _chown(ws)
+        _print_loot_summary(ws)
+        return {"ip": ip, "domain": domain, "machine_dir": str(ws.machine_dir), "success": True}
+
+    # ── Phase 1: Port discovery ───────────────────────────────────────────────
+    if args.continue_scan and state.is_done("port_discovery"):
+        ports = state.get("ports", {"tcp": [], "udp": []})
+        print(f"[*] Skipping port discovery (done) — TCP: {ports['tcp']}, UDP: {ports['udp']}")
+        findings.h2("Port Discovery")
+        findings.note(f"Resumed — ports from prior run: TCP {ports['tcp']} UDP {ports['udp']}")
+    else:
+        ports = run_port_discovery(ip, runner, ws, findings)
+        if not ports["tcp"] and not ports["udp"]:
+            findings.note("No open ports found.")
+            print("[!] No open ports found. Exiting.")
+            findings.finalize()
+            _chown(ws)
+            return {"ip": ip, "domain": domain, "machine_dir": str(ws.machine_dir), "success": False}
+        state.mark_done("port_discovery", ports=ports)
+
+    # ── Phase 2: Service version scan ─────────────────────────────────────────
+    if args.continue_scan and state.is_done("service_scan"):
+        services = _reload_services_from_disk(ws)
+        print(f"[*] Skipping service scan (done) — loaded {len(services)} service(s) from XML")
+        from lib.nmap import write_port_table
+        write_port_table(services, findings)
+    else:
+        services = run_service_scan(ip, ports, runner, ws, findings)
+        state.mark_done("service_scan")
+
+    AD_PORTS = {53, 88, 139, 389, 445, 636, 3268, 3269}
+    for svc in services:
+        if svc.port in AD_PORTS and domain and not svc.hostname:
+            svc.hostname = domain
+    services = _dedup_services(services)
+
+    # ── Phase 3: Parallel service + web enumeration ───────────────────────────
+    if args.continue_scan and state.is_done("enumeration"):
+        print("[*] Skipping enumeration phase (done)")
+        all_discoveries: list[Discovery] = []
+    else:
+        print(f"\n[*] Starting parallel enumeration ({len(services)} service(s))...")
+
+        web_services   = [s for s in services if s.is_web]
+        other_services = [s for s in services if not s.is_web]
+
+        all_discoveries = []
+        svc_futures: dict = {}
+
+        with ThreadPoolExecutor(max_workers=args.workers) as pool:
+            for svc in web_services:
+                buf = ServiceBuffer(svc.port, svc.proto)
+                f = pool.submit(
+                    enumerate_web,
+                    ip, svc, domain, runner, buf, scope, hosts, available,
+                    deep=args.deep,
+                )
+                svc_futures[f] = (buf, f"web:{svc.port}")
+
+            for svc in other_services:
+                buf = ServiceBuffer(svc.port, svc.proto)
+                f = pool.submit(enumerate_service, ip, svc, runner, buf, available)
+                svc_futures[f] = (buf, f"service:{svc.port}")
+
+            for future in as_completed(svc_futures):
+                buf, label = svc_futures[future]
+                try:
+                    result = future.result()
+                    if result:
+                        all_discoveries.extend(result)
+                    print(f"[+] Done: {label}")
+                except Exception as exc:
+                    print(f"[!] Error in {label}: {exc}")
+                    buf.note(f"Enumeration error: {exc}")
+
+        findings.h2("Service Findings")
+        for buf, _ in sorted(svc_futures.values(), key=lambda x: (x[0].port, x[0].proto)):
+            findings.flush_service_buffer(buf)
+
+        state.mark_done("enumeration")
+
+    # ── Phase 3.5: Post-domain checks ─────────────────────────────────────────
+    effective_domain = domain or ws.discovered_domain
+    if ws.discovered_domain and not domain:
+        print(f"\n[*] Domain discovered: {ws.discovered_domain}")
+        if not hosts.resolves(ws.discovered_domain):
+            hosts.prompt_add(ip, ws.discovered_domain)
+
+    hostnames_file = ws.loot_dir / "hostnames.txt"
+    if hostnames_file.exists():
+        for fqdn in hostnames_file.read_text().splitlines():
+            fqdn = fqdn.strip()
+            if fqdn and not hosts.is_known(fqdn):
+                hosts.prompt_add(ip, fqdn)
+
+    if effective_domain and not (args.continue_scan and state.is_done("post_domain")):
+        _run_post_domain_checks(ip, effective_domain, runner, findings, ws, available)
+        state.mark_done("post_domain")
+    elif args.continue_scan and state.is_done("post_domain"):
+        print("[*] Skipping post-domain checks (done)")
+
+    # ── Phase 3.6: Credential re-use ──────────────────────────────────────────
+    creds_file = ws.loot_dir / "creds_found.txt"
+    users_file = ws.loot_dir / "users.txt"
+    if (creds_file.exists() and users_file.exists() and creds_file.stat().st_size > 0
+            and not (args.continue_scan and state.is_done("cred_reuse"))):
+        _run_cred_reuse(ip, runner, findings, ws, services, available)
+        state.mark_done("cred_reuse")
+
+    # ── Phase 4: Follow-up on discovered vhosts / SSL SANs ────────────────────
+    if not (args.continue_scan and state.is_done("followup")):
+        new_hosts: list[tuple[Discovery, Service]] = []
+        for d in all_discoveries:
+            if hosts.is_known(d.hostname):
+                continue
+            if not scope.check(d.hostname):
+                print(f"[~] Out of scope — skipping: {d.hostname} (from {d.source})")
+                continue
+            print(f"\n[*] [{d.type.upper()}] Discovered: {d.hostname}  (via {d.source})")
+            if hosts.prompt_add(ip, d.hostname):
+                svc = Service(
+                    port=d.port, proto="tcp", name=d.scheme,
+                    version="", is_web=True, scheme=d.scheme,
+                    hostname=d.hostname,
+                )
+                new_hosts.append((d, svc))
+
+        if new_hosts:
+            print(f"\n[*] Follow-up enumeration on {len(new_hosts)} discovered host(s)...")
+            followup_futures: dict = {}
+            with ThreadPoolExecutor(max_workers=args.workers) as pool:
+                for d, svc in new_hosts:
+                    buf = ServiceBuffer(svc.port, svc.proto)
+                    f = pool.submit(
+                        enumerate_web,
+                        ip, svc, domain, runner, buf, scope, hosts, available,
+                        is_followup=True, deep=args.deep,
+                    )
+                    followup_futures[f] = (buf, d.hostname)
+
+                for future in as_completed(followup_futures):
+                    buf, label = followup_futures[future]
+                    try:
+                        future.result()
+                        print(f"[+] Done: {label}")
+                    except Exception as exc:
+                        print(f"[!] Error in followup {label}: {exc}")
+                        buf.note(f"Enumeration error: {exc}")
+
+            findings.h2("Discovered Hosts")
+            for buf, _ in sorted(followup_futures.values(),
+                                 key=lambda x: (x[0].port, x[0].proto)):
+                findings.flush_service_buffer(buf)
+
+        state.mark_done("followup")
+
+    # ── Loot summary in findings ───────────────────────────────────────────────
+    users_file = ws.loot_dir / "users.txt"
+    creds_file = ws.loot_dir / "creds_found.txt"
+    user_count = (sum(1 for _ in users_file.open())
+                  if users_file.exists() and users_file.stat().st_size > 0 else 0)
+    cred_count = (sum(1 for _ in creds_file.open())
+                  if creds_file.exists() and creds_file.stat().st_size > 0 else 0)
+    if user_count or cred_count:
+        findings.h2("Loot")
+        if user_count:
+            findings.bullet(f"**{user_count} unique user(s)** — `{users_file}`")
+        if cred_count:
+            findings.bullet(f"**{cred_count} credential(s)** — `{creds_file}`")
+
+    # ── searchsploit ───────────────────────────────────────────────────────────
+    if "searchsploit" in available:
+        nmap_xml = ws.raw_dir / "04_tcp_services.xml"
+        if nmap_xml.exists():
+            findings.h2("Exploit References (searchsploit)")
+            cmd = ["searchsploit", "--nmap", str(nmap_xml)]
+            out = runner.run(cmd, "searchsploit_nmap")
+            findings.cmd(" ".join(cmd))
+            _write_searchsploit(out, findings)
+            findings.note(
+                "To view a specific exploit: `searchsploit -x <EDB-ID>` | "
+                "To copy to CWD: `searchsploit -m <EDB-ID>`"
+            )
+
+    # ── Combined mode: credentialed phase after scan ───────────────────────────
+    if args.mode == "scan,creds":
+        from lib.credsmode import load_creds, run_creds_mode
+        creds_list = load_creds(args.username, args.password, args.creds)
+        if creds_list:
+            print(f"\n[*] Combined mode: starting credentialed phase as {creds_list[0][0]}...")
+            run_creds_mode(ip, domain, creds_list, services, runner, findings, ws, available)
+        else:
+            print("[!] Combined mode: no valid credentials — skipping creds phase")
+
+    # ── Wrap up ────────────────────────────────────────────────────────────────
+    state.mark_done("complete")
+    findings.finalize()
+    if args.analyze:
+        analyze_findings(ws, ip, domain, model=args.model)
+
+    _chown(ws)
+    _print_loot_summary(ws)
+    print(f"[+] Findings  : {ws.findings_path}")
+    print(f"[+] Raw data  : {ws.raw_dir}/")
+    print(f"[+] Loot      : {ws.loot_dir}/")
+    print("─" * 60)
+
+    return {
+        "ip": ip, "domain": domain or "",
+        "machine_dir": str(ws.machine_dir),
+        "success": True,
+        "users": user_count,
+        "creds": cred_count,
+    }
 
 
 def main():
@@ -96,264 +403,74 @@ def main():
     _needs_creds = args.mode in ("creds", "scan,creds")
     if _needs_creds and not args.username and not args.creds:
         sys.exit("[!] --mode creds/scan,creds requires -u/-p or --creds <file>")
-    if _needs_creds and not args.domain:
+    if _needs_creds and not args.domain and not args.targets:
         print("[!] Warning: --domain not set; AD tools will have limited scope")
 
-    # ── Setup ─────────────────────────────────────────────────────────────────
     available = check_deps()
 
-    ws = Workspace(args.ip, args.domain, args.name, args.workspace,
-                   mode="scan" if args.mode == "scan,creds" else args.mode)
-    setup_logging(ws.log_dir)
-    _log = get_logger()
-    _log.info("Target: %s  domain: %s  mode: %s", args.ip, args.domain or "none", args.mode)
-    findings = Findings(ws.findings_path, args.ip, args.domain)
-    set_verbose(args.verbose)
-    runner = Runner(ws)
-    hosts = HostsManager()
-    scope = Scope(args.ip, args.domain)
+    # ── Multi-target mode ─────────────────────────────────────────────────────
+    if args.targets:
+        targets = _parse_targets_file(args.targets)
+        if not targets:
+            sys.exit(f"[!] No valid targets found in {args.targets}")
 
-    # If a domain was provided and it doesn't resolve yet, offer to add it now
-    if args.domain and not hosts.resolves(args.domain):
-        print(f"\n[*] Domain '{args.domain}' does not resolve.")
-        hosts.prompt_add(args.ip, args.domain)
+        print(f"[*] Multi-target: {len(targets)} target(s) loaded from {args.targets}")
+        results: list[dict] = []
 
-    print(f"\n[*] Workspace : {ws.machine_dir}")
-    print(f"[*] Findings  : {ws.findings_path}")
-    print(f"[*] Target    : {args.ip}" + (f"   Domain: {args.domain}" if args.domain else ""))
-    print(f"[*] Workers   : {args.workers}")
-    print()
+        for i, (ip, file_domain, file_name) in enumerate(targets, 1):
+            domain = file_domain or args.domain
+            name   = file_name   or args.name
+            sep = "═" * 60
+            print(f"\n{sep}")
+            print(f"  TARGET {i}/{len(targets)}: {ip}" + (f"  ({domain})" if domain else ""))
+            print(sep)
+            try:
+                result = _run_single_scan(ip, domain, name, args, available)
+            except KeyboardInterrupt:
+                print(f"\n[!] Interrupted on {ip} — moving to next target")
+                result = {"ip": ip, "domain": domain or "", "success": False,
+                          "machine_dir": "", "users": 0, "creds": 0}
+            except Exception as exc:
+                print(f"[!] Scan failed for {ip}: {exc}")
+                result = {"ip": ip, "domain": domain or "", "success": False,
+                          "machine_dir": "", "users": 0, "creds": 0}
+            results.append(result)
 
-    # ── Creds-only mode dispatch (scan,creds runs creds phase after scan below) ─
-    if args.mode == "creds":
-        from lib.credsmode import load_creds, run_creds_mode
-        from lib.nmap import parse_service_xml
-
-        creds = load_creds(args.username, args.password, args.creds)
-        if not creds:
-            sys.exit("[!] No valid credentials parsed from provided input.")
-
-        services: list = []
-        tcp_xml = next(ws.raw_dir.glob("*_tcp_services.xml"), None)
-        udp_xml = next(ws.raw_dir.glob("*_udp_confirmed.xml"), None)
-        if tcp_xml:
-            services.extend(parse_service_xml(tcp_xml, "tcp"))
-            print(f"[*] Loaded {len(services)} TCP services from {tcp_xml.name}")
-        if udp_xml:
-            udp_svcs = parse_service_xml(udp_xml, "udp")
-            services.extend(udp_svcs)
-            if udp_svcs:
-                print(f"[*] Loaded {len(udp_svcs)} UDP services from {udp_xml.name}")
-        if not services:
-            print("[!] No prior nmap XML found — per-service enumeration will be skipped")
-
-        run_creds_mode(args.ip, args.domain, creds, services, runner, findings, ws, available)
-
-        findings.finalize()
-        if args.analyze:
-            analyze_findings(ws, args.ip, args.domain, model=args.model, mode="creds")
-        sudo_user = os.environ.get("SUDO_USER")
-        if sudo_user:
-            subprocess.run(["chown", "-R", f"{sudo_user}:", str(ws.machine_dir)],
-                           capture_output=True)
-        sys.exit(0)
-
-    # ── Phase 1: Port discovery ───────────────────────────────────────────────
-    ports = run_port_discovery(args.ip, runner, ws, findings)
-
-    if not ports["tcp"] and not ports["udp"]:
-        findings.note("No open ports found.")
-        print("[!] No open ports found. Exiting.")
+        _print_multi_summary(results)
         return
 
-    # ── Phase 2: Service version scan + classification ────────────────────────
-    services = run_service_scan(args.ip, ports, runner, ws, findings)
+    # ── Single-target mode ────────────────────────────────────────────────────
+    if not args.ip:
+        sys.exit("[!] Provide a target IP or use --targets FILE")
 
-    # Attach domain context to all services that need it for AD/Kerberos/DNS enumeration.
-    # Handlers read service.hostname to avoid requiring a separate domain argument.
-    AD_PORTS = {53, 88, 139, 389, 445, 636, 3268, 3269}
-    for svc in services:
-        if svc.port in AD_PORTS and args.domain and not svc.hostname:
-            svc.hostname = args.domain
+    _run_single_scan(args.ip, args.domain, args.name, args, available)
 
-    # Deduplicate sibling ports that map to the same handler to avoid running
-    # identical enumeration twice (e.g. SMB on 139+445, LDAP on 389+3268).
-    services = _dedup_services(services)
 
-    # ── Phase 3: Parallel service + web enumeration ───────────────────────────
-    print(f"\n[*] Starting parallel enumeration ({len(services)} service(s))...")
-
-    web_services   = [s for s in services if s.is_web]
-    other_services = [s for s in services if not s.is_web]
-
-    all_discoveries: list[Discovery] = []
-    svc_futures: dict = {}  # future → (ServiceBuffer, label)
-
-    with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        for svc in web_services:
-            buf = ServiceBuffer(svc.port, svc.proto)
-            f = pool.submit(
-                enumerate_web,
-                args.ip, svc, args.domain, runner, buf, scope, hosts, available,
-                deep=args.deep,
-            )
-            svc_futures[f] = (buf, f"web:{svc.port}")
-
-        for svc in other_services:
-            buf = ServiceBuffer(svc.port, svc.proto)
-            f = pool.submit(
-                enumerate_service,
-                args.ip, svc, runner, buf, available,
-            )
-            svc_futures[f] = (buf, f"service:{svc.port}")
-
-        for future in as_completed(svc_futures):
-            buf, label = svc_futures[future]
-            try:
-                result = future.result()
-                if result:
-                    all_discoveries.extend(result)
-                print(f"[+] Done: {label}")
-            except Exception as exc:
-                print(f"[!] Error in {label}: {exc}")
-                buf.note(f"Enumeration error: {exc}")
-
-    # Flush service buffers to findings in port order (fixes parallel scrambling)
-    findings.h2("Service Findings")
-    for buf, _ in sorted(svc_futures.values(), key=lambda x: (x[0].port, x[0].proto)):
-        findings.flush_service_buffer(buf)
-
-    # ── Phase 3.5: Post-enum domain-dependent checks ──────────────────────────
-    # By now all parallel handlers have written to users.txt and set
-    # ws.discovered_domain (from LDAP base DN). Run domain-gated checks here
-    # with the complete user list instead of mid-scan inside each handler.
-    effective_domain = args.domain or ws.discovered_domain
-    if ws.discovered_domain and not args.domain:
-        print(f"\n[*] Domain discovered: {ws.discovered_domain}")
-        if not hosts.resolves(ws.discovered_domain):
-            print(f"[*] Domain not in /etc/hosts.")
-            hosts.prompt_add(args.ip, ws.discovered_domain)
-
-    # Add discovered DC/host FQDNs to /etc/hosts (found via LDAP dNSHostName)
-    hostnames_file = ws.loot_dir / "hostnames.txt"
-    if hostnames_file.exists():
-        for fqdn in hostnames_file.read_text().splitlines():
-            fqdn = fqdn.strip()
-            if fqdn and not hosts.is_known(fqdn):
-                hosts.prompt_add(args.ip, fqdn)
-
-    if effective_domain:
-        _run_post_domain_checks(args.ip, effective_domain, runner, findings, ws, available)
-
-    # ── Phase 3.6: Credential re-use ──────────────────────────────────────────
-    creds_file = ws.loot_dir / "creds_found.txt"
-    users_file = ws.loot_dir / "users.txt"
-    if creds_file.exists() and users_file.exists() and creds_file.stat().st_size > 0:
-        _run_cred_reuse(args.ip, runner, findings, ws, services, available)
-
-    # ── Phase 4: Follow-up on discovered vhosts / SSL SANs / redirects ────────
-    new_hosts: list[tuple[Discovery, Service]] = []
-
-    for d in all_discoveries:
-        if hosts.is_known(d.hostname):
-            continue
-        if not scope.check(d.hostname):
-            print(f"[~] Out of scope — skipping: {d.hostname} (from {d.source})")
-            continue
-
-        print(f"\n[*] [{d.type.upper()}] Discovered: {d.hostname}  (via {d.source})")
-        if hosts.prompt_add(args.ip, d.hostname):
-            svc = Service(
-                port=d.port, proto="tcp", name=d.scheme,
-                version="", is_web=True, scheme=d.scheme,
-                hostname=d.hostname,
-            )
-            new_hosts.append((d, svc))
-
-    if new_hosts:
-        print(f"\n[*] Follow-up enumeration on {len(new_hosts)} discovered host(s)...")
-
-        followup_futures: dict = {}
-        with ThreadPoolExecutor(max_workers=args.workers) as pool:
-            for d, svc in new_hosts:
-                buf = ServiceBuffer(svc.port, svc.proto)
-                f = pool.submit(
-                    enumerate_web,
-                    args.ip, svc, args.domain, runner, buf, scope, hosts, available,
-                    is_followup=True, deep=args.deep,
-                )
-                followup_futures[f] = (buf, d.hostname)
-
-            for future in as_completed(followup_futures):
-                buf, label = followup_futures[future]
-                try:
-                    future.result()
-                    print(f"[+] Done: {label}")
-                except Exception as exc:
-                    print(f"[!] Error in followup {label}: {exc}")
-                    buf.note(f"Enumeration error: {exc}")
-
-        findings.h2("Discovered Hosts")
-        for buf, _ in sorted(followup_futures.values(), key=lambda x: (x[0].port, x[0].proto)):
-            findings.flush_service_buffer(buf)
-
-    # ── Loot summary ──────────────────────────────────────────────────────────
-    users_file = ws.loot_dir / "users.txt"
-    creds_file = ws.loot_dir / "creds_found.txt"
-    user_count = (
-        sum(1 for _ in users_file.open())
-        if users_file.exists() and users_file.stat().st_size > 0 else 0
-    )
-    cred_count = (
-        sum(1 for _ in creds_file.open())
-        if creds_file.exists() and creds_file.stat().st_size > 0 else 0
-    )
-    if user_count or cred_count:
-        findings.h2("Loot")
-        if user_count:
-            findings.bullet(f"**{user_count} unique user(s)** — `{users_file}`")
-        if cred_count:
-            findings.bullet(f"**{cred_count} credential(s)** — `{creds_file}`")
-
-    # ── searchsploit on nmap XML ───────────────────────────────────────────────
-    if "searchsploit" in available:
-        nmap_xml = ws.raw_dir / "04_tcp_services.xml"
-        if nmap_xml.exists():
-            findings.h2("Exploit References (searchsploit)")
-            cmd = ["searchsploit", "--nmap", str(nmap_xml)]
-            out = runner.run(cmd, "searchsploit_nmap")
-            findings.cmd(" ".join(cmd))
-            _write_searchsploit(out, findings)
-            findings.note(
-                "To view a specific exploit: `searchsploit -x <EDB-ID>` | "
-                "To copy to CWD: `searchsploit -m <EDB-ID>`"
-            )
-
-    # ── Combined mode: run credentialed phase after scan ─────────────────────
-    if args.mode == "scan,creds":
-        from lib.credsmode import load_creds, run_creds_mode
-        creds_list = load_creds(args.username, args.password, args.creds)
-        if creds_list:
-            print(f"\n[*] Combined mode: starting credentialed phase as {creds_list[0][0]}...")
-            run_creds_mode(args.ip, args.domain, creds_list, services, runner, findings, ws, available)
-        else:
-            print("[!] Combined mode: no valid credentials — skipping creds phase")
-
-    # ── Wrap up ────────────────────────────────────────────────────────────────
-    findings.finalize()
-    if args.analyze:
-        analyze_findings(ws, args.ip, args.domain, model=args.model)
-
+def _chown(ws: "Workspace"):
+    """Return ownership of output directory to the calling user (undoes sudo's root ownership)."""
     sudo_user = os.environ.get("SUDO_USER")
     if sudo_user:
         subprocess.run(["chown", "-R", f"{sudo_user}:", str(ws.machine_dir)],
                        capture_output=True)
 
-    _print_loot_summary(ws)
-    print(f"[+] Findings  : {ws.findings_path}")
-    print(f"[+] Raw data  : {ws.raw_dir}/")
-    print(f"[+] Loot      : {ws.loot_dir}/")
-    print("─" * 60)
+
+def _print_multi_summary(results: list[dict]):
+    W = 70
+    print(f"\n{'═' * W}")
+    print("  MULTI-TARGET SUMMARY")
+    print(f"{'═' * W}")
+    print(f"  {'IP':<20} {'Domain':<25} {'Users':>5} {'Creds':>5}  Status")
+    print(f"  {'-'*20} {'-'*25} {'-'*5} {'-'*5}  {'-'*8}")
+    for r in results:
+        status = "done" if r.get("success") else "FAILED"
+        ip     = r.get("ip", "")
+        domain = r.get("domain", "") or ""
+        users  = r.get("users", 0)
+        creds  = r.get("creds", 0)
+        print(f"  {ip:<20} {domain:<25} {users:>5} {creds:>5}  {status}")
+        if r.get("machine_dir"):
+            print(f"    → {r['machine_dir']}/findings.md")
+    print()
 
 
 def _run_post_domain_checks(

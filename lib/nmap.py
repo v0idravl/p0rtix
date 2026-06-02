@@ -130,7 +130,7 @@ def run_service_scan(
         for p in udp_ports:
             services.append(Service(port=p, proto="udp", name="unknown", version="", is_web=False, scheme=""))
 
-    _write_port_table(services, findings)
+    write_port_table(services, findings)
     return services
 
 
@@ -187,7 +187,7 @@ def _parse_xml_services(xml: Path, proto: str) -> list[Service]:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _write_port_table(services: list[Service], findings: Findings):
+def write_port_table(services: list[Service], findings: Findings):
     findings.h2("Port Summary")
     rows = [
         [
