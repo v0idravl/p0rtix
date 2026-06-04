@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-p0rtix — stealthy, coverage-focused recon and enumeration
+p0rtix — scope-aware recon and enumeration for authorized assessments
 
 Usage:
   sudo python3 p0rtix.py <ip> [--domain DOMAIN] [--name NAME]
@@ -89,6 +89,8 @@ def parse_args() -> argparse.Namespace:
                    help="Single password for --mode creds")
     p.add_argument("--creds", metavar="FILE",
                    help="File of username:password pairs (one per line) for --mode creds")
+    p.add_argument("--no-install", action="store_true",
+                   help="never attempt dependency installation; fail if required tools are missing")
     return p.parse_args()
 
 
@@ -419,7 +421,7 @@ def main():
     if _needs_creds and not args.domain and not args.targets:
         print("[!] Warning: --domain not set; AD tools will have limited scope")
 
-    available = check_deps()
+    available = check_deps(install_missing=not args.no_install)
 
     # ── Multi-target mode ─────────────────────────────────────────────────────
     if args.targets:

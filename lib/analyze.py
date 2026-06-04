@@ -114,7 +114,7 @@ def _build_creds_loot(ws: Workspace) -> str:
 
 
 def _scan_prompt(ip: str, domain_str: str, today: str, findings: str, loot: str) -> str:
-    return f"""You are an expert penetration tester reviewing automated reconnaissance output from a stealthy, coverage-focused scan.
+    return f"""You are an expert penetration tester reviewing automated reconnaissance output from a scope-aware authorized assessment scan.
 
 Rules:
 - Do not allude to or reference whether this target resembles any specific known environment, named machine, or published writeup. Draw conclusions only from the scan data below.

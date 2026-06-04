@@ -1,11 +1,13 @@
 # p0rtix
 
-Stealthy, coverage-focused recon and enumeration. Finds everything available on a remote host while keeping as low a profile as possible.
+Scope-aware reconnaissance and enumeration for authorized security assessments. p0rtix is designed to help junior/internal pentesters collect repeatable evidence, keep raw output intact, and avoid follow-up activity outside the agreed target scope.
 
 Built around a personal methodology reference ([hakiki](https://github.com/v0idravl/hakiki)) — covers
 port discovery, per-service enumeration, web directory/vhost busting, crawling, and SSL inspection.
 Results are written to a single `findings.md` as the scan progresses, with all raw tool output
 archived separately so nothing is lost.
+
+> **Authorized use only:** Run p0rtix only against systems where you have explicit permission and a documented scope. The tool preserves evidence and filters follow-up discovery, but the operator remains responsible for rate limits, rules of engagement, and legal authorization.
 
 ---
 
@@ -15,12 +17,22 @@ archived separately so nothing is lost.
 - Service classification — routes web ports to web enumeration, everything else to per-service handlers
 - **Web:** headers, WhatWeb fingerprint, redirect detection, SSL cert SAN extraction, directory bust, vhost bust, crawl (scope-filtered)
 - **Services:** FTP, SSH, SMTP, DNS, RPC/NFS, MSRPC, SMB, SNMP, LDAP, Rsync, MSSQL, Oracle, MySQL, RDP, PostgreSQL, WinRM, Redis, MongoDB
-- **Creds mode** (`--mode creds` or `--mode scan,creds`) — authenticated AD enumeration: SMB validation, ldapdomaindump, Kerberoasting, AS-REP roasting, BloodHound collection, ADCS ESC1/ESC4 chain, secretsdump
+- **Creds mode** (`--mode creds` or `--mode scan,creds`) — authenticated AD enumeration in authorized environments: SMB validation, ldapdomaindump, Kerberoasting, AS-REP roasting, BloodHound collection, ADCS template review, and evidence capture
 - Reactive follow-up — discovered vhosts and SSL SANs prompt for `/etc/hosts` addition, then get fully enumerated
 - Scope enforcement — crawl and follow-up scans never touch out-of-scope hosts
 - Single `findings.md` updated in real time (key findings only)
 - `raw/` directory with every tool's full output, each file headed by the exact command
-- Auto-installs missing tools via `apt`, `pip`, or `go install`
+- Prompts before installing missing tools via `apt`, `pip`/`pipx`, `go install`, or selected GitHub release downloads
+
+---
+
+## What this demonstrates
+
+- Practical Python orchestration around common pentest tools without hiding raw evidence
+- Scope-aware follow-up logic for crawled URLs, vhosts, SSL SANs, and resolved hostnames
+- Incremental findings generation suitable for internal notes and handoff
+- Resume/reuse of prior scan data to avoid unnecessary repeat network activity
+- Credentialed AD workflow support for authorized environments, with loot separated from summary reporting
 
 ---
 
@@ -30,7 +42,7 @@ archived separately so nothing is lost.
 - **Root** (required for nmap SYN scans and `/etc/hosts` writes)
 - Kali Linux recommended — most tools already present
 
-Core tools (required, installed automatically if missing):
+Core tools (required; if missing, p0rtix prompts before attempting installation):
 
 | Tool | Purpose |
 |------|---------|
@@ -38,7 +50,7 @@ Core tools (required, installed automatically if missing):
 | `curl` | HTTP probing |
 | `ffuf` | Directory and vhost busting |
 
-Optional tools (used when present, skipped gracefully otherwise):
+Optional tools (used when present, skipped gracefully otherwise; p0rtix prompts before attempting installation):
 
 **Web/general:** `whatweb` · `gospider` · `testssl.sh` · `wpscan` · `joomscan` · `droopescan` · `cewl` · `git-dumper` · `searchsploit` · `openssl`
 
@@ -78,10 +90,10 @@ sudo python3 p0rtix.py 10.10.11.34 --domain test.htb --continue --workspace ~/ht
 sudo python3 p0rtix.py 10.10.11.34 --domain test.htb --deep --workspace ~/htb
 
 # Creds mode — authenticated AD enumeration against a prior scan workspace
-sudo python3 p0rtix.py 10.10.11.34 --domain test.htb --mode creds -u judith.mader -p judith09 --name certified --workspace ~/htb
+sudo python3 p0rtix.py 10.10.11.34 --domain test.htb --mode creds -u '<USERNAME>' -p '<PASSWORD>' --name assessment --workspace ~/engagements
 
 # Combined — full scan then credentialed phase in one run (recommended)
-sudo -E python3 p0rtix.py 10.10.11.34 --domain test.htb --mode scan,creds -u judith.mader -p judith09 --name certified --workspace ~/htb --analyze
+sudo -E python3 p0rtix.py 10.10.11.34 --domain test.htb --mode scan,creds -u '<USERNAME>' -p '<PASSWORD>' --name assessment --workspace ~/engagements --analyze
 ```
 
 ### Arguments
@@ -104,6 +116,7 @@ sudo -E python3 p0rtix.py 10.10.11.34 --domain test.htb --mode scan,creds -u jud
 | `--deep` | off | Extended web scanning: cewl wordlist, arjun param discovery, full API bust (slower) |
 | `--continue` | off | Resume a previous scan — skips completed phases |
 | `--rescan` | off | Force fresh nmap scans even when prior scan data exists |
+| `--no-install` | off | Never attempt dependency installation; fail if required tools are missing and skip optional tools |
 
 ---
 
@@ -185,15 +198,23 @@ Each service gets its own section with the generating command noted above its ou
 
 ## Scope Enforcement
 
-p0rtix will not scan any host that is not:
+p0rtix applies scope checks before crawler/follow-up enumeration and will not intentionally launch follow-up tools against any host that is not:
 - The target IP, **or**
 - The explicitly provided domain / any subdomain of it (`*.domain`), **or**
 - A hostname that resolves to the target IP
 
 Crawled external URLs are surfaced in `findings.md` under *External Links* but are never touched by any tool.
 
+Scope checks are a guardrail, not a replacement for an authorization letter or rules of engagement. Confirm targets, domains, rate expectations, and credential-use permissions before running scans.
+
+---
+
+## Sample Output
+
+See [`docs/sample-findings.md`](docs/sample-findings.md) for a small sanitized example of the generated `findings.md` format.
+
 ---
 
 ## License
 
-For educational and authorized testing purposes only. Use responsibly and lawfully.
+For educational and authorized testing purposes only. Use responsibly, preserve evidence, and operate only within written scope.

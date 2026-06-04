@@ -94,9 +94,9 @@ def _is_available(tool: str, meta: dict) -> bool:
     return shutil.which(tool, path=_SEARCH_PATH) is not None
 
 
-def check_deps() -> set[str]:
+def check_deps(install_missing: bool = True) -> set[str]:
     """
-    Check for each tool. Prompt to install missing ones.
+    Check for each tool and optionally prompt to install missing ones.
     Returns the set of available tool names so callers can skip absent ones.
     """
     missing_required: list[str] = []
@@ -108,30 +108,37 @@ def check_deps() -> set[str]:
 
     if missing_optional:
         print(f"[*] Optional tools missing: {', '.join(missing_optional)}")
-        try:
-            answer = input("    Install missing optional tools now? [Y/n] > ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            answer = "n"
-        if answer in ("", "y", "yes"):
-            for tool in missing_optional:
-                _install(tool, TOOLS[tool])
+        if install_missing:
+            try:
+                answer = input("    Install missing optional tools now? [Y/n] > ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                answer = "n"
+            if answer in ("", "y", "yes"):
+                for tool in missing_optional:
+                    _install(tool, TOOLS[tool])
+        else:
+            print("    --no-install set; optional tools will be skipped if needed")
 
     if missing_required:
         print(f"\n[!] Required tools missing: {', '.join(missing_required)}")
-        try:
-            answer = input("    Attempt install now? [Y/n] > ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            answer = "n"
-        if answer in ("", "y", "yes"):
-            for tool in missing_required:
-                _install(tool, TOOLS[tool])
-            still_missing = [t for t in missing_required if not shutil.which(t)]
-            if still_missing:
-                print(f"[!] Still missing required tools: {', '.join(still_missing)}")
+        if install_missing:
+            try:
+                answer = input("    Attempt install now? [Y/n] > ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                answer = "n"
+            if answer in ("", "y", "yes"):
+                for tool in missing_required:
+                    _install(tool, TOOLS[tool])
+                still_missing = [t for t in missing_required if not shutil.which(t)]
+                if still_missing:
+                    print(f"[!] Still missing required tools: {', '.join(still_missing)}")
+                    sys.exit(1)
+            else:
                 sys.exit(1)
         else:
+            print("    --no-install set; install required tools manually and re-run")
             sys.exit(1)
 
     available = {tool for tool, meta in TOOLS.items() if _is_available(tool, meta)}

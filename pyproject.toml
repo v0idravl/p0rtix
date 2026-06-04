@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "p0rtix"
+version = "0.1.0"
+description = "Scope-aware reconnaissance workflow helper for authorized security assessments"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Educational and authorized testing use only" }
+authors = [{ name = "v0idravl" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Security",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.setuptools]
+py-modules = ["p0rtix"]
+packages = ["lib"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
