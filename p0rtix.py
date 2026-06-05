@@ -191,6 +191,27 @@ def _run_single_scan(
         _print_loot_summary(ws)
         return {"ip": ip, "domain": domain, "machine_dir": str(ws.machine_dir), "success": True}
 
+    # ── Followup dispatch ─────────────────────────────────────────────────────
+    if args.mode == "followup":
+        from lib.credsmode import load_creds
+        from lib.followup import run_followup_mode
+
+        creds = load_creds(args.username, args.password, args.creds)
+        if not creds:
+            print("[!] No valid credentials parsed — cannot run followup mode")
+            return {"ip": ip, "domain": domain, "machine_dir": str(ws.machine_dir), "success": False}
+
+        services = _reload_services_from_disk(ws)
+        if not services:
+            print("[!] No prior nmap XML found — run a scan first before --mode followup")
+            print("[!] Per-service enumeration will be limited to any services discovered")
+
+        effective_domain = domain or ws.discovered_domain or None
+        run_followup_mode(ip, effective_domain, creds, services, runner, ws, available)
+        _chown(ws)
+        _print_loot_summary(ws)
+        return {"ip": ip, "domain": domain, "machine_dir": str(ws.machine_dir), "success": True}
+
     # ── Phase 1: Port discovery ───────────────────────────────────────────────
     if _use_prior or (args.continue_scan and state.is_done("port_discovery")):
         ports = state.get("ports", {"tcp": [], "udp": []})
@@ -433,19 +454,19 @@ def main():
         print("[!] p0rtix requires root — re-run with: sudo python3 p0rtix.py ...")
         sys.exit(1)
 
-    _VALID_MODES = {"scan", "creds", "scan,creds"}
+    _VALID_MODES = {"scan", "creds", "scan,creds", "followup"}
     if args.mode not in _VALID_MODES:
-        sys.exit(f"[!] Invalid --mode '{args.mode}'. Choose: scan | creds | scan,creds")
+        sys.exit(f"[!] Invalid --mode '{args.mode}'. Choose: scan | creds | scan,creds | followup")
 
     # Auto-promote: credentials supplied with default scan mode → scan,creds
     if args.mode == "scan" and (args.username or args.creds):
         print("[*] Credentials provided — running scan then creds phase (scan,creds mode)")
         args.mode = "scan,creds"
 
-    _needs_creds = args.mode in ("creds", "scan,creds")
+    _needs_creds = args.mode in ("creds", "scan,creds", "followup")
     if _needs_creds and not args.username and not args.creds:
-        sys.exit("[!] --mode creds/scan,creds requires -u/-p or --creds <file>")
-    if _needs_creds and not args.domain and not args.targets:
+        sys.exit("[!] --mode creds/scan,creds/followup requires -u/-p or --creds <file>")
+    if args.mode in ("creds", "scan,creds") and not args.domain and not args.targets:
         print("[!] Warning: --domain not set; AD tools will have limited scope")
 
     available = check_deps(install_missing=not args.no_install)

