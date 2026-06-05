@@ -197,8 +197,8 @@ def _kerberos(ip, service, runner, findings, available):
 
     if not domain:
         findings.note(
-            "No `--domain` provided — Kerberos enumeration skipped. "
-            "Re-run with `--domain DOMAIN` to enable krb5-enum-users and AS-REP roasting."
+            "Domain not yet known at enumeration time — Kerberos checks deferred to "
+            "post-domain phase (will run automatically if a domain is discovered via SMB/LDAP)."
         )
         return []
 
@@ -676,6 +676,13 @@ def _ldap(ip, service, runner, findings, available):
         findings.bullet(f"**Groups ({len(groups)}):** {', '.join(groups[:20])}" +
                         (" …" if len(groups) > 20 else ""))
 
+    # Derive domain from base DN if --domain wasn't provided, and persist it
+    # so the post-enum phase can use it for GetNPUsers / kerbrute with the
+    # complete user list (assembled from all parallel handlers).
+    effective_domain = domain or _dn_to_domain(base_dn)
+    if effective_domain and not gc_mode:
+        runner.ws.set_discovered_domain(effective_domain)
+
     # 6. AS-REP roastable (userAccountControl bit 4194304 = DONT_REQ_PREAUTH)
     out_asrep = lq("asrep_roastable",
                    "(&(objectClass=user)(userAccountControl:1.2.840.113556.1.4.803:=4194304))",
@@ -684,14 +691,7 @@ def _ldap(ip, service, runner, findings, available):
     if asrep:
         findings.bullet(f"**AS-REP roastable (no pre-auth required): {', '.join(asrep)}**")
         findings.add_summary(f"AS-REP roastable accounts (LDAP UAC flag): {', '.join(asrep)}")
-        findings.note(f"Crack with: `impacket-GetNPUsers {domain}/ -no-pass -dc-ip {ip} -request -format hashcat`")
-
-    # Derive domain from base DN if --domain wasn't provided, and persist it
-    # so the post-enum phase can use it for GetNPUsers / kerbrute with the
-    # complete user list (assembled from all parallel handlers).
-    effective_domain = domain or _dn_to_domain(base_dn)
-    if effective_domain and not gc_mode:
-        runner.ws.set_discovered_domain(effective_domain)
+        findings.note(f"Crack with: `impacket-GetNPUsers {effective_domain}/ -no-pass -dc-ip {ip} -request -format hashcat`")
 
     # 7. Unconstrained delegation
     out_uncons = lq("unconstrained_delegation",
@@ -770,7 +770,7 @@ def _extract_ldap_base(output: str) -> str:
 
 def _dn_to_domain(base_dn: str) -> str:
     parts = re.findall(r"DC=([^,]+)", base_dn, re.IGNORECASE)
-    return ".".join(parts) if parts else ""
+    return ".".join(parts).lower() if parts else ""
 
 
 _DESC_BOILERPLATE = {
