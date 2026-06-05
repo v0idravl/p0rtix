@@ -180,10 +180,11 @@ class Workspace:
         try:
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
                 for file in self.machine_dir.rglob("*"):
+                    if not file.is_file():
+                        continue
                     if file.suffix == ".zip":
                         continue
-                    if file.is_file():
-                        zf.write(file, file.relative_to(self.machine_dir))
+                    zf.write(file, file.relative_to(self.machine_dir))
         except Exception as exc:
             zip_path.unlink(missing_ok=True)
             raise RuntimeError(f"create_sample failed: {exc}") from exc
