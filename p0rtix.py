@@ -81,6 +81,8 @@ def parse_args() -> argparse.Namespace:
                    help="resume a previous scan — skips completed phases (auto-detected if prior scan exists)")
     p.add_argument("--rescan", action="store_true",
                    help="force fresh nmap scans even when prior scan data exists")
+    p.add_argument("--sample", action="store_true",
+                   help="zip the workspace directory at end of scan")
     p.add_argument("--mode", default="scan",
                    help="scan = full recon (default); creds = credentialed AD enum; scan,creds = both in one run")
     p.add_argument("-u", "--username", metavar="USER",
@@ -386,6 +388,13 @@ def _run_single_scan(
     findings.finalize()
     if args.analyze:
         analyze_findings(ws, ip, domain, model=args.model)
+
+    if args.sample:
+        try:
+            zip_path = ws.create_sample()
+            print(f"[+] Sample    : {zip_path}")
+        except RuntimeError as exc:
+            print(f"[!] Sample zip failed: {exc}")
 
     _chown(ws)
     _print_loot_summary(ws)
