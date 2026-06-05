@@ -91,6 +91,8 @@ def parse_args() -> argparse.Namespace:
                    help="Single password for --mode creds")
     p.add_argument("--creds", metavar="FILE",
                    help="File of username:password pairs (one per line) for --mode creds")
+    p.add_argument("--users", metavar="FILE",
+                   help="Seed loot/users.txt with usernames from FILE before enumeration")
     p.add_argument("--no-install", action="store_true",
                    help="never attempt dependency installation; fail if required tools are missing")
     return p.parse_args()
@@ -220,6 +222,16 @@ def _run_single_scan(
         if svc.port in AD_PORTS and domain and not svc.hostname:
             svc.hostname = domain
     services = _dedup_services(services)
+
+    # ── --users seed ──────────────────────────────────────────────────────────
+    if getattr(args, "users", None):
+        try:
+            lines = [l.strip() for l in open(args.users).read().splitlines() if l.strip()]
+            for u in lines:
+                ws.add_user(u)
+            print(f"[*] Users seeded : {args.users} ({len(lines)} entries)")
+        except OSError as e:
+            print(f"[!] --users file error: {e}")
 
     # ── Phase 3: Parallel service + web enumeration ───────────────────────────
     # Only skip enumeration on explicit --continue — always re-run when called fresh
@@ -424,6 +436,11 @@ def main():
     _VALID_MODES = {"scan", "creds", "scan,creds"}
     if args.mode not in _VALID_MODES:
         sys.exit(f"[!] Invalid --mode '{args.mode}'. Choose: scan | creds | scan,creds")
+
+    # Auto-promote: credentials supplied with default scan mode → scan,creds
+    if args.mode == "scan" and (args.username or args.creds):
+        print("[*] Credentials provided — running scan then creds phase (scan,creds mode)")
+        args.mode = "scan,creds"
 
     _needs_creds = args.mode in ("creds", "scan,creds")
     if _needs_creds and not args.username and not args.creds:
