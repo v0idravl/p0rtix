@@ -285,6 +285,7 @@ def _run_single_scan(
     _skip_post = args.continue_scan and not _use_prior and state.is_done("post_domain")
     if effective_domain and not _skip_post:
         _run_post_domain_checks(ip, effective_domain, runner, findings, ws, available)
+        _run_post_dns_checks(ip, effective_domain, runner, findings, available)
         state.mark_done("post_domain")
     elif _skip_post:
         print("[*] Skipping post-domain checks (done)")
@@ -379,7 +380,7 @@ def _run_single_scan(
         creds_list = load_creds(args.username, args.password, args.creds)
         if creds_list:
             print(f"\n[*] Combined mode: starting credentialed phase as {creds_list[0][0]}...")
-            run_creds_mode(ip, domain, creds_list, services, runner, findings, ws, available)
+            run_creds_mode(ip, domain or ws.discovered_domain, creds_list, services, runner, findings, ws, available)
         else:
             print("[!] Combined mode: no valid credentials — skipping creds phase")
 
@@ -560,6 +561,41 @@ def _run_post_domain_checks(
         f"Kerberoasting (needs creds): "
         f"`impacket-GetUserSPNs {domain}/USER:PASS -dc-ip {ip} -request -outputfile spns.txt`"
     )
+
+
+def _run_post_dns_checks(
+    ip: str, domain: str, runner: Runner,
+    findings: Findings, available: set[str],
+):
+    """
+    SRV record enumeration and zone-transfer attempt for the discovered domain.
+    Uses the same Runner cache labels as the Phase 3 DNS handler, so results
+    from an earlier --domain run are reused rather than repeated.
+    """
+    if "dig" not in available and "dnsrecon" not in available:
+        return
+
+    findings.h2("Post-Enumeration: DNS")
+
+    if "dig" in available:
+        _SRV_RECORDS = [
+            "_ldap._tcp", "_kerberos._tcp", "_kpasswd._tcp",
+            "_gc._tcp", "_msdcs", "_sites",
+        ]
+        for srv in _SRV_RECORDS:
+            cmd = ["dig", "SRV", f"{srv}.{domain}", f"@{ip}"]
+            label = f"dns_srv_{srv.replace('.', '_').replace('-', '_')}_{domain}"
+            out = runner.run(cmd, label)
+            findings.cmd(" ".join(cmd))
+            if "ANSWER SECTION" in out:
+                findings.code_block(out.strip())
+
+    if "dnsrecon" in available:
+        cmd2 = ["dnsrecon", "-d", domain, "-t", "axfr,std", "-n", ip]
+        out2 = runner.run(cmd2, f"dns_dnsrecon_{domain}", timeout=120)
+        findings.cmd(" ".join(cmd2))
+        if out2.strip():
+            findings.code_block(out2.strip())
 
 
 def _run_cred_reuse(

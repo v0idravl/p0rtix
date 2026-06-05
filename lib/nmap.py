@@ -19,9 +19,14 @@ _WEB_NAMES = {"http", "https", "ssl/http", "http-alt", "http-proxy", "sun-answer
 # Service names that look HTTP-ish but are actually RPC transports — not web targets
 _RPC_HTTP_NAMES = {"ncacn_http", "http-rpc-epmap"}
 
+# WinRM uses HTTP as transport but is not a browseable web service; has its own handler
+_WINRM_PORTS = {5985, 5986}
+
 
 def _is_web(port: int, service_name: str) -> bool:
     name = service_name.lower()
+    if port in _WINRM_PORTS:
+        return False
     if any(n == name for n in _RPC_HTTP_NAMES):
         return False
     if any(n in name for n in _WEB_NAMES):

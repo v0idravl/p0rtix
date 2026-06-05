@@ -322,6 +322,39 @@ def _smb_run_null_session(ip: str, port: int, runner: Runner,
             dc_fqdn = f"{m_name.group(1).strip().lower()}.{discovered}"
             runner.ws.add_hostname(dc_fqdn)
 
+    # RID cycling — enumerate all domain users/groups via SID brute-force.
+    # Works even when LDAP and --users return ACCESS_DENIED (only needs null session).
+    null_auth_ok = bool(re.search(r"\[+\].*\\:", out_null))
+    if null_auth_ok and m_domain and "impacket-lookupsid" in available:
+        discovered_domain = m_domain.group(1).strip().lower()
+        target = f"{discovered_domain}/@{ip}"
+        cmd_rid = ["impacket-lookupsid", "-no-pass", target]
+        buf.cmd(" ".join(cmd_rid))
+        out_rid = runner.run(cmd_rid, f"smb_{port}_lookupsid", timeout=120)
+        rid_users = []
+        for line in out_rid.splitlines():
+            m_rid = re.search(r"\d+: [^\\]+\\(\S+) \(SidTypeUser\)", line)
+            if m_rid and not m_rid.group(1).endswith("$"):
+                rid_users.append(m_rid.group(1))
+        if rid_users:
+            for u in rid_users:
+                runner.ws.add_user(u)
+            buf.bullet(
+                "**RID cycling found {} user(s): {}{}**".format(
+                    len(rid_users),
+                    ", ".join(rid_users[:15]),
+                    " …" if len(rid_users) > 15 else "",
+                )
+            )
+            buf.add_summary(
+                "RID cycling: {}{}".format(
+                    ", ".join(rid_users[:5]),
+                    " …" if len(rid_users) > 5 else "",
+                )
+            )
+        else:
+            buf.note("RID cycling: no users returned (null session may lack RPC read access)")
+
     # Share enumeration: null session first, fall back to Guest if ACCESS_DENIED
     auth_user, auth_pass = "", ""
     readable_shares: list[str] = []
@@ -437,6 +470,10 @@ def _parse_nxc_users(output: str, findings: Findings, runner: Runner):
 
 def _parse_enum4linux(output: str, findings: Findings, runner: Runner):
     """Extract key findings from enum4linux-ng output."""
+    # Domain SID — useful context; RID cycling uses it implicitly via lookupsid
+    m_sid = re.search(r"Domain SID[:\s]+(S-\d+-\d+-\d+-\d+-\d+-\d+)", output, re.IGNORECASE)
+    if m_sid:
+        findings.bullet(f"Domain SID: `{m_sid.group(1)}`")
     # Users
     users = re.findall(r"username:\s+(\S+)", output, re.IGNORECASE)
     if users:
@@ -1084,12 +1121,22 @@ def _vnc(ip, service, runner, findings, available):
 # ── WinRM (5985, 5986) ────────────────────────────────────────────────────────
 
 def _winrm(ip, service, runner, findings, available):
+    port = service.port
+
+    # NTLM realm probe — can reveal domain name even without credentials
+    cmd_ntlm = ["nmap", "--script", "http-ntlm-info", "-p", str(port), ip]
+    out_ntlm = runner.run(cmd_ntlm, f"winrm_{port}_ntlm_info")
+    findings.cmd(" ".join(cmd_ntlm))
+    if any(kw in out_ntlm for kw in ("NetBIOS", "DNS_Domain", "DNS_Computer")):
+        findings.code_block(_trim(out_ntlm))
+
     if "nxc" not in available:
-        findings.note("`nxc` not available — skipping WinRM check")
+        findings.note("`nxc` not available — skipping WinRM null check")
+        findings.note(f"With creds: `evil-winrm -i {ip} -u USER -p PASS`")
         return []
 
     cmd = ["nxc", "winrm", ip, "-u", "", "-p", ""]
-    out = runner.run(cmd, f"winrm_{service.port}_nxc")
+    out = runner.run(cmd, f"winrm_{port}_nxc")
     findings.cmd(" ".join(cmd))
     findings.code_block(_trim(out))
     findings.note(f"With creds: `evil-winrm -i {ip} -u USER -p PASS`")
