@@ -861,6 +861,11 @@ def _ad_core(
             return None
 
         def _bh_run(collection: str, label: str) -> "Path | None":
+            # NB: bloodhound-python has NO output-directory flag — `-o` gets
+            # argparse-abbreviated to `-op/--outputprefix`, so passing a path there
+            # prepends it to every filename (dumping JSON into loot/ as
+            # `bloodhound_<ts>_*.json`) AND breaks --zip's file collection, leaving
+            # an empty 22-byte archive. Control the location purely via cwd instead.
             cmd = [
                 "bloodhound-python",
                 "-c", collection,
@@ -870,11 +875,10 @@ def _ad_core(
                 "--auth-method", "ntlm",
                 "--dns-tcp",
                 "--zip",
-                "-o", str(bh_dir),
                 "-ns", ip,
             ]
             findings.cmd(" ".join(cmd))
-            # Run from bh_dir so the zip lands there regardless of bloodhound-python version
+            # Run from bh_dir so all JSON + the zip land directly in loot/bloodhound/
             out = runner.run(cmd, label, timeout=300, cwd=str(bh_dir))
 
             # Relocate any JSON files that landed in loot_dir instead of bh_dir
