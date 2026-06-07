@@ -127,7 +127,7 @@ def _smtp(ip, service, runner, findings, available):
         for line in out2.splitlines():
             m = re.search(r"^\S+\s+(\S+)\s+exists", line, re.IGNORECASE)
             if m:
-                runner.ws.add_user(m.group(1).split("@")[0])
+                runner.ws.add_user(m.group(1).split("@")[0], authoritative=True)
 
     return []
 
@@ -324,7 +324,7 @@ def _smb_run_null_session(ip: str, port: int, runner: Runner,
 
     # RID cycling — enumerate all domain users/groups via SID brute-force.
     # Works even when LDAP and --users return ACCESS_DENIED (only needs null session).
-    null_auth_ok = bool(re.search(r"\[+\].*\\:", out_null))
+    null_auth_ok = "(Null Auth:True)" in out_null or bool(re.search(r"\[\+\].*\\:", out_null))
     if null_auth_ok and m_domain and "impacket-lookupsid" in available:
         discovered_domain = m_domain.group(1).strip().lower()
         target = f"{discovered_domain}/@{ip}"
@@ -338,7 +338,8 @@ def _smb_run_null_session(ip: str, port: int, runner: Runner,
                 rid_users.append(m_rid.group(1))
         if rid_users:
             for u in rid_users:
-                runner.ws.add_user(u)
+                runner.ws.add_user(u, authoritative=True)
+            runner.ws.mark_users_complete()
             buf.bullet(
                 "**RID cycling found {} user(s): {}{}**".format(
                     len(rid_users),
@@ -416,8 +417,13 @@ def _smb(ip, service, runner, findings, available):
         findings.code_block(_trim(out_sign))
 
     # Parallel: vuln scan + zerologon + null session enum + enum4linux-ng
+    # Zerologon is an active exploit-attempt loop (up to ~2000 Netlogon auths) —
+    # high-noise, so it is opt-in via --deep to keep default runs low-traffic.
+    deep = getattr(runner.ws, "deep", False)
     buf_vuln = ServiceBuffer(port, "tcp")
-    buf_zl   = ServiceBuffer(port, "tcp") if "nxc" in available else None
+    buf_zl   = ServiceBuffer(port, "tcp") if ("nxc" in available and deep) else None
+    if "nxc" in available and not deep:
+        findings.note("Zerologon (CVE-2020-1472) active check skipped — high-noise; run with `--deep` to enable")
     buf_null = ServiceBuffer(port, "tcp") if "nxc" in available else None
     buf_e4l  = ServiceBuffer(port, "tcp") if "enum4linux-ng" in available else None
 
@@ -463,9 +469,17 @@ def _parse_nxc_users(output: str, findings: Findings, runner: Runner):
     if users:
         findings.bullet(f"**SMB users:** {', '.join(users)}")
         for u in users:
-            runner.ws.add_user(u)
+            runner.ws.add_user(u, authoritative=True)
+        runner.ws.mark_users_complete()
     else:
         findings.code_block(_trim(output))
+    # Harvest inline-leaked passwords from the description column that nxc --users
+    # prints (e.g. 'Account created. Password set to Welcome123!'). Backstop for
+    # the LDAP path — RID cycling reaches descriptions even when LDAP is denied.
+    for pw in _extract_passwords(output):
+        findings.bullet(f"  ⚠ **Possible password in user description:** `{pw}`")
+        findings.add_summary(f"⚠ Possible password in SMB user description: `{pw}`")
+        runner.ws.add_cred(pw)
 
 
 def _parse_enum4linux(output: str, findings: Findings, runner: Runner):
@@ -479,7 +493,8 @@ def _parse_enum4linux(output: str, findings: Findings, runner: Runner):
     if users:
         findings.bullet(f"**enum4linux-ng users:** {', '.join(users[:30])}")
         for u in users:
-            runner.ws.add_user(u)
+            runner.ws.add_user(u, authoritative=True)
+        runner.ws.mark_users_complete()
     # Password policy
     for field in ("Minimum password length", "Account lockout threshold",
                   "Password complexity"):
@@ -605,7 +620,7 @@ def _parse_snmp_walk(output: str, community: str, findings: Findings, runner: Ru
             for v in values:
                 # Strip STRING: "username" formatting
                 u = re.sub(r'^STRING:\s*"?([^"]+)"?$', r"\1", v.strip())
-                runner.ws.add_user(u)
+                runner.ws.add_user(u, authoritative=True)
 
 
 def _snmp_v3(ip: str, runner: Runner, findings: Findings):
@@ -620,7 +635,7 @@ def _snmp_v3(ip: str, runner: Runner, findings: Findings):
         if result.returncode == 0 and result.stdout.strip() and "No Such" not in result.stdout:
             findings.bullet(f"**SNMPv3 accessible — username: `{username}`**")
             findings.code_block(_trim(result.stdout))
-            runner.ws.add_user(username)
+            runner.ws.add_user(username, authoritative=True)
             return  # Found one, stop trying
 
 
@@ -834,6 +849,38 @@ def _looks_like_credential(desc: str) -> bool:
     return False
 
 
+# Inline password leaks, e.g. "Account created. Password set to Welcome123!",
+# "pwd: S3cret", "pass=Spring2020". Captures only the token after an explicit
+# assignment marker so we spray the *password*, not the whole sentence.
+_PW_PHRASE = re.compile(
+    r"(?:password|passwd|pwd|pword|pw|pass)\b"
+    r"\s*(?:set\s+to|reset\s+to|changed\s+to|is|was|will\s+be|[:=]|->|=>)\s*"
+    r"([^\s,;'\"]{4,60})",
+    re.IGNORECASE,
+)
+
+
+def _extract_passwords(text: str) -> list[str]:
+    """Pull candidate password tokens out of free-text user descriptions.
+
+    Handles inline-leak phrasings ('Account created. Password set to Welcome123!')
+    by extracting only the token (Welcome123!), and falls back to treating a bare
+    single-token description as the password itself. Returns deduped tokens to
+    spray (possibly empty)."""
+    out: list[str] = []
+    for m in _PW_PHRASE.finditer(text):
+        tok = m.group(1).strip().strip("'\"").rstrip(".")
+        if 4 <= len(tok) <= 60:
+            out.append(tok)
+    # Bare single-token description (the whole field *is* the password). Guarded
+    # by _looks_like_credential (len <= 80), so a multi-line blob is never
+    # swallowed whole.
+    if not out and _looks_like_credential(text):
+        out.append(text.strip())
+    seen: set[str] = set()
+    return [p for p in out if not (p in seen or seen.add(p))]
+
+
 def _parse_ldap_users(output: str, findings: Findings, runner: Runner):
     accounts = re.findall(r"sAMAccountName:\s+(.+)", output)
     descriptions = re.findall(r"description:\s+(.+)", output)
@@ -841,15 +888,18 @@ def _parse_ldap_users(output: str, findings: Findings, runner: Runner):
         findings.bullet(f"**Users ({len(accounts)}):** {', '.join(accounts[:30])}" +
                         (" …" if len(accounts) > 30 else ""))
         for u in accounts:
-            runner.ws.add_user(u.strip())
+            runner.ws.add_user(u.strip(), authoritative=True)
+        runner.ws.mark_users_complete()
     if descriptions:
         findings.bullet("**User descriptions (check for passwords):**")
         for d in descriptions[:10]:
             stripped = d.strip()
-            if _looks_like_credential(stripped):
+            pws = _extract_passwords(stripped)
+            if pws:
                 findings.bullet(f"  ⚠ **Possible credential:** `{stripped}`")
-                findings.add_summary(f"⚠ Possible credential in LDAP description: `{stripped}`")
-                runner.ws.add_cred(stripped)
+                for pw in pws:
+                    findings.add_summary(f"⚠ Possible password in LDAP description: `{pw}`")
+                    runner.ws.add_cred(pw)
             else:
                 findings.bullet(f"  `{stripped}`")
 
@@ -1069,11 +1119,9 @@ def _rdp(ip, service, runner, findings, available):
 # ── PostgreSQL (5432) ────────────────────────────────────────────────────────
 
 def _postgres(ip, service, runner, findings, available):
-    cmd = ["nmap", "--script", "pgsql-brute",
-           "--script-args",
-           "brute.firstonly=true,"
-           "userdb=/usr/share/seclists/Usernames/top-usernames-shortlist.txt,"
-           "passdb=/dev/null",
+    # Version/banner only — no auth bruteforce. The meaningful low-noise check is
+    # the trust-auth (no-password) test below via psql.
+    cmd = ["nmap", "-sV", "--script", "banner",
            "-p", str(service.port), ip]
     out = runner.run(cmd, f"postgres_{service.port}_nmap")
     findings.cmd(" ".join(cmd))
@@ -1094,8 +1142,8 @@ def _postgres(ip, service, runner, findings, available):
 # ── VNC (5900) ───────────────────────────────────────────────────────────────
 
 def _vnc(ip, service, runner, findings, available):
-    cmd = ["nmap", "--script", "vnc-info,vnc-brute",
-           "--script-args", "brute.firstonly=true",
+    # Info only — no vnc-brute (that is a service auth bruteforce).
+    cmd = ["nmap", "--script", "vnc-info",
            "-p", str(service.port), ip]
     out = runner.run(cmd, f"vnc_{service.port}_nmap")
     findings.cmd(" ".join(cmd))
@@ -1109,11 +1157,7 @@ def _vnc(ip, service, runner, findings, available):
 
     if "None" in out or "No Authentication" in out:
         findings.bullet("**VNC: no authentication required**")
-        findings.note(f"Connect: `vncviewer {ip}:{service.port}`")
-    elif "Valid credentials" in out:
-        findings.bullet("**VNC: default/weak credentials found — see nmap output**")
-    else:
-        findings.note(f"Connect: `vncviewer {ip}:{service.port}`")
+    findings.note(f"Connect: `vncviewer {ip}:{service.port}`")
 
     return []
 

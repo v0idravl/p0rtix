@@ -53,6 +53,9 @@ TOOLS: dict[str, dict] = {
     "impacket-secretsdump":  {"apt": "python3-impacket",                "required": False},
     "ntpdate":               {"apt": "ntpdate",                         "required": False},
 
+    # Cracking
+    "hashcat":               {"apt": "hashcat",                         "required": False},
+
     # DNS
     "dig":                   {"apt": "dnsutils",                        "required": False},
     "dnsrecon":              {"apt": "dnsrecon",                        "required": False},
@@ -109,7 +112,7 @@ def check_deps(install_missing: bool = True) -> set[str]:
 
     if missing_optional:
         print(f"[*] Optional tools missing: {', '.join(missing_optional)}")
-        if install_missing:
+        if install_missing and sys.stdin.isatty():
             try:
                 answer = input("    Install missing optional tools now? [Y/n] > ").strip().lower()
             except (EOFError, KeyboardInterrupt):
@@ -118,17 +121,25 @@ def check_deps(install_missing: bool = True) -> set[str]:
             if answer in ("", "y", "yes"):
                 for tool in missing_optional:
                     _install(tool, TOOLS[tool])
+        elif install_missing:
+            print("    non-interactive — skipping optional installs (steps needing them are skipped)")
         else:
             print("    --no-install set; optional tools will be skipped if needed")
 
     if missing_required:
         print(f"\n[!] Required tools missing: {', '.join(missing_required)}")
         if install_missing:
-            try:
-                answer = input("    Attempt install now? [Y/n] > ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                answer = "n"
+            if sys.stdin.isatty():
+                try:
+                    answer = input("    Attempt install now? [Y/n] > ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    answer = "n"
+            else:
+                # Non-interactive: required tools are needed to scan at all, so
+                # attempt install rather than aborting on a prompt no one answers.
+                print("    non-interactive — attempting required-tool install")
+                answer = "y"
             if answer in ("", "y", "yes"):
                 for tool in missing_required:
                     _install(tool, TOOLS[tool])

@@ -1,5 +1,6 @@
 import socket
 import subprocess
+import sys
 from pathlib import Path
 
 HOSTS_FILE = Path("/etc/hosts")
@@ -35,6 +36,14 @@ class HostsManager:
             print(f"    [hosts] {hostname} already resolves — skipping")
             self._added.add(hostname)
             return True
+
+        # Non-interactive run (no TTY): auto-add rather than blocking or skipping.
+        # Callers only reach prompt_add after an in-scope check, so adding the
+        # discovered domain/vhost is safe and keeps AD tooling's name resolution
+        # working in unattended runs.
+        if not sys.stdin.isatty():
+            print(f"    [hosts] non-interactive — auto-adding {ip} {hostname}")
+            return self._write_entry(ip, hostname)
 
         print(f"\n  [?] Add to /etc/hosts?  {ip}  {hostname}")
         try:
