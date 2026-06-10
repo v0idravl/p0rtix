@@ -772,13 +772,13 @@ def _check_cms(base_url: str, runner: Runner, findings: Findings, available: set
                 drupal_found = True
             findings.bullet(f"**{label}:** `{base_url}{path}`")
 
-    if drupal_found and "droopescan" in available:
-        cmd2 = ["droopescan", "scan", "drupal", "--url", base_url]
-        findings.cmd(" ".join(cmd2))
-        out2 = runner.run(cmd2, f"web_{_label(base_url)}_droopescan", timeout=300)
-        for line in out2.splitlines():
-            if line.strip() and not line.startswith("[*] Scanning"):
-                findings.bullet(line.strip())
+    if drupal_found:
+        findings.note(
+            "Drupal detected — enumerate version/modules manually: check "
+            "`CHANGELOG.txt` / `core/CHANGELOG.txt` for the version and run "
+            "nuclei's drupal templates (droopescan is abandoned and broken on "
+            "Python 3.12+, so it is no longer wired in)"
+        )
 
 
 # ── Jenkins probe ─────────────────────────────────────────────────────────────

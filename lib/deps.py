@@ -79,7 +79,9 @@ TOOLS: dict[str, dict] = {
     # CMS / web tools
     "arjun":                 {"pip": "arjun",                           "required": False},
     "joomscan":              {"apt": "joomscan",                        "required": False},
-    "droopescan":            {"pip": "droopescan",                      "required": False},
+    # droopescan intentionally omitted — abandoned upstream and broken on
+    # Python 3.12+ (pins cement 2.x which imports the removed `imp` module).
+    # Drupal is still detected in lib/web.py; deep-scan is left to manual tools.
     "cewl":                  {"apt": "cewl",                            "required": False},
 
     # Post-discovery
@@ -347,13 +349,23 @@ def _pip_install(pkg: str, tool: str, library: bool = False) -> None:
         print(f"    [!] pip install {pkg} failed — install manually: pip3 install {pkg}")
         return
 
-    # CLI tools: try pipx first (isolated env), fall back to pip3
-    for installer in (["pipx", "install"], ["pip3", "install", "--quiet"]):
-        if shutil.which(installer[0]):
-            result = subprocess.run([*installer, pkg], capture_output=True, text=True)
-            if result.returncode == 0:
-                if installer[0] == "pipx":
-                    _symlink_pipx(tool)
-                print(f"    [+] Installed {tool} via {installer[0]}")
-                return
-    print(f"    [!] pip install {pkg} failed — install manually: pip3 install {pkg}")
+    # CLI tools: pipx (isolated) first, then pip --user. On Kali/Debian PEP 668
+    # makes a bare `pip install` fail, so --break-system-packages is required;
+    # and a root-owned ~/.local/state (left by a prior sudo run) can crash pipx
+    # outright — the pip --user fallbacks keep the install working anyway.
+    attempts = [
+        ["pipx", "install", pkg],
+        ["pip3", "install", "--user", "--break-system-packages", "--quiet", pkg],
+        ["pip3", "install", "--break-system-packages", "--quiet", pkg],
+    ]
+    for cmd in attempts:
+        if not shutil.which(cmd[0]):
+            continue
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            if cmd[0] == "pipx":
+                _symlink_pipx(tool)
+            print(f"    [+] Installed {tool} via {cmd[0]}")
+            return
+    print(f"    [!] pip install {pkg} failed — install manually: "
+          f"pip3 install --user --break-system-packages {pkg}")
