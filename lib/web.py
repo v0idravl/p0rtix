@@ -495,7 +495,9 @@ def _extract_pem(openssl_out: str) -> str:
 
 def _run_testssl(ip: str, port: int, runner: Runner, findings: Findings):
     findings.h4("testssl.sh")
-    cmd = ["testssl.sh", "--color", "0", "--quiet", "--fast", f"{ip}:{port}"]
+    # Resolve the real executable — Kali's package installs it as `testssl`.
+    from lib.deps import resolve_bin
+    cmd = [resolve_bin("testssl.sh"), "--color", "0", "--quiet", "--fast", f"{ip}:{port}"]
     findings.cmd(" ".join(cmd))
     out = runner.run(cmd, f"web_{ip}_{port}_testssl", timeout=300)
 

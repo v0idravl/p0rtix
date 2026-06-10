@@ -773,7 +773,11 @@ def _run_post_dns_checks(
 
     if "dnsrecon" in available:
         cmd2 = ["dnsrecon", "-d", domain, "-t", "axfr,std", "-n", ip]
-        out2 = runner.run(cmd2, f"dns_dnsrecon_{domain}", timeout=120)
+        # dnsrecon writes a log to $HOME/.config/dnsrecon/; point HOME at the
+        # workspace so a root-owned ~/.config (left by an earlier sudo run)
+        # can't crash it with PermissionError.
+        out2 = runner.run(cmd2, f"dns_dnsrecon_{domain}", timeout=120,
+                          env={"HOME": str(runner.ws.machine_dir)})
         findings.cmd(" ".join(cmd2))
         if out2.strip():
             findings.code_block(out2.strip())
@@ -1053,9 +1057,14 @@ def _dedup_services(services: list[Service]) -> list[Service]:
 
     if 445 in open_tcp and 139 in open_tcp:   # SMB: 445 supersedes 139
         drop.add((139, "tcp"))
-    if 389 in open_tcp and 3268 in open_tcp:  # LDAP GC mirrors 389 in single-domain forests
-        drop.add((3268, "tcp"))
-    if 636 in open_tcp and 3269 in open_tcp:  # LDAPS GC mirrors 636
+    if 389 in open_tcp:
+        # Plaintext LDAP serves the same anonymous data as its LDAPS/GC siblings
+        # on the same DC. Enumerate once on 389; the others only add redundant
+        # (and, for LDAPS, cert-handshake-prone) queries.
+        for sib in (3268, 636, 3269):
+            if sib in open_tcp:
+                drop.add((sib, "tcp"))
+    elif 636 in open_tcp and 3269 in open_tcp:  # no plaintext LDAP: 636 supersedes GC LDAPS
         drop.add((3269, "tcp"))
     if 88 in open_tcp and 88 in open_udp:     # Kerberos: TCP and UDP hit same handler
         drop.add((88, "udp"))

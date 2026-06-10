@@ -1,3 +1,4 @@
+import os
 import shlex
 import subprocess
 from datetime import datetime
@@ -31,12 +32,13 @@ class Runner:
     # ── Public API ────────────────────────────────────────────────────────────
 
     def run(self, cmd: list[str], label: str, timeout: int = 300,
-            cwd: str | None = None) -> str:
+            cwd: str | None = None, env: dict[str, str] | None = None) -> str:
         """
         Run a command, capture output, save to raw/, return stdout as string.
         On resume (raw file already exists from a prior scan), returns cached output.
         Failures are recorded in the raw file but do not raise exceptions.
         cwd: working directory for the subprocess (default: inherit current).
+        env: extra environment variables, merged over the inherited environment.
         """
         existing = next(self._ws.raw_dir.glob(f"*_{label}.txt"), None)
         if existing:
@@ -48,15 +50,24 @@ class Runner:
         cmd_str = shlex.join(cmd)
         _log.debug("RUN [%s]: %s", label, cmd_str)
 
+        run_env = {**os.environ, **env} if env else None
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd
+                cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd,
+                env=run_env,
             )
             output = result.stdout
             if result.stderr.strip():
                 output += f"\n[stderr]\n{result.stderr}"
-                stderr_preview = result.stderr.strip().splitlines()[0][:200]
-                _log.warning("STDERR [%s]: %s", label, stderr_preview)
+                # Only surface stderr as a warning when the tool actually failed
+                # (non-zero exit). Many tools (certipy, bloodhound, dnsrecon,
+                # searchsploit) print banners/INFO to stderr while succeeding —
+                # logging those as warnings makes errors.log look alarming for no
+                # reason. The full stderr is preserved in the raw file regardless.
+                if result.returncode != 0:
+                    stderr_preview = result.stderr.strip().splitlines()[0][:200]
+                    _log.warning("STDERR [%s] (exit %d): %s",
+                                 label, result.returncode, stderr_preview)
         except subprocess.TimeoutExpired as e:
             def _s(b: str | bytes | None) -> str:
                 if b is None:

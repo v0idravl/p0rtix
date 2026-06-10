@@ -22,7 +22,7 @@ from lib.credsmode import (
     _trim,
     _has_signal,
     _error_lines,
-    _sync_time,
+    sync_clock,
     _validate_smb,
     _pth_verify,
     _parse_ldapdomaindump_users,
@@ -72,7 +72,7 @@ def _followup_ad_core(
     findings.h3("AD Core Enumeration")
 
     # 0. Time sync — Kerberos requires clock skew < 5 minutes vs DC
-    _sync_time(ip, runner, findings, available)
+    sync_clock(ip, runner, findings, available)
 
     # 1. ldapdomaindump → user_dir/ldapdomaindump/
     if "ldapdomaindump" in available:

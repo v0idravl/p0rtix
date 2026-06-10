@@ -187,13 +187,12 @@ def _kerberos(ip, service, runner, findings, available):
     port = service.port
     domain = service.hostname  # set by orchestrator from --domain
 
-    # Sync clock immediately — Kerberos attacks fail with > 5 min skew
+    # Sync clock immediately — Kerberos attacks fail with > 5 min skew. Shared
+    # helper measures the offset non-destructively and only steps the clock when
+    # it's both needed and possible (root/sudo), reporting accurately otherwise.
     if "ntpdate" in available:
-        subprocess.run(["timedatectl", "set-ntp", "false"], capture_output=True)
-        out_ntp = runner.run(["ntpdate", "-u", ip], "time_sync_ntpdate", timeout=30)
-        first = next((l for l in out_ntp.splitlines() if l.strip()), "")
-        findings.note(f"NTP sync to DC: {first.strip()}" if first else "NTP sync attempted")
-        print(f"    [*] Kerberos port detected — time synced to {ip}")
+        from lib.credsmode import sync_clock
+        sync_clock(ip, runner, findings, available)
 
     if not domain:
         findings.note(
@@ -659,6 +658,10 @@ def _ldap(ip, service, runner, findings, available):
     gc_mode = port in (3268, 3269)
     proto = "ldaps" if port in (636, 3269) else "ldap"
     uri = f"{proto}://{ip}:{port}"
+    # LDAPS against a DC almost always presents a self-signed / internal-CA cert;
+    # without relaxing verification ldapsearch aborts with "Can't contact LDAP
+    # server" before any query runs. Only needed for the ldaps:// ports.
+    ldap_env = {"LDAPTLS_REQCERT": "never"} if proto == "ldaps" else None
 
     if gc_mode:
         findings.note("Global Catalog port — enumerating forest-wide AD objects")
@@ -669,7 +672,7 @@ def _ldap(ip, service, runner, findings, available):
 
     # 1. Base DN discovery
     cmd_base = ["ldapsearch", "-x", "-H", uri, "-b", "", "-s", "base"]
-    out_base = runner.run(cmd_base, f"ldap_{port}_base")
+    out_base = runner.run(cmd_base, f"ldap_{port}_base", env=ldap_env)
     findings.cmd(" ".join(cmd_base))
 
     # Detect hard connection failure (not just auth denied) — skip all further queries
@@ -696,7 +699,7 @@ def _ldap(ip, service, runner, findings, available):
 
     def lq(label: str, filt: str, *attrs) -> str:
         cmd = ["ldapsearch", "-x", "-H", uri, "-b", base_dn, filt, *attrs]
-        out = runner.run(cmd, f"ldap_{port}_{label}", timeout=60)
+        out = runner.run(cmd, f"ldap_{port}_{label}", timeout=60, env=ldap_env)
         findings.cmd(" ".join(cmd))
         if not out.strip() or "# numEntries" not in out:
             if "Operations error" in out or "Insufficient access rights" in out or "strongerAuth" in out:
@@ -745,13 +748,16 @@ def _ldap(ip, service, runner, findings, available):
         findings.add_summary(f"AS-REP roastable accounts (LDAP UAC flag): {', '.join(asrep)}")
         findings.note(f"Crack with: `impacket-GetNPUsers {effective_domain}/ -no-pass -dc-ip {ip} -request -format hashcat`")
 
-    # 7. Unconstrained delegation
+    # 7. Unconstrained delegation — exclude DCs (SERVER_TRUST_ACCOUNT=8192);
+    # a DC holding unconstrained delegation is by design, only non-DCs are a find.
     out_uncons = lq("unconstrained_delegation",
-                    "(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=524288))",
+                    "(&(objectClass=computer)"
+                    "(userAccountControl:1.2.840.113556.1.4.803:=524288)"
+                    "(!(userAccountControl:1.2.840.113556.1.4.803:=8192)))",
                     "sAMAccountName", "dNSHostName")
     uncons = re.findall(r"sAMAccountName:\s+(.+)", out_uncons)
     if uncons:
-        findings.bullet(f"**Unconstrained delegation (excluding DC itself):** {', '.join(uncons)}")
+        findings.bullet(f"**Unconstrained delegation (non-DC):** {', '.join(uncons)}")
 
     # 8. Constrained delegation
     out_cons = lq("constrained_delegation", "(msDS-AllowedToDelegateTo=*)",

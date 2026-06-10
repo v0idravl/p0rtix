@@ -25,7 +25,9 @@ TOOLS: dict[str, dict] = {
     # Web
     "whatweb":               {"apt": "whatweb",                         "required": False},
     "gospider":              {"github": {"repo": "jaeles-project/gospider",  "pattern": "gospider_linux_{arch}.tar.gz",  "binary": "gospider"},  "required": False},
-    "testssl.sh":            {"apt": "testssl.sh",                      "required": False},
+    # Debian/Kali ship the testssl.sh package's executable as plain `testssl`;
+    # accept either name so detection + invocation work after an apt install.
+    "testssl.sh":            {"apt": "testssl.sh", "bin": ["testssl", "testssl.sh"], "required": False},
     "wpscan":                {"apt": "wpscan",                          "required": False},
 
     # SMB
@@ -92,10 +94,32 @@ TOOLS: dict[str, dict] = {
 _SEARCH_PATH = os.environ.get("PATH", "") + ":/root/.local/bin:" + str(Path.home() / ".local/bin")
 
 
+def _bin_candidates(tool: str, meta: dict) -> list[str]:
+    """Executable name(s) to look for. Defaults to the tool key; a tool whose
+    installed binary differs (e.g. testssl.sh → `testssl`) declares `bin`."""
+    b = meta.get("bin")
+    if not b:
+        return [tool]
+    return b if isinstance(b, list) else [b]
+
+
 def _is_available(tool: str, meta: dict) -> bool:
     if meta.get("library"):
         return importlib.util.find_spec(tool) is not None
-    return shutil.which(tool, path=_SEARCH_PATH) is not None
+    return any(shutil.which(c, path=_SEARCH_PATH) for c in _bin_candidates(tool, meta))
+
+
+def resolve_bin(tool: str) -> str:
+    """
+    Return the actual executable name for a tool key, resolving aliases (e.g.
+    `testssl.sh` → `testssl` when that's what's on PATH). Callers invoke the
+    returned name instead of hardcoding the tool key. Falls back to the key.
+    """
+    meta = TOOLS.get(tool, {})
+    for c in _bin_candidates(tool, meta):
+        if shutil.which(c, path=_SEARCH_PATH):
+            return c
+    return tool
 
 
 def check_deps(install_missing: bool = True) -> set[str]:
@@ -172,6 +196,12 @@ def _github_install(tool: str, repo: str, pattern: str, binary: str):
     """Download a pre-built binary from the latest GitHub release."""
     machine = platform.machine().lower()
     arch = {"x86_64": "amd64", "aarch64": "arm64"}.get(machine, machine)
+    # Projects name their 64-bit Linux assets inconsistently (amd64 vs x86_64,
+    # arm64 vs aarch64). Match on any alias for our arch.
+    arch_aliases = {
+        "amd64": ("amd64", "x86_64", "x64"),
+        "arm64": ("arm64", "aarch64"),
+    }.get(arch, (arch,))
     filename = pattern.format(arch=arch)
     dest = Path(f"/usr/local/bin/{tool}")
 
@@ -182,17 +212,18 @@ def _github_install(tool: str, repo: str, pattern: str, binary: str):
         with urllib.request.urlopen(req, timeout=15) as resp:
             release = json.loads(resp.read())
 
-        asset = next(
-            (a for a in release.get("assets", []) if a["name"] == filename),
-            None,
-        )
+        assets = release.get("assets", [])
+        asset = next((a for a in assets if a["name"] == filename), None)
         if asset is None:
-            # Try case-insensitive / partial match
-            asset = next(
-                (a for a in release.get("assets", [])
-                 if arch in a["name"].lower() and "linux" in a["name"].lower()),
-                None,
-            )
+            # Alias-aware fallback: a Linux asset for our arch, excluding other
+            # OSes and 32-bit builds (i386 / bare "arm").
+            _other_os = ("darwin", "macos", "windows", "freebsd", "openbsd", ".exe")
+            def _matches(name: str) -> bool:
+                n = name.lower()
+                if "linux" not in n or any(o in n for o in _other_os):
+                    return False
+                return any(a in n for a in arch_aliases)
+            asset = next((a for a in assets if _matches(a["name"])), None)
         if asset is None:
             print(f"    [!] No matching release asset for {filename} in {repo}")
             return
@@ -221,10 +252,17 @@ def _github_install(tool: str, repo: str, pattern: str, binary: str):
             tmp.unlink()
             tmp = extracted
 
-        dest.write_bytes(tmp.read_bytes())
+        # /usr/local/bin needs root; p0rtix runs unprivileged (nmap caps), so
+        # fall back to ~/.local/bin (already on the detection search path).
+        try:
+            dest.write_bytes(tmp.read_bytes())
+        except PermissionError:
+            dest = Path.home() / ".local/bin" / tool
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(tmp.read_bytes())
         dest.chmod(0o755)
         tmp.unlink(missing_ok=True)
-        print(f"    [+] Installed {tool}")
+        print(f"    [+] Installed {tool} → {dest}")
 
     except Exception as exc:
         print(f"    [!] GitHub install failed for {tool}: {exc}")
