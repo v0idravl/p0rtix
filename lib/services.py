@@ -1173,22 +1173,16 @@ def _vnc(ip, service, runner, findings, available):
 def _winrm(ip, service, runner, findings, available):
     port = service.port
 
-    # NTLM realm probe — can reveal domain name even without credentials
+    # NTLM realm probe — reveals domain / computer / OS even without credentials.
+    # A null `nxc winrm -u '' -p ''` login is deliberately NOT attempted: WinRM
+    # permits no anonymous auth, so it only ever returns a SpnegoError while the
+    # host banner it would print is already covered here (and by SMB null / LDAP).
     cmd_ntlm = ["nmap", "--script", "http-ntlm-info", "-p", str(port), ip]
     out_ntlm = runner.run(cmd_ntlm, f"winrm_{port}_ntlm_info")
     findings.cmd(" ".join(cmd_ntlm))
     if any(kw in out_ntlm for kw in ("NetBIOS", "DNS_Domain", "DNS_Computer")):
         findings.code_block(_trim(out_ntlm))
 
-    if "nxc" not in available:
-        findings.note("`nxc` not available — skipping WinRM null check")
-        findings.note(f"With creds: `evil-winrm -i {ip} -u USER -p PASS`")
-        return []
-
-    cmd = ["nxc", "winrm", ip, "-u", "", "-p", ""]
-    out = runner.run(cmd, f"winrm_{port}_nxc")
-    findings.cmd(" ".join(cmd))
-    findings.code_block(_trim(out))
     findings.note(f"With creds: `evil-winrm -i {ip} -u USER -p PASS`")
     return []
 
