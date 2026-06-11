@@ -48,7 +48,7 @@ def test_runner_uses_argument_list_and_records_quoted_command(monkeypatch, tmp_p
 
     assert output == "ok\n"
     assert calls == [
-        (["printf", "hello; rm -rf /"], {"capture_output": True, "text": True, "timeout": 300, "cwd": None})
+        (["printf", "hello; rm -rf /"], {"capture_output": True, "text": True, "timeout": 300, "cwd": None, "env": None})
     ]
 
     raw_files = list(ws.raw_dir.glob("*_safe_command.txt"))

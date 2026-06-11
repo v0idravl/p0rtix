@@ -89,6 +89,10 @@ TOOLS: dict[str, dict] = {
     "openssl":               {"apt": "openssl",                         "required": False},
     "git-dumper":            {"pip": "git-dumper",                      "required": False},
     "anthropic":             {"pip": "anthropic", "library": True,       "required": False},
+
+    # Engine console (--mode console)
+    "textual":               {"pip": "textual", "library": True,         "required": False},
+    "script":                {"apt": "util-linux",                       "required": False},
 }
 
 

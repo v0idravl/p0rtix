@@ -99,6 +99,71 @@ def run_port_discovery(ip: str, runner: Runner, ws: Workspace, findings: Finding
     return {"tcp": sorted(tcp_ports), "udp": sorted(udp_ports)}
 
 
+# ── Engine: on-demand carve-outs ──────────────────────────────────────────────
+# The engine drives discovery a step at a time: a quiet open-only sweep first
+# (green), then version detection only when the operator asks for it (per port).
+# These reuse the same nmap invocations / parsers as the legacy phase functions
+# above, just split so version detection is no longer automatic.
+
+def discover_tcp_open(ip: str, runner: Runner, ws: Workspace) -> list[int]:
+    """Open-only full TCP SYN sweep — NO version detection. Returns open ports.
+
+    The quiet green discovery floor: what is listening, nothing more."""
+    tcp_prefix = str(ws.raw_dir / "01_full_tcp")
+    runner.run_live(
+        [
+            "nmap", "-n", "--reason", "-sS", "-Pn", "-p-", "--open",
+            "--min-rate", "2000", "--max-retries", "2", "--stats-every", "60s",
+            "-oA", tcp_prefix, ip,
+        ],
+        label="01_full_tcp",
+    )
+    return _parse_xml_ports(Path(tcp_prefix + ".xml"), "tcp", include_filtered=False)
+
+
+def discover_udp(ip: str, runner: Runner, ws: Workspace) -> list[int]:
+    """Top-100 UDP sweep with a confirmation pass. Returns confirmed-open ports."""
+    udp_prefix = str(ws.raw_dir / "02_udp_top100")
+    runner.run_live(
+        [
+            "nmap", "-n", "-sU", "-T3", "-Pn", "--top-ports", "100",
+            "--stats-every", "60s", "-oA", udp_prefix, ip,
+        ],
+        label="02_udp_top100",
+    )
+    candidates = _parse_xml_ports(Path(udp_prefix + ".xml"), "udp", include_filtered=True)
+    if not candidates:
+        return []
+    confirm_prefix = str(ws.raw_dir / "03_udp_confirmed")
+    runner.run_live(
+        [
+            "nmap", "-n", "-sU", "-sV", "--version-intensity", "0", "-Pn",
+            "-p", ",".join(str(p) for p in sorted(candidates)),
+            "--stats-every", "60s", "-oA", confirm_prefix, ip,
+        ],
+        label="03_udp_confirmed",
+    )
+    return _parse_xml_ports(Path(confirm_prefix + ".xml"), "udp", include_filtered=False)
+
+
+def version_detect(ip: str, ports: list[int], runner: Runner, ws: Workspace) -> list[Service]:
+    """On-demand `-sV` version detection on the given TCP ports. Returns Service
+    objects. Carved out of the legacy service-scan phase so the engine can run it
+    per port only when the operator wants it, instead of automatically."""
+    if not ports:
+        return []
+    svc_prefix = str(ws.raw_dir / "04_tcp_services")
+    runner.run_live(
+        [
+            "nmap", "-n", "-sS", "-sV", "--version-light", "-Pn",
+            "-p", ",".join(str(p) for p in sorted(ports)),
+            "--stats-every", "60s", "-oA", svc_prefix, ip,
+        ],
+        label="04_tcp_services",
+    )
+    return _parse_xml_services(Path(svc_prefix + ".xml"), "tcp")
+
+
 # ── Service scan phase ────────────────────────────────────────────────────────
 
 def run_service_scan(

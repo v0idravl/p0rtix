@@ -91,7 +91,12 @@ def parse_args() -> argparse.Namespace:
                    help="zip the workspace directory at end of scan")
     p.add_argument("--mode", default="scan",
                    help="init = create workspace skeleton only; scan = full recon (default); "
-                        "creds = credentialed AD enum; scan,creds = both in one run")
+                        "creds = credentialed AD enum; scan,creds = both in one run; "
+                        "console = interactive operator console (engine v2)")
+    p.add_argument("--level", type=int, default=0, metavar="0-9",
+                   help="console automation dial: 0 = manual/quiet (default), rising "
+                        "levels auto-run up the noise ladder, 9 = run everything "
+                        "(warnings/countdowns suppressed). Only used with --mode console")
     p.add_argument("-u", "--username", metavar="USER",
                    help="Single username for --mode creds")
     p.add_argument("-p", "--password", metavar="PASS",
@@ -555,13 +560,30 @@ def main():
     args = parse_args()
     ui.set_debug(args.debug)
 
-    _VALID_MODES = {"init", "scan", "creds", "scan,creds", "followup"}
+    _VALID_MODES = {"init", "scan", "creds", "scan,creds", "followup", "console"}
     if args.mode not in _VALID_MODES:
-        sys.exit(f"[!] Invalid --mode '{args.mode}'. Choose: init | scan | creds | scan,creds | followup")
+        sys.exit(f"[!] Invalid --mode '{args.mode}'. Choose: init | scan | creds | scan,creds | followup | console")
+
+    if not (0 <= args.level <= 9):
+        sys.exit("[!] --level must be between 0 and 9")
 
     # init: stage the workspace skeleton only — no root, no deps, no scan.
     if args.mode == "init":
         _run_init(args)
+        return
+
+    # console: interactive operator console (engine v2). Opens at PASSIVE (zero
+    # packets), so it launches without root; SYN discovery will warn/fail until
+    # privileges are granted, surfaced when that action runs.
+    if args.mode == "console":
+        if not args.ip:
+            sys.exit("[!] --mode console requires a target IP")
+        if not _has_scan_privs():
+            ui.warn("Not root — TCP/UDP discovery (SYN scan) will fail until you "
+                    "run with sudo or grant nmap caps (tools/setup-privs.sh).")
+        available = check_deps(install_missing=not args.no_install)
+        from lib.engine.runmode import run_console_mode
+        run_console_mode(args.ip, args.domain, args.name, args, available)
         return
 
     if not _has_scan_privs():

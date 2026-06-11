@@ -5,6 +5,8 @@ output/
 CLAUDE.md
 __pycache__/
 samples/
+.venv/
+.pytest_cache/
 # Claude Code local/runtime state
 .claude/scheduled_tasks.lock
 .claude/settings.local.json
