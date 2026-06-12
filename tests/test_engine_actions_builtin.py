@@ -46,7 +46,7 @@ def test_registry_has_phase1_actions(tmp_path):
 
 
 def test_discovery_adds_open_ports_as_facts(tmp_path, monkeypatch):
-    monkeypatch.setattr(nmap, "discover_tcp_open", lambda ip, r, ws: [22, 445])
+    monkeypatch.setattr(nmap, "discover_tcp_open", lambda ip, r, ws, exclude=None: [22, 445])
     fs, posture, reg, sched = _setup(tmp_path, Tier.GREEN)
 
     sched.run_action("discovery.tcp_ports")
@@ -54,7 +54,7 @@ def test_discovery_adds_open_ports_as_facts(tmp_path, monkeypatch):
 
 
 def test_version_detect_is_per_port_and_gated(tmp_path, monkeypatch):
-    monkeypatch.setattr(nmap, "discover_tcp_open", lambda ip, r, ws: [22, 445])
+    monkeypatch.setattr(nmap, "discover_tcp_open", lambda ip, r, ws, exclude=None: [22, 445])
     monkeypatch.setattr(
         nmap, "version_detect",
         lambda ip, ports, r, ws: [Service(ports[0], "tcp", "svc", "1.0", False, "")],
@@ -92,7 +92,7 @@ def test_smb_anon_gated_on_445_and_pushes_facts(tmp_path, monkeypatch):
 
 def test_run_all_cascade_discovery_to_enumeration(tmp_path, monkeypatch):
     from lib.engine.action import Tier
-    monkeypatch.setattr(nmap, "discover_tcp_open", lambda ip, r, ws: [445])
+    monkeypatch.setattr(nmap, "discover_tcp_open", lambda ip, r, ws, exclude=None: [445])
     monkeypatch.setattr(nmap, "version_detect",
                         lambda ip, ports, r, ws: [])
 
@@ -254,3 +254,50 @@ def test_asrep_roast_no_roastable_marks_kerberos_exhausted(tmp_path):
     sched.run_action("kerberos.asrep_roast")
     assert not fs.has("hash")
     assert fs.proto_status("kerberos") is ProtoStatus.EXHAUSTED
+
+
+# ── Slice 4: tiered discovery, dedup, per-port version detect ─────────────────
+def test_version_detect_dedups_sibling_ports(tmp_path):
+    from lib.engine.action import Tier
+    fs, posture, reg, sched = _setup(tmp_path, Tier.GREEN, tools=_ALL_TOOLS)
+    for p in (139, 445, 389, 3268, 636, 22):
+        fs.add_open_port("tcp", p)
+    vd_ports = sorted(args["port"]
+                      for a, args in reg.available(fs, posture, sched.tried)
+                      if a.name == "svc.version_detect")
+    # 139 collapses into 445; 3268/636 collapse into 389; 22 stands alone
+    assert vd_ports == [22, 389, 445]
+
+
+def test_full_sweep_excludes_quick_scanned_ports(tmp_path, monkeypatch):
+    from lib.engine.action import Tier
+    from lib import nmap
+    seen = {}
+    monkeypatch.setattr(nmap, "discover_tcp_quick", lambda ip, r, ws: [445])
+
+    def fake_full(ip, r, ws, exclude=None):
+        seen["exclude"] = set(exclude or set())
+        return [9999]
+    monkeypatch.setattr(nmap, "discover_tcp_open", fake_full)
+
+    fs, posture, reg, sched = _setup(tmp_path, Tier.GREEN, tools=_ALL_TOOLS)
+    sched.run_action("discovery.tcp_quick")          # records the curated ports
+    sched.run_action("discovery.tcp_ports")          # full sweep
+    # the full sweep was told to skip the quick tier's ports
+    assert 445 in seen["exclude"] and 22 in seen["exclude"]
+
+
+def test_run_single_version_detect_instance(tmp_path, monkeypatch):
+    from lib.engine.action import Tier
+    from lib import nmap
+    from lib.models import Service
+    monkeypatch.setattr(nmap, "version_detect",
+                        lambda ip, ports, r, ws: [Service(ports[0], "tcp", "x", "", False, "")])
+    fs, posture, reg, sched = _setup(tmp_path, Tier.GREEN, tools=_ALL_TOOLS)
+    fs.add_open_port("tcp", 22)
+    fs.add_open_port("tcp", 445)
+
+    n = sched.run_action("svc.version_detect", port=445)
+    assert n == 1
+    assert instance_key("svc.version_detect", {"port": 445}) in sched.tried
+    assert instance_key("svc.version_detect", {"port": 22}) not in sched.tried

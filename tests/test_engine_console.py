@@ -65,7 +65,7 @@ def test_dial_zero_is_fully_manual(tmp_path):
 
 
 def test_dial_drives_green_autorun(tmp_path, monkeypatch):
-    monkeypatch.setattr(nmap, "discover_tcp_open", lambda ip, r, ws: [445])
+    monkeypatch.setattr(nmap, "discover_tcp_open", lambda ip, r, ws, exclude=None: [445])
     monkeypatch.setattr(nmap, "discover_udp", lambda ip, r, ws: [])
     monkeypatch.setattr(nmap, "version_detect", lambda ip, ports, r, ws: [])
     monkeypatch.setattr(services, "_smb_run_null_session",

@@ -125,7 +125,7 @@ def test_input_sits_above_footer_no_overlap(tmp_path):
 
 def test_selecting_runnable_action_dispatches(tmp_path, monkeypatch):
     from lib import nmap
-    monkeypatch.setattr(nmap, "discover_tcp_open", lambda ip, r, ws: [445])
+    monkeypatch.setattr(nmap, "discover_tcp_open", lambda ip, r, ws, exclude=None: [445])
     fs, posture, reg, sched, router = _wire(tmp_path)
     app = _build_dashboard(router, sched, reg, fs, posture)
 

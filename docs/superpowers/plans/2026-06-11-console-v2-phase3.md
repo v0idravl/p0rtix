@@ -136,11 +136,15 @@ duplicate per-port sections. Dedup happens when ports/services become facts.
       drops the group's tried-state; `recheck <proto>` command + help.
 - [x] Tests: status-suppressed dormancy + re-arm, scheduler.recheck. 98 pass.
 
-### Slice 4 — tiered incremental discovery + dedup
-- [ ] `scanned_ports` fact; `discovery.tcp_top100/top1000/full` scanning the delta.
-- [ ] Port dedup in the planner (sibling-port supersession).
-- [ ] `svc.version_detect` single-port run in the UI.
-- [ ] Tests: delta-only scanning, dedup, single-port version detect.
+### Slice 4 — tiered incremental discovery + dedup ✅
+- [x] `scanned_tcp` coverage fact; `discovery.tcp_quick` (curated ~60 AD ports,
+      quiet) + `discovery.tcp_ports` (full, `--exclude-ports` the already-swept).
+- [x] Planner port dedup (`_dedup_tcp`): 445⊃139, 389⊃3268/636/3269 — collapses
+      `svc.version_detect` fan-out so no useless sibling sections.
+- [x] `run <action> <port>` → `scheduler.run_action(name, port=…)`; dashboard
+      run-path parses the port. State pane shows swept-port count.
+- [x] Tests: dedup, full-excludes-quick, single-port run. Live on Forest: quick
+      got 18 AD ports, full completed to 24 excluding the swept set. 101 pass.
 
 ### Slice 5 — hash crack-state model
 - [ ] Per-hash `(kind, cracked, plaintext)` in facts; crack action updates it.

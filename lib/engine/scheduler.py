@@ -152,17 +152,22 @@ class Scheduler:
                 dispatched += 1
         return dispatched
 
-    def run_action(self, name: str, posture: Posture | None = None) -> int:
-        """Dispatch all currently-available instances of one named action."""
+    def run_action(self, name: str, posture: Posture | None = None,
+                   *, port: int | None = None) -> int:
+        """Dispatch available instances of one named action. With `port`, dispatch
+        only the instance for that port (e.g. version-detect a single service)."""
         posture = posture or self._posture
         action = self._registry.get(name)
         if action is None:
             return 0
         n = 0
         for a, args in self._registry.available(self._facts, posture, self._tried, self._tools):
-            if a.name == name:
-                self.dispatch(a, args)
-                n += 1
+            if a.name != name:
+                continue
+            if port is not None and args.get("port") != port:
+                continue
+            self.dispatch(a, args)
+            n += 1
         return n
 
     # ── overrides / introspection ─────────────────────────────────────────────

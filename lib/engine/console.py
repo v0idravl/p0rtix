@@ -120,6 +120,8 @@ def _state_markup(facts, posture, scheduler) -> str:
     ports = f"[b]{len(s['open_ports'])}[/] known"
     if s["open_ports"]:
         ports += f"  [dim]({n_tcp} tcp" + (f" · {n_udp} udp" if n_udp else "") + ")[/]"
+    if s.get("scanned_tcp"):
+        ports += f"  [dim]· {s['scanned_tcp']} swept[/]"
     lockout = s["lockout"] if s["lockout"] != -1 else "?"
     rows = [
         f"[b]TARGET[/]   {s['ip']}",
@@ -334,13 +336,14 @@ def _build_dashboard(router, scheduler, registry, facts, posture):
                           + registry.why(item.action_name, facts, posture,
                                          scheduler.tried))
 
-        def _run_action(self, name) -> None:
-            self._log(f"[b]› running [cyan]{name}[/]…[/]")
-            self.run_worker(lambda: self._dispatch(name), thread=True,
+        def _run_action(self, name, port=None) -> None:
+            where = f" port {port}" if port is not None else ""
+            self._log(f"[b]› running [cyan]{name}[/]{where}…[/]")
+            self.run_worker(lambda: self._dispatch(name, port), thread=True,
                             group="actions", exit_on_error=False)
 
-        def _dispatch(self, name) -> None:          # worker thread
-            n = scheduler.run_action(name)
+        def _dispatch(self, name, port=None) -> None:          # worker thread
+            n = scheduler.run_action(name, port=port)
             if not n:
                 why = registry.why(name, facts, posture, scheduler.tried)
                 self.call_from_thread(self._log, f"[yellow]{name}: {why}[/]")
@@ -361,7 +364,10 @@ def _build_dashboard(router, scheduler, registry, facts, posture):
             if low in ("run-all", "auto"):
                 self.action_run_all()
             elif low.startswith("run "):
-                self._run_action(line.split(None, 1)[1].strip())
+                parts = line.split()
+                name = parts[1]
+                port = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+                self._run_action(name, port)
             else:
                 out = router.dispatch(line)
                 if out:

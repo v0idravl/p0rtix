@@ -127,13 +127,16 @@ class CommandRouter:
     # ── execution ─────────────────────────────────────────────────────────────
     def _cmd_run(self, args) -> str:
         if not args:
-            return "usage: run <action>"
+            return "usage: run <action> [port]"
         name = args[0]
         if self._reg.get(name) is None:
             return f"no such action: {name}"
-        n = self._sched.run_action(name)
-        return f"dispatched {n} instance(s) of {name}" if n else self._reg.why(
-            name, self._facts, self._posture, self._sched.tried)
+        port = int(args[1]) if len(args) > 1 and args[1].isdigit() else None
+        n = self._sched.run_action(name, port=port)
+        if n:
+            where = f" on port {port}" if port is not None else ""
+            return f"dispatched {n} instance(s) of {name}{where}"
+        return self._reg.why(name, self._facts, self._posture, self._sched.tried)
 
     def _cmd_run_all(self, args) -> str:
         n = self._sched.run_all_at_or_below(self._posture)

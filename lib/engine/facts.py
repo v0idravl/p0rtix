@@ -52,6 +52,7 @@ class FactStore(Workspace):
         self._listener_lock = threading.Lock()
         self._proto_status: dict[str, ProtoStatus] = {}
         self._open_ports: set[tuple[str, int]] = set()   # (proto, port)
+        self._scanned_tcp: set[int] = set()              # TCP ports already swept (coverage)
         self._services: list[Service] = []
         self._admin_creds: set[tuple[str, str]] = set()
         self._cred_pairs: set[tuple[str, str]] = set()   # unverified (user, pass) pairs
@@ -141,6 +142,20 @@ class FactStore(Workspace):
             self._open_ports.add(key)
         if is_new:
             self._emit(FactEvent("port_open", key))
+
+    def add_scanned_tcp(self, ports) -> None:
+        """Record TCP ports that have been *swept* (open or not), so a broader
+        tier scans only the delta. Emits 'scanned' when coverage grows."""
+        new = {int(p) for p in ports}
+        with self._engine_lock:
+            grew = not new <= self._scanned_tcp
+            self._scanned_tcp |= new
+        if grew:
+            self._emit(FactEvent("scanned", ("tcp", sorted(new))))
+
+    def scanned_tcp(self) -> set[int]:
+        with self._engine_lock:
+            return set(self._scanned_tcp)
 
     def set_services(self, services: list[Service]) -> None:
         with self._engine_lock:
@@ -257,6 +272,7 @@ class FactStore(Workspace):
             admin = len(self._admin_creds)
             cred_pairs = sorted(self._cred_pairs)
             hashes = sorted(self._hashes)
+            scanned_tcp = len(self._scanned_tcp)
         return {
             "ip": self.ip,
             "domain": self.discovered_domain or self.domain or "",
@@ -271,6 +287,7 @@ class FactStore(Workspace):
             "proto_status": proto_status,
             "hashes": hashes,
             "cred_pairs": cred_pairs,
+            "scanned_tcp": scanned_tcp,
         }
 
     # ── reload from disk (pick up external edits to loot/*.txt) ────────────────

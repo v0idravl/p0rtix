@@ -34,7 +34,8 @@ def _args(tmp_path, **over):
 def test_console_mode_runs_in_line_mode(tmp_path, monkeypatch):
     # Force the line-mode path (no textual) and feed scripted input.
     monkeypatch.setattr(console_mod, "_HAS_TEXTUAL", False)
-    monkeypatch.setattr(nmap, "discover_tcp_open", lambda ip, r, ws: [445])
+    monkeypatch.setattr(nmap, "discover_tcp_quick", lambda ip, r, ws: [445])
+    monkeypatch.setattr(nmap, "discover_tcp_open", lambda ip, r, ws, exclude=None: [445])
     monkeypatch.setattr(nmap, "discover_udp", lambda ip, r, ws: [])
     monkeypatch.setattr(nmap, "version_detect", lambda ip, ports, r, ws: [])
 
@@ -55,12 +56,13 @@ def test_console_mode_runs_in_line_mode(tmp_path, monkeypatch):
 
     assert pushed.get("ran") is True
     findings = (tmp_path / "cli-console" / "findings.md").read_text()
-    assert "Open TCP ports: 445" in findings
+    assert "445" in findings
 
 
 def test_console_mode_dial9_autoruns_without_input(tmp_path, monkeypatch):
     monkeypatch.setattr(console_mod, "_HAS_TEXTUAL", False)
-    monkeypatch.setattr(nmap, "discover_tcp_open", lambda ip, r, ws: [445])
+    monkeypatch.setattr(nmap, "discover_tcp_quick", lambda ip, r, ws: [445])
+    monkeypatch.setattr(nmap, "discover_tcp_open", lambda ip, r, ws, exclude=None: [445])
     monkeypatch.setattr(nmap, "discover_udp", lambda ip, r, ws: [])
     monkeypatch.setattr(nmap, "version_detect", lambda ip, ports, r, ws: [])
     monkeypatch.setattr(services, "_smb_run_null_session",
@@ -73,4 +75,4 @@ def test_console_mode_dial9_autoruns_without_input(tmp_path, monkeypatch):
                      available={"nmap", "nxc", "ldapsearch"})
 
     findings = (tmp_path / "dial9" / "findings.md").read_text()
-    assert "Open TCP ports: 445" in findings
+    assert "445" in findings

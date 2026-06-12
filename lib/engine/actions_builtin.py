@@ -39,12 +39,25 @@ def _h_parse_prior(ctx) -> ActionResult:
 
 
 # ── green: discovery ──────────────────────────────────────────────────────────
-def _h_tcp_ports(ctx) -> ActionResult:
-    ports = nmap.discover_tcp_open(ctx.ip, ctx.runner, ctx.runner.ws)
+def _h_tcp_quick(ctx) -> ActionResult:
+    ports = nmap.discover_tcp_quick(ctx.ip, ctx.runner, ctx.runner.ws)
+    ctx.facts.add_scanned_tcp(nmap.QUICK_TCP_PORTS)     # remember coverage
     for p in ports:
         ctx.facts.add_open_port("tcp", p)
-    ctx.findings.bullet(f"Open TCP ports: {', '.join(map(str, ports)) or 'none'}")
-    return ActionResult(ok=True, summary=f"{len(ports)} open TCP port(s)")
+    ctx.findings.bullet(f"Open TCP ports (quick): {', '.join(map(str, ports)) or 'none'}")
+    return ActionResult(ok=True, summary=f"{len(ports)} open TCP port(s) [quick]")
+
+
+def _h_tcp_ports(ctx) -> ActionResult:
+    # Skip ports an earlier tier already swept — coverage is remembered.
+    exclude = ctx.facts.scanned_tcp()
+    ports = nmap.discover_tcp_open(ctx.ip, ctx.runner, ctx.runner.ws, exclude=exclude)
+    ctx.facts.add_scanned_tcp(range(1, 65536))
+    for p in ports:
+        ctx.facts.add_open_port("tcp", p)
+    extra = f" (excluded {len(exclude)} already-swept)" if exclude else ""
+    ctx.findings.bullet(f"Open TCP ports (full{extra}): {', '.join(map(str, ports)) or 'none'}")
+    return ActionResult(ok=True, summary=f"{len(ports)} open TCP port(s) [full]")
 
 
 def _h_udp_ports(ctx) -> ActionResult:
@@ -55,8 +68,23 @@ def _h_udp_ports(ctx) -> ActionResult:
     return ActionResult(ok=True, summary=f"{len(ports)} open UDP port(s)")
 
 
+def _dedup_tcp(ports: set[int]) -> set[int]:
+    """Collapse sibling ports that share a service so we don't spawn a useless
+    second section: 445 supersedes 139; plaintext LDAP 389 supersedes its
+    LDAPS/GC siblings (3268/636/3269); else 636 supersedes GC-LDAPS 3269."""
+    drop: set[int] = set()
+    if 445 in ports and 139 in ports:
+        drop.add(139)
+    if 389 in ports:
+        drop |= {p for p in (3268, 636, 3269) if p in ports}
+    elif 636 in ports and 3269 in ports:
+        drop.add(3269)
+    return ports - drop
+
+
 def _open_tcp_ports(facts: FactStore) -> list[dict]:
-    return [{"port": p} for (proto, p) in facts.snapshot()["open_ports"] if proto == "tcp"]
+    tcp = {p for (proto, p) in facts.snapshot()["open_ports"] if proto == "tcp"}
+    return [{"port": p} for p in sorted(_dedup_tcp(tcp))]
 
 
 def _h_version_detect(ctx) -> ActionResult:
@@ -281,10 +309,19 @@ def build_registry() -> ActionRegistry:
     ))
 
     reg.register(Action(
-        "discovery.tcp_ports", Tier.GREEN, _h_tcp_ports,
+        "discovery.tcp_quick", Tier.GREEN, _h_tcp_quick,
         group="discovery", order=1,
         footprint=Footprint(
-            summary="full TCP SYN sweep",
+            summary="quiet curated-port SYN sweep (~60 AD-relevant ports)",
+            network="small SYN sweep — lower IDS footprint than -p-",
+        ),
+        deps=("nmap",),
+    ))
+    reg.register(Action(
+        "discovery.tcp_ports", Tier.GREEN, _h_tcp_ports,
+        group="discovery", order=2,
+        footprint=Footprint(
+            summary="full TCP SYN sweep (skips ports an earlier tier already swept)",
             network="SYN sweep — firewall connection logs / IDS port-scan signature",
         ),
         deps=("nmap",),
