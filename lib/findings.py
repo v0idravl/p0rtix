@@ -46,6 +46,7 @@ class FindingsSink:
         for item in buf.drain_summary():
             self.add_summary(item)
 
+    def h2(self, title: str):    self._write(f"\n## {title}\n")
     def h3(self, title: str):    self._write(f"\n### {title}\n")
     def h4(self, title: str):    self._write(f"\n#### {title}\n")
     def cmd(self, command: str): self._write(f"\n> `{command}`\n")

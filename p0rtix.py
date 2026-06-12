@@ -97,6 +97,10 @@ def parse_args() -> argparse.Namespace:
                    help="console automation dial: 0 = manual/quiet (default), rising "
                         "levels auto-run up the noise ladder, 9 = run everything "
                         "(warnings/countdowns suppressed). Only used with --mode console")
+    p.add_argument("--headless", "--no-tui", dest="headless", action="store_true",
+                   help="console: force the line-mode REPL instead of the Textual "
+                        "dashboard (also auto-selected when stdin is not a TTY, so "
+                        "piped command scripts just work). Only used with --mode console")
     p.add_argument("-u", "--username", metavar="USER",
                    help="Single username for --mode creds")
     p.add_argument("-p", "--password", metavar="PASS",

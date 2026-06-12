@@ -17,6 +17,7 @@ drive).
 from __future__ import annotations
 
 import importlib.util
+import sys
 
 from lib.engine.action import Tier
 from lib.engine.commands import CommandRouter
@@ -68,20 +69,28 @@ class LineConsole:
                 writer(out)
 
 
-def run_console(scheduler, registry, facts, posture, *, banner=None) -> None:
+def run_console(scheduler, registry, facts, posture, *, banner=None,
+                headless=False) -> None:
     """Entry point. Applies the dial autorun, then launches the dashboard
-    (Textual) or the line-mode fallback."""
+    (Textual) or the line-mode fallback.
+
+    Line-mode is chosen when Textual is absent, when ``headless`` is set, or when
+    stdin is not a TTY — the last case lets a piped command script drive the
+    engine non-interactively (`printf 'run-all\\nexit\\n' | … --mode console`)."""
     router = CommandRouter(scheduler, registry, facts, posture)
     apply_dial_autorun(scheduler, posture)
 
-    if _HAS_TEXTUAL:
+    line_mode = headless or not _HAS_TEXTUAL or not sys.stdin.isatty()
+    if not line_mode:
         _run_textual(router, scheduler, registry, facts, posture)
-    else:
+        return
+
+    if not _HAS_TEXTUAL:
         print("[*] textual not installed — using line mode "
               "(`pip install textual` for the dashboard). Type 'help'.")
-        if banner:
-            print(banner)
-        LineConsole(router).run()
+    if banner:
+        print(banner)
+    LineConsole(router).run()
 
 
 # ── Textual dashboard (only touched when textual is importable) ───────────────

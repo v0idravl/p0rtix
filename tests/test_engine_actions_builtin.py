@@ -12,18 +12,27 @@ from lib.models import Service
 
 
 class _FakeRunner:
-    def __init__(self, ws):
+    def __init__(self, ws, output=""):
         self.ws = ws
+        self.output = output           # canned stdout for run()
+
+    def run(self, cmd, label, timeout=None):
+        return self.output
 
 
-def _setup(tmp_path, level):
+_ALL_TOOLS = {"nmap", "nxc", "ldapsearch", "impacket-lookupsid",
+              "impacket-GetNPUsers", "hashcat"}
+
+
+def _setup(tmp_path, level, *, output="", tools=None):
     fs = FactStore("192.0.2.10", None, "ab-test", str(tmp_path))
     posture = Posture()
     posture.raise_to(level)
     reg = build_registry()
     sched = Scheduler(
-        reg, fs, posture, ip="192.0.2.10", runner=_FakeRunner(fs),
-        tools={"nmap", "nxc", "ldapsearch", "impacket-lookupsid"},
+        reg, fs, posture, ip="192.0.2.10", runner=_FakeRunner(fs, output),
+        tools=tools if tools is not None else {"nmap", "nxc", "ldapsearch",
+                                               "impacket-lookupsid"},
     )
     return fs, posture, reg, sched
 
@@ -105,3 +114,101 @@ def test_smb_supersedes_enum4linux(tmp_path):
     reg = build_registry()
     smb = reg.get("smb.anon_enum")
     assert "smb.enum4linux" in smb.supersedes
+
+
+# ── AS-REP roast + crack (the Forest foothold chain) ──────────────────────────
+_FAKE_ASREP = (
+    "[*] Getting TGT for svc-alfresco\n"
+    "$krb5asrep$23$svc-alfresco@HTB.LOCAL:abc123$def456\n"
+    "[-] User andy doesn't have UF_DONT_REQUIRE_PREAUTH set\n"
+)
+
+
+def test_asrep_roast_gated_on_domain_and_users(tmp_path):
+    from lib.engine.action import Tier
+    fs, posture, reg, sched = _setup(tmp_path, Tier.YELLOW, tools=_ALL_TOOLS)
+
+    # dormant until BOTH a domain and a user list are known
+    assert "kerberos.asrep_roast" in {a.name for a, _ in reg.dormant(fs)}
+    fs.set_discovered_domain("htb.local")
+    assert "kerberos.asrep_roast" in {a.name for a, _ in reg.dormant(fs)}
+    fs.add_user("svc-alfresco", authoritative=True)
+    assert "kerberos.asrep_roast" in {a.name for a, _ in reg.available(fs, posture, sched.tried)}
+
+
+def test_asrep_roast_captures_hash_and_unlocks_crack(tmp_path):
+    from lib.engine.action import Tier
+    fs, posture, reg, sched = _setup(tmp_path, Tier.YELLOW,
+                                     output=_FAKE_ASREP, tools=_ALL_TOOLS)
+    fs.set_discovered_domain("htb.local")
+    fs.add_user("svc-alfresco", authoritative=True)
+
+    # crack is dormant with no hash yet
+    assert not fs.has("hash")
+    sched.run_action("kerberos.asrep_roast")
+
+    assert fs.has("hash") and fs.has("hash:asrep")
+    saved = (fs.loot_dir / "asrep.hash").read_text()
+    assert "$krb5asrep$" in saved
+    # PASSIVE crack is now available (offline, runs at/below any posture)
+    assert "crack.hashes" in {a.name for a, _ in reg.available(fs, posture, sched.tried)}
+
+
+def test_creds_spray_gated_on_candidate_and_smb(tmp_path):
+    from lib.engine.action import Tier
+    fs, posture, reg, sched = _setup(tmp_path, Tier.YELLOW, tools=_ALL_TOOLS)
+
+    assert "creds.spray" in {a.name for a, _ in reg.dormant(fs)}
+    fs.add_cred("s3rvice")                       # candidate, still no SMB port
+    assert "creds.spray" in {a.name for a, _ in reg.dormant(fs)}
+    fs.add_open_port("tcp", 445)
+    assert "creds.spray" in {a.name for a, _ in reg.available(fs, posture, sched.tried)}
+
+
+def test_creds_spray_promotes_candidate_to_valid(tmp_path, monkeypatch):
+    from lib.engine.action import Tier
+    import p0rtix
+
+    def fake_reuse(ip, runner, findings, ws, services, available):
+        # simulate a confirmed hit from the spray
+        ws.add_valid_cred("svc-alfresco", "s3rvice", "SMB")
+
+    monkeypatch.setattr(p0rtix, "_run_cred_reuse", fake_reuse)
+    fs, posture, reg, sched = _setup(tmp_path, Tier.YELLOW, tools=_ALL_TOOLS)
+    fs.add_cred("s3rvice")
+    fs.add_open_port("tcp", 445)
+
+    sched.run_action("creds.spray")
+    assert fs.has("valid_cred")
+    assert ("svc-alfresco", "s3rvice") in {(u, p) for u, p in fs._known_valid}
+
+
+def test_ad_core_gated_on_valid_cred_and_domain(tmp_path):
+    from lib.engine.action import Tier
+    fs, posture, reg, sched = _setup(tmp_path, Tier.YELLOW, tools=_ALL_TOOLS)
+
+    assert "ad.authenticated_core" in {a.name for a, _ in reg.dormant(fs)}
+    fs.set_discovered_domain("htb.local")
+    fs.add_valid_cred("svc-alfresco", "s3rvice", "SMB")
+    assert "ad.authenticated_core" in {a.name for a, _ in reg.available(fs, posture, sched.tried)}
+
+
+def test_pick_enum_cred_prefers_user_over_machine(tmp_path):
+    from lib.engine.actions_builtin import _pick_enum_cred
+    fs = FactStore("10.0.0.1", None, "pick", str(tmp_path))
+    fs.add_valid_cred("FOREST$", "machinepw", "SMB")
+    fs.add_valid_cred("svc-alfresco", "s3rvice", "SMB")
+    assert _pick_enum_cred(fs) == ("svc-alfresco", "s3rvice")
+
+
+def test_asrep_roast_no_roastable_marks_kerberos_exhausted(tmp_path):
+    from lib.engine.action import Tier
+    from lib.engine.facts import ProtoStatus
+    fs, posture, reg, sched = _setup(tmp_path, Tier.YELLOW,
+                                     output="[-] no preauth accounts\n", tools=_ALL_TOOLS)
+    fs.set_discovered_domain("htb.local")
+    fs.add_user("andy", authoritative=True)
+
+    sched.run_action("kerberos.asrep_roast")
+    assert not fs.has("hash")
+    assert fs.proto_status("kerberos") is ProtoStatus.EXHAUSTED

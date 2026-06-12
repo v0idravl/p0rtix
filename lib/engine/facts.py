@@ -54,6 +54,7 @@ class FactStore(Workspace):
         self._open_ports: set[tuple[str, int]] = set()   # (proto, port)
         self._services: list[Service] = []
         self._admin_creds: set[tuple[str, str]] = set()
+        self._hashes: set[str] = set()                   # kinds: "asrep"|"kerberoast"|"ntlm"
         self._engine_lock = threading.Lock()             # guards the new fields above
 
     # ── event plumbing ────────────────────────────────────────────────────────
@@ -166,6 +167,17 @@ class FactStore(Workspace):
         with self._engine_lock:
             return list(self._services)
 
+    def add_hash(self, kind: str) -> None:
+        """Record that a crackable hash of `kind` (asrep/kerberoast/ntlm) has been
+        captured. Unlocks the offline crack action ("unlock on new fact")."""
+        kind = kind.strip().lower()
+        with self._engine_lock:
+            is_new = bool(kind) and kind not in self._hashes
+            if kind:
+                self._hashes.add(kind)
+        if is_new:
+            self._emit(FactEvent("hash", kind))
+
     def set_proto_status(self, proto: str, status: ProtoStatus) -> None:
         with self._engine_lock:
             changed = self._proto_status.get(proto) is not status
@@ -187,6 +199,8 @@ class FactStore(Workspace):
             return bool(self.discovered_domain)
         if key == "users":
             return bool(self._known_users)
+        if key == "cred":               # a candidate password (cracked/leaked), unvalidated
+            return bool(self._known_creds)
         if key == "valid_cred":
             return bool(self._known_valid)
         if key == "admin_cred":
@@ -194,6 +208,12 @@ class FactStore(Workspace):
                 return bool(self._admin_creds)
         if key == "lockout_known":
             return self.lockout_threshold != -1
+        if key == "hash":
+            with self._engine_lock:
+                return bool(self._hashes)
+        if key.startswith("hash:"):
+            with self._engine_lock:
+                return key.split(":", 1)[1] in self._hashes
         if "/" in key:
             proto, _, port = key.partition("/")
             try:
@@ -208,6 +228,7 @@ class FactStore(Workspace):
             open_ports = sorted(self._open_ports, key=lambda x: (x[0], x[1]))
             proto_status = {k: v.value for k, v in self._proto_status.items()}
             admin = len(self._admin_creds)
+            hashes = sorted(self._hashes)
         return {
             "ip": self.ip,
             "domain": self.discovered_domain or self.domain or "",
@@ -220,6 +241,7 @@ class FactStore(Workspace):
             "users_complete": self.users_complete,
             "open_ports": open_ports,
             "proto_status": proto_status,
+            "hashes": hashes,
         }
 
     # ── reload from disk (pick up external edits to loot/*.txt) ────────────────

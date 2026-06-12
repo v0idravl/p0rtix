@@ -464,7 +464,19 @@ def _parse_nxc_shares(output: str, findings: Findings) -> list[str]:
 
 
 def _parse_nxc_users(output: str, findings: Findings, runner: Runner):
-    users = re.findall(r"\b([A-Za-z0-9._-]+)\s+badpwdcount", output, re.IGNORECASE)
+    # netexec --users output has shifted format across versions. Old builds
+    # printed "<user> badpwdcount: N"; current builds print a table whose rows
+    # are "SMB  <ip>  445  <host>  <Username>  <Last PW Set>  <BadPW>  <Desc>".
+    # Match both — otherwise the authoritative full user list (the only source
+    # that includes e.g. Administrator/krbtgt/svc-alfresco when anonymous LDAP
+    # hides them) is silently dropped.
+    users = re.findall(r"\b([A-Za-z0-9._$-]+)\s+badpwdcount", output, re.IGNORECASE)
+    if not users:
+        users = re.findall(
+            r"^SMB\s+\S+\s+\d+\s+\S+\s+([A-Za-z0-9._$-]+)\s+(?:<never>|\d{4}-\d{2}-\d{2})",
+            output, re.MULTILINE,
+        )
+    users = [u for u in users if not u.endswith("$")]   # drop machine accounts
     if users:
         findings.bullet(f"**SMB users:** {', '.join(users)}")
         for u in users:

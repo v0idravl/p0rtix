@@ -49,7 +49,8 @@ def run_console_mode(ip: str, domain: str | None, name: str | None,
     ui.info(f"Findings  : {facts.findings_path}")
     ui.info(f"Posture   : passive (dial {args.level})")
     try:
-        run_console(scheduler, registry, facts, posture)
+        run_console(scheduler, registry, facts, posture,
+                    headless=getattr(args, "headless", False))
     finally:
         findings.finalize()
         from p0rtix import _chown

