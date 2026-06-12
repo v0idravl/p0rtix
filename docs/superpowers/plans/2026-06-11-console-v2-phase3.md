@@ -155,11 +155,16 @@ duplicate per-port sections. Dedup happens when ports/services become facts.
       by crack-state (uncracked→crack, cracked→plaintext). Type demoted to a tag.
 - [x] Tests: crack-state model, event emit, crack closes the action. 104 pass.
 
-### Slice 6 — access verify + opt-in shell (doctrine amendment)
-- [ ] `creds.test` + handoff-command export.
-- [ ] `access.shell` RED launcher (tty handoff, TUI suspend/resume).
-- [ ] CLAUDE.md doctrine amendment paragraph.
-- [ ] Tests: access-test recording; shell launch is gated/armed (mock the spawn).
+### Slice 6 — access verify + opt-in shell (doctrine amendment) ✅
+- [x] `creds.test` + handoff-command export — landed in Slice 2.
+- [x] `lib/engine/access.py`: pure `shell_command()` (admin→psexec, else WinRM→
+      evil-winrm, else None) + mockable `launch_shell()` seam. `access.shell` RED
+      action (armed-only); the dashboard runs it on the UI thread inside
+      `App.suspend()` so Textual yields the tty and restores on exit.
+- [x] CLAUDE.md doctrine amended: one operator-armed exception (interactive shell
+      handoff) — still no implant/task/persist.
+- [x] Tests: command selection, RED/armed gating, spawn seam invoked (mocked).
+      110 pass. Interactive tty handoff itself is the operator's visual check.
 
 ---
 

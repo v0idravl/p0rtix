@@ -314,6 +314,24 @@ def _h_creds_test(ctx) -> ActionResult:
                         summary=f"tested {len(pairs)} pair(s) — {confirmed} access hit(s)")
 
 
+# ── red: opt-in interactive shell handoff (armed only) ────────────────────────
+def _h_shell(ctx) -> ActionResult:
+    from lib.engine import access
+    cmd = access.shell_command(ctx.facts, ctx.ip)
+    if cmd is None:
+        return ActionResult(ok=False,
+                            summary="no admin-SMB / WinRM credential for a shell")
+    ctx.findings.bullet(f"**Interactive shell handoff:** `{' '.join(cmd)}`")
+    ctx.findings.add_summary(f"Operator shell: `{' '.join(cmd)}`")
+    access.launch_shell(cmd)        # blocks until the operator exits (tty handoff)
+    return ActionResult(ok=True, summary=f"shell session via {cmd[0]}")
+
+
+def _can_shell(f) -> bool:
+    return (f.has("valid_cred") or f.has("admin_cred")) and \
+           (f.has("tcp/5985") or f.has("tcp/445"))
+
+
 def build_registry() -> ActionRegistry:
     reg = ActionRegistry()
 
@@ -470,6 +488,19 @@ def build_registry() -> ActionRegistry:
         footprint=Footprint(
             summary="enumerate writable users/groups/computers (privesc targets)"),
         gate=_authed, requires=_authed_reqs, deps=("bloodyAD",),
+    ))
+
+    reg.register(Action(
+        "access.shell", Tier.RED, _h_shell,
+        group="access", order=1,
+        footprint=Footprint(
+            summary="hand the terminal off to an interactive evil-winrm/psexec "
+                    "session (operator-driven; not C2)",
+            windows_events=("4624/4672 (interactive/admin logon)",
+                            "7045 (psexec service install)")),
+        gate=_can_shell,
+        requires=(Requirement("valid_cred", "a valid credential"),
+                  Requirement("tcp/5985", "WinRM (5985) or admin SMB (445)")),
     ))
 
     return reg

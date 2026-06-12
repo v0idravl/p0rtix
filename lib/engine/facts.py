@@ -295,6 +295,7 @@ class FactStore(Workspace):
             open_ports = sorted(self._open_ports, key=lambda x: (x[0], x[1]))
             proto_status = {k: v.value for k, v in self._proto_status.items()}
             admin = len(self._admin_creds)
+            admin_pairs = sorted(self._admin_creds)
             cred_pairs = sorted(self._cred_pairs)
             hashes = [
                 {"kind": kind, "principal": prin,
@@ -309,6 +310,7 @@ class FactStore(Workspace):
             "creds": sorted(self._known_creds),
             "valid_creds": sorted(self._known_valid),
             "admin_creds": admin,
+            "admin_pairs": admin_pairs,
             "hostnames": sorted(self._known_hostnames),
             "lockout": self.lockout_threshold,
             "users_complete": self.users_complete,

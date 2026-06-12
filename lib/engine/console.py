@@ -351,10 +351,28 @@ def _build_dashboard(router, scheduler, registry, facts, posture):
                                          scheduler.tried))
 
         def _run_action(self, name, port=None) -> None:
+            # access.shell hands the terminal to an interactive child — it must run
+            # on the UI thread inside App.suspend(), not a worker, so Textual yields
+            # the tty and restores itself on exit.
+            if name == "access.shell":
+                self._launch_shell()
+                return
             where = f" port {port}" if port is not None else ""
             self._log(f"[b]› running [cyan]{name}[/]{where}…[/]")
             self.run_worker(lambda: self._dispatch(name, port), thread=True,
                             group="actions", exit_on_error=False)
+
+        def _launch_shell(self) -> None:
+            avail = {a.name for a, _ in registry.available(facts, posture,
+                                                           scheduler.tried)}
+            if "access.shell" not in avail:
+                self._log("[yellow]access.shell: " + registry.why(
+                    "access.shell", facts, posture, scheduler.tried) + "[/]")
+                return
+            self._log("[b]› handing off to interactive shell — exit it to return[/]")
+            with self.suspend():
+                scheduler.run_action("access.shell")
+            self._refresh()
 
         def _dispatch(self, name, port=None) -> None:          # worker thread
             n = scheduler.run_action(name, port=port)
