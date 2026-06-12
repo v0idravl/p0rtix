@@ -170,6 +170,24 @@ class Scheduler:
             n += 1
         return n
 
+    def run_group(self, group: str, posture: Posture | None = None) -> int:
+        """Dispatch every currently-available action in one path group — the
+        'run a bulk of this branch' affordance, between a single action and
+        run-all. Cascades like run-all as facts unlock within the group."""
+        posture = posture or self._posture
+        dispatched = 0
+        while True:
+            avail = [(a, args) for a, args
+                     in self._registry.available(self._facts, posture, self._tried, self._tools)
+                     if a.group == group]
+            if not avail:
+                break
+            for a, args in avail:
+                if instance_key(a.name, args) not in self._tried:
+                    self.dispatch(a, args)
+                    dispatched += 1
+        return dispatched
+
     # ── overrides / introspection ─────────────────────────────────────────────
     def recheck_users(self) -> None:
         """Clear the collect-once gate so user-list actions re-arm (manual override)."""

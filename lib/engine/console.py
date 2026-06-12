@@ -362,6 +362,14 @@ def _build_dashboard(router, scheduler, registry, facts, posture):
             self.run_worker(lambda: self._dispatch(name, port), thread=True,
                             group="actions", exit_on_error=False)
 
+        def _launch_local_shell(self) -> None:
+            from lib.engine import access
+            self._log("[b]› dropping to a shell in the workspace — `exit` to "
+                      "return to the console[/]")
+            with self.suspend():
+                access.local_shell(facts.machine_dir)
+            self._refresh()
+
         def _launch_shell(self) -> None:
             avail = {a.name for a, _ in registry.available(facts, posture,
                                                            scheduler.tried)}
@@ -375,10 +383,15 @@ def _build_dashboard(router, scheduler, registry, facts, posture):
             self._refresh()
 
         def _dispatch(self, name, port=None) -> None:          # worker thread
-            n = scheduler.run_action(name, port=port)
-            if not n:
-                why = registry.why(name, facts, posture, scheduler.tried)
-                self.call_from_thread(self._log, f"[yellow]{name}: {why}[/]")
+            if registry.get(name) is None and name in registry.group_names():
+                n = scheduler.run_group(name)                  # bulk-run a branch
+                self.call_from_thread(
+                    self._log, f"[b]ran {n} action(s) in the {name} branch[/]")
+            else:
+                n = scheduler.run_action(name, port=port)
+                if not n:
+                    why = registry.why(name, facts, posture, scheduler.tried)
+                    self.call_from_thread(self._log, f"[yellow]{name}: {why}[/]")
             self.call_from_thread(self._refresh)
 
         def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -393,7 +406,9 @@ def _build_dashboard(router, scheduler, registry, facts, posture):
             # run/run-all/auto go through the worker so the UI stays responsive;
             # everything else is cheap and runs inline.
             low = line.lower()
-            if low in ("run-all", "auto"):
+            if low == "shell":
+                self._launch_local_shell()
+            elif low in ("run-all", "auto"):
                 self.action_run_all()
             elif low.startswith("run "):
                 parts = line.split()

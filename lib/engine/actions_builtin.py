@@ -48,6 +48,15 @@ def _h_tcp_quick(ctx) -> ActionResult:
     return ActionResult(ok=True, summary=f"{len(ports)} open TCP port(s) [quick]")
 
 
+def _h_tcp_common(ctx) -> ActionResult:
+    ports = nmap.discover_tcp_common(ctx.ip, ctx.runner, ctx.runner.ws)
+    ctx.facts.add_scanned_tcp(nmap.COMMON_TCP_PORTS)
+    for p in ports:
+        ctx.facts.add_open_port("tcp", p)
+    ctx.findings.bullet(f"Open TCP ports (common): {', '.join(map(str, ports)) or 'none'}")
+    return ActionResult(ok=True, summary=f"{len(ports)} open TCP port(s) [common]")
+
+
 def _h_tcp_ports(ctx) -> ActionResult:
     # Skip ports an earlier tier already swept — coverage is remembered.
     exclude = ctx.facts.scanned_tcp()
@@ -144,6 +153,25 @@ def _register_hashes(facts, kind: str, lines) -> int:
             facts.add_hash(kind, Workspace._krb_principal(line))
             n += 1
     return n
+
+
+def _h_userenum(ctx) -> ActionResult:
+    """Validate the user list against the KDC with kerbrute. Most useful for
+    seeded/OSINT names — directory-sourced users are already confirmed."""
+    domain = ctx.facts.discovered_domain or ctx.domain
+    if not domain:
+        return ActionResult(ok=False, summary="no domain known")
+    users_file = _ensure_users_file(ctx.facts)
+    cmd = ["kerbrute", "userenum", "--dc", ctx.ip, "-d", domain, str(users_file)]
+    ctx.findings.cmd(" ".join(cmd))
+    out = ctx.runner.run(cmd, "kerb_userenum", timeout=300)
+    valid = re.findall(r"VALID USERNAME:\s+(\S+)", out)
+    for u in valid:
+        ctx.facts.add_user(u.split("@")[0], authoritative=True)
+    if valid:
+        ctx.findings.bullet(f"**kerbrute confirmed {len(valid)} user(s):** "
+                            + ", ".join(sorted({u.split('@')[0] for u in valid})))
+    return ActionResult(ok=True, summary=f"{len(valid)} user(s) confirmed")
 
 
 def _h_asrep_roast(ctx) -> ActionResult:
@@ -284,14 +312,15 @@ def _h_creds_test(ctx) -> ActionResult:
         return ActionResult(ok=False, summary="nxc not available")
     open_tcp = {p for proto, p in snap["open_ports"] if proto == "tcp"}
     domain = ctx.facts.discovered_domain or ctx.domain or ""
-    services = [("smb", 445), ("winrm", 5985), ("rdp", 3389), ("mssql", 1433)]
+    services = [("smb", 445), ("winrm", 5985), ("ssh", 22),
+                ("rdp", 3389), ("mssql", 1433)]
     confirmed = 0
     for user, pw in pairs:
         for svc, port in services:
             if port not in open_tcp:
                 continue
             cmd = ["nxc", svc, ctx.ip, "-u", user, "-p", pw]
-            if domain:
+            if domain and svc != "ssh":      # ssh auth isn't domain-scoped
                 cmd += ["-d", domain]
             label = re.sub(r"[^a-z0-9]", "_", f"{svc}_{user}".lower())[:24]
             out = ctx.runner.run(cmd, f"credtest_{label}", timeout=60)
@@ -309,6 +338,9 @@ def _h_creds_test(ctx) -> ActionResult:
                 if svc == "winrm":
                     ctx.findings.add_summary(
                         f"WinRM shell handoff: `evil-winrm -i {ctx.ip} -u {user} -p {pw}`")
+                elif svc == "ssh":
+                    ctx.findings.add_summary(
+                        f"SSH shell handoff: `sshpass -p '{pw}' ssh {user}@{ctx.ip}`")
                 break
     return ActionResult(ok=True,
                         summary=f"tested {len(pairs)} pair(s) — {confirmed} access hit(s)")
@@ -329,7 +361,7 @@ def _h_shell(ctx) -> ActionResult:
 
 def _can_shell(f) -> bool:
     return (f.has("valid_cred") or f.has("admin_cred")) and \
-           (f.has("tcp/5985") or f.has("tcp/445"))
+           (f.has("tcp/5985") or f.has("tcp/445") or f.has("tcp/22"))
 
 
 def build_registry() -> ActionRegistry:
@@ -346,14 +378,23 @@ def build_registry() -> ActionRegistry:
         "discovery.tcp_quick", Tier.GREEN, _h_tcp_quick,
         group="discovery", order=1,
         footprint=Footprint(
-            summary="quiet curated-port SYN sweep (~60 AD-relevant ports)",
+            summary="quiet curated SYN sweep — AD profile (~60 ports)",
+            network="small SYN sweep — lower IDS footprint than -p-",
+        ),
+        deps=("nmap",),
+    ))
+    reg.register(Action(
+        "discovery.tcp_common", Tier.GREEN, _h_tcp_common,
+        group="discovery", order=2,
+        footprint=Footprint(
+            summary="quiet curated SYN sweep — common internal services (Linux/web/db)",
             network="small SYN sweep — lower IDS footprint than -p-",
         ),
         deps=("nmap",),
     ))
     reg.register(Action(
         "discovery.tcp_ports", Tier.GREEN, _h_tcp_ports,
-        group="discovery", order=2,
+        group="discovery", order=3,
         footprint=Footprint(
             summary="full TCP SYN sweep (skips ports an earlier tier already swept)",
             network="SYN sweep — firewall connection logs / IDS port-scan signature",
@@ -362,14 +403,14 @@ def build_registry() -> ActionRegistry:
     ))
     reg.register(Action(
         "discovery.udp_top100", Tier.GREEN, _h_udp_ports,
-        group="discovery", order=2,
+        group="discovery", order=4,
         footprint=Footprint(summary="top-100 UDP sweep",
                             network="UDP probes — firewall/IDS"),
         deps=("nmap",),
     ))
     reg.register(Action(
         "svc.version_detect", Tier.GREEN, _h_version_detect,
-        group="discovery", order=3,
+        group="discovery", order=5,
         footprint=Footprint(summary="per-port -sV banner grab",
                             network="extra connection + banner grab per port"),
         gate=lambda f: bool(_open_tcp_ports(f)),
@@ -403,6 +444,18 @@ def build_registry() -> ActionRegistry:
         suppressed_by=(ProtoStatus.ANON_DENIED,),
     ))
 
+    reg.register(Action(
+        "kerberos.userenum", Tier.YELLOW, _h_userenum,
+        group="kerberos", order=0,
+        footprint=Footprint(
+            summary="validate the user list against the KDC (kerbrute)",
+            windows_events=("4768 (TGT requested)", "4771 (pre-auth failed)"),
+        ),
+        gate=lambda f: f.has("domain") and f.has("users"),
+        requires=(Requirement("domain", "a domain"),
+                  Requirement("users", "a user list")),
+        deps=("kerbrute",),
+    ))
     reg.register(Action(
         "kerberos.asrep_roast", Tier.YELLOW, _h_asrep_roast,
         group="kerberos", order=1,

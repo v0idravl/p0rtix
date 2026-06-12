@@ -27,11 +27,13 @@ commands:
   actions [--all]              runnable actions (--all includes dormant/exhausted)
   dormant | exhausted          greyed-out (missing inputs) / already-run actions
   why <action>                 explain an action's state
-  run <action> | run-all|auto  dispatch one action / everything at/below posture
+  run <action> [port]          dispatch one action (optionally one port)
+  run <group> | run-all|auto   dispatch a whole branch / everything at/below posture
   noise <green|yellow|red>     raise/lower the noise ceiling
   set domain <d> | add user <u> | creds add <u:p>   populate facts by hand
   reload | recheck users       refresh loot from disk / re-arm user-list actions
   recheck <proto>              re-arm a dormant branch (e.g. recheck ldap)
+  shell                        drop to a local shell in the workspace dir
   help | exit"""
 
 
@@ -144,10 +146,15 @@ class CommandRouter:
     # ── execution ─────────────────────────────────────────────────────────────
     def _cmd_run(self, args) -> str:
         if not args:
-            return "usage: run <action> [port]"
+            return "usage: run <action> [port]  |  run <group>"
         name = args[0]
+        # `run <group>` dispatches the whole branch (bulk); `run <action>` one step.
         if self._reg.get(name) is None:
-            return f"no such action: {name}"
+            if name in self._reg.group_names():
+                n = self._sched.run_group(name)
+                return f"ran {n} action(s) in the {name} branch" if n else \
+                    f"(no available actions in {name})"
+            return f"no such action or group: {name}"
         port = int(args[1]) if len(args) > 1 and args[1].isdigit() else None
         n = self._sched.run_action(name, port=port)
         if n:
@@ -211,6 +218,13 @@ class CommandRouter:
             return f"{proto} branch re-armed ({n} action(s))"
         return "usage: recheck users | recheck <proto>"
 
+    def _cmd_shell(self, args) -> str:
+        # Local shell in the workspace dir (line-mode path; the dashboard wraps
+        # this in App.suspend()).
+        from lib.engine import access
+        access.local_shell(self._facts.machine_dir)
+        return "(returned from shell)"
+
     def _cmd_help(self, args) -> str:
         return _HELP
 
@@ -232,5 +246,6 @@ class CommandRouter:
         "creds": _cmd_creds,
         "reload": _cmd_reload,
         "recheck": _cmd_recheck,
+        "shell": _cmd_shell,
         "help": _cmd_help,
     }

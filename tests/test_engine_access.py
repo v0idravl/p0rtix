@@ -96,3 +96,19 @@ def test_access_shell_invokes_launch(tmp_path, monkeypatch):
 
     sched.run_action("access.shell")
     assert launched["cmd"][0] == "evil-winrm"
+
+
+def test_shell_command_ssh_when_only_22(tmp_path):
+    fs = _store(tmp_path)
+    fs.add_open_port("tcp", 22)
+    fs.add_valid_cred("root", "toor", "SSH")
+    cmd = access.shell_command(fs, "10.10.10.10")
+    assert cmd[0] == "sshpass" and "root@10.10.10.10" in cmd
+
+
+def test_local_shell_uses_seam(tmp_path, monkeypatch):
+    calls = {}
+    monkeypatch.setattr(access.subprocess, "call",
+                        lambda argv, cwd=None: calls.update(argv=argv, cwd=cwd) or 0)
+    access.local_shell(str(tmp_path))
+    assert calls["cwd"] == str(tmp_path)

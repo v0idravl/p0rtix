@@ -45,6 +45,9 @@ class ActionRegistry:
     def all(self) -> list[Action]:
         return list(self._actions.values())
 
+    def group_names(self) -> set[str]:
+        return {a.group for a in self._actions.values()}
+
     # ── instance expansion ────────────────────────────────────────────────────
     def _expand(self, action: Action, facts: FactStore) -> list[dict]:
         if action.instances is None:

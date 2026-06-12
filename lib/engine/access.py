@@ -12,6 +12,7 @@ Kept pure + seam-mockable: `shell_command()` decides what to launch (no I/O);
 """
 from __future__ import annotations
 
+import os
 import subprocess
 
 
@@ -43,10 +44,28 @@ def shell_command(facts, ip: str) -> list[str] | None:
 
     if 5985 in open_tcp and valid:
         user, pw = _prefer_user(valid)
-        cmd = ["evil-winrm", "-i", ip, "-u", user, "-p", pw]
-        return cmd
+        return ["evil-winrm", "-i", ip, "-u", user, "-p", pw]
+
+    if 22 in open_tcp and valid:
+        user, pw = _prefer_user(valid)
+        # non-interactive password → sshpass; operator can swap for a key
+        return ["sshpass", "-p", pw, "ssh", "-o", "StrictHostKeyChecking=no",
+                f"{user}@{ip}"]
 
     return None
+
+
+def local_shell(cwd) -> int:
+    """Drop the operator into a local `$SHELL` rooted at the workspace dir — for a
+    quick manual command without leaving the console or hunting flags/passwords.
+    Blocks until they exit. Same spawn discipline as the remote handoff."""
+    sh = os.environ.get("SHELL", "/bin/bash")
+    try:
+        return subprocess.call([sh], cwd=str(cwd))
+    except FileNotFoundError:
+        return subprocess.call(["/bin/sh"], cwd=str(cwd))
+    except KeyboardInterrupt:
+        return 130
 
 
 def launch_shell(cmd: list[str]) -> int:

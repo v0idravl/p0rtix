@@ -116,19 +116,44 @@ QUICK_TCP_PORTS = [
 ]
 
 
-def discover_tcp_quick(ip: str, runner: Runner, ws: Workspace) -> list[int]:
-    """Quiet curated-port SYN sweep (~60 AD-relevant ports). Returns open ports
-    and records coverage so a later full sweep skips them."""
-    prefix = str(ws.raw_dir / "00_quick_tcp")
-    spec = ",".join(str(p) for p in QUICK_TCP_PORTS)
+# General internal-pentest sweep: not AD-specific — Linux/Unix services, web,
+# databases, remote access, mail, etc. The companion to QUICK_TCP_PORTS for the
+# mixed hosts a typical engagement turns up (the same access principles apply,
+# e.g. an SSH cred → shell, a DB cred → access).
+COMMON_TCP_PORTS = [
+    21, 22, 23, 25, 53, 79, 80, 110, 111, 113, 119, 135, 139, 143, 161, 179,
+    264, 389, 443, 445, 465, 500, 512, 513, 514, 515, 543, 544, 548, 554, 587,
+    631, 636, 873, 990, 993, 995, 1080, 1099, 1433, 1521, 1723, 2049, 2082,
+    2083, 2375, 2376, 3000, 3128, 3306, 3389, 4444, 5000, 5432, 5601, 5900,
+    5985, 5986, 6000, 6379, 6443, 7001, 8000, 8008, 8080, 8081, 8443, 8888,
+    9000, 9090, 9200, 9389, 10000, 11211, 27017,
+]
+
+
+def _quick_sweep(ip, runner, ws, ports, prefix, label) -> list[int]:
+    spec = ",".join(str(p) for p in ports)
     runner.run_live(
         [
             "nmap", "-n", "--reason", "-sS", "-Pn", "-p", spec, "--open",
             "--min-rate", "1500", "--max-retries", "2", "-oA", prefix, ip,
         ],
-        label="00_quick_tcp",
+        label=label,
     )
     return _parse_xml_ports(Path(prefix + ".xml"), "tcp", include_filtered=False)
+
+
+def discover_tcp_quick(ip: str, runner: Runner, ws: Workspace) -> list[int]:
+    """Quiet curated-port SYN sweep (~60 AD-relevant ports). Returns open ports;
+    coverage is recorded by the caller so a later full sweep skips them."""
+    return _quick_sweep(ip, runner, ws, QUICK_TCP_PORTS,
+                        str(ws.raw_dir / "00_quick_tcp"), "00_quick_tcp")
+
+
+def discover_tcp_common(ip: str, runner: Runner, ws: Workspace) -> list[int]:
+    """Quiet curated sweep of common internal services (Linux/web/db/remote) —
+    the non-AD companion profile."""
+    return _quick_sweep(ip, runner, ws, COMMON_TCP_PORTS,
+                        str(ws.raw_dir / "00_common_tcp"), "00_common_tcp")
 
 
 def discover_tcp_open(ip: str, runner: Runner, ws: Workspace,

@@ -317,3 +317,19 @@ def test_crack_marks_hash_cracked_and_closes_action(tmp_path, monkeypatch):
     assert not fs.has("hash:uncracked")
     assert fs.snapshot()["hashes"][0]["plaintext"] == "s3rvice"
     assert "crack.hashes" not in {a.name for a, _ in reg.available(fs, posture, sched.tried)}
+
+
+def test_phase4_actions_registered(tmp_path):
+    reg = build_registry()
+    names = {a.name for a in reg.all()}
+    assert {"discovery.tcp_common", "kerberos.userenum"} <= names
+
+
+def test_tcp_common_records_coverage(tmp_path, monkeypatch):
+    from lib.engine.action import Tier
+    from lib import nmap
+    monkeypatch.setattr(nmap, "discover_tcp_common", lambda ip, r, ws: [22, 80])
+    fs, posture, reg, sched = _setup(tmp_path, Tier.GREEN, tools=_ALL_TOOLS)
+    sched.run_action("discovery.tcp_common")
+    assert fs.has("tcp/22") and fs.has("tcp/80")
+    assert 22 in fs.scanned_tcp()

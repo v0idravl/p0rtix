@@ -181,3 +181,20 @@ def test_recheck_rearms_a_dormant_branch(tmp_path):
     assert fs.proto_status("ldap") is None              # status cleared
     assert "ldap.anon_bind" not in sched.tried          # tried-state dropped
     assert "ldap.anon_bind" in {a.name for a, _ in reg.available(fs, sched._posture)}
+
+
+def test_run_group_dispatches_only_that_branch(tmp_path):
+    fs = _store(tmp_path)
+    reg = ActionRegistry()
+    ran = []
+    reg.register(Action("discovery.a", Tier.GREEN,
+                        lambda c: ran.append("a") or ActionResult(), group="discovery"))
+    reg.register(Action("discovery.b", Tier.GREEN,
+                        lambda c: ran.append("b") or ActionResult(), group="discovery"))
+    reg.register(Action("smb.x", Tier.GREEN,
+                        lambda c: ran.append("x") or ActionResult(), group="smb"))
+    sched = Scheduler(reg, fs, _green())
+
+    n = sched.run_group("discovery")
+    assert n == 2 and set(ran) == {"a", "b"}        # smb.x untouched
+    assert "x" not in ran
