@@ -1,7 +1,7 @@
 from lib.engine.action import Action, ActionResult, Requirement, Tier
 from lib.engine.facts import FactStore
 from lib.engine.posture import Posture
-from lib.engine.registry import ActionRegistry, instance_key
+from lib.engine.registry import GROUP_ORDER, ActionRegistry, instance_key
 
 
 def _noop(ctx):
@@ -148,3 +148,68 @@ def test_supersedes_skips_covered_action(tmp_path):
     names = {a.name for a, _ in reg.available(fs, posture, tried=tried)}
     assert "enum4linux" not in names
     assert "covered by a superseding action" in reg.why("enum4linux", fs, posture, tried=tried)
+
+
+# ── grouped() — the console's by-path view ────────────────────────────────────
+def _grouped_registry():
+    reg = ActionRegistry()
+    reg.register(Action("discovery.tcp_ports", Tier.GREEN, _noop,
+                        group="discovery", order=1))
+    reg.register(Action("svc.version_detect", Tier.GREEN, _noop,
+                        group="discovery", order=3, instances=_tcp_ports,
+                        gate=lambda f: bool(_tcp_ports(f))))
+    reg.register(Action("smb.anon_enum", Tier.GREEN, _noop, group="smb",
+                        gate=lambda f: f.has("tcp/445"),
+                        requires=(Requirement("tcp/445", "SMB (tcp/445) open"),)))
+    reg.register(Action("kerberos.asrep_roast", Tier.YELLOW, _noop, group="kerberos",
+                        gate=lambda f: f.has("domain") and f.has("users"),
+                        requires=(Requirement("domain", "a domain"),
+                                  Requirement("users", "a user list"))))
+    return reg
+
+
+def test_grouped_orders_by_group_then_action(tmp_path):
+    reg = _grouped_registry()
+    fs = _store(tmp_path)
+    groups = [g for g, _ in reg.grouped(fs, _green_posture())]
+    # discovery before smb before kerberos, per GROUP_ORDER
+    assert groups == sorted(groups, key=GROUP_ORDER.index)
+    assert groups[0] == "discovery"
+    # within discovery, order field sorts tcp_ports (1) before version_detect (3)
+    disc = dict(reg.grouped(fs, _green_posture()))["discovery"]
+    assert [a.name for a, _, _ in disc] == ["discovery.tcp_ports", "svc.version_detect"]
+
+
+def test_grouped_states_track_facts(tmp_path):
+    reg = _grouped_registry()
+    fs = _store(tmp_path)
+    posture = _green_posture()
+
+    def state_of(name):
+        for _g, rows in reg.grouped(fs, posture, tried=set()):
+            for action, st, _info in rows:
+                if action.name == name:
+                    return st
+        return None
+
+    # nothing learned: discovery available, smb/kerberos dormant
+    assert state_of("discovery.tcp_ports") == "available"
+    assert state_of("smb.anon_enum") == "dormant"
+    assert state_of("kerberos.asrep_roast") == "dormant"
+
+    fs.add_open_port("tcp", 445)
+    assert state_of("smb.anon_enum") == "available"
+
+    # yellow action is gate-met-but-posture-blocked under a GREEN ceiling
+    fs.set_discovered_domain("htb.local")
+    fs.add_user("svc-alfresco", authoritative=True)
+    assert state_of("kerberos.asrep_roast") == "blocked"
+
+
+def test_grouped_marks_exhausted(tmp_path):
+    reg = _grouped_registry()
+    fs = _store(tmp_path)
+    fs.add_open_port("tcp", 445)
+    tried = {"smb.anon_enum"}
+    rows = dict(reg.grouped(fs, _green_posture(), tried=tried))["smb"]
+    assert rows[0][1] == "exhausted"

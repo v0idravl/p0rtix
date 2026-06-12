@@ -143,3 +143,44 @@ def test_selecting_runnable_action_dispatches(tmp_path, monkeypatch):
             assert fs.has("tcp/445")
 
     _run(body())
+
+
+def test_actions_rendered_grouped_by_path(tmp_path):
+    fs, posture, reg, sched, router = _wire(tmp_path)
+    app = _build_dashboard(router, sched, reg, fs, posture)
+
+    async def body():
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            fs.add_open_port("tcp", 445)
+            await pilot.pause()
+            from textual.widgets import ListView
+            lv = app.query_one("#actions", ListView)
+            labels = [getattr(c, "label_text", "") for c in lv.children]
+            # group headers present, in path order
+            assert any("DISCOVERY" in l for l in labels)
+            assert any("▸ SMB" in l for l in labels)
+            # the SMB header sits above the smb.anon_enum row
+            smb_hdr = next(i for i, l in enumerate(labels) if "▸ SMB" in l)
+            smb_row = next(i for i, l in enumerate(labels) if "smb.anon_enum" in l)
+            assert smb_hdr < smb_row
+
+    _run(body())
+
+
+def test_state_pane_is_status_summary(tmp_path):
+    fs, posture, reg, sched, router = _wire(tmp_path)
+    fs.add_open_port("tcp", 445)
+    fs.set_discovered_domain("htb.local")
+    app = _build_dashboard(router, sched, reg, fs, posture)
+
+    async def body():
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            txt = _state_text(app)
+            for label in ("TARGET", "DOMAIN", "PORTS", "LOOT", "ACTIONS"):
+                assert label in txt
+            assert "htb.local" in txt
+            assert "known" in txt          # ports shown as a count, not a dump
+
+    _run(body())

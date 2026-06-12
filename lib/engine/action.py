@@ -94,6 +94,11 @@ class Action:
     name: str
     tier: Tier
     handler: Callable[["ActionContext"], "ActionResult"]
+    # Path the action belongs to — the planner/UI present work *by path* (e.g.
+    # "discovery", "smb", "ldap", "kerberos", "creds", "ad", "access"), so opening
+    # a service lights up its branch and you step through that methodology.
+    group: str = "general"
+    order: int = 0                       # sort within the group
     footprint: Footprint = field(default_factory=Footprint)
     gate: Callable[["FactStore"], bool] = _always_available
     requires: tuple[Requirement, ...] = ()

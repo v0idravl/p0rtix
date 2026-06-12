@@ -109,29 +109,29 @@ def _tier_tag(tier: Tier) -> str:
 
 
 def _state_markup(facts, posture, scheduler) -> str:
-    """Left-pane campaign state — target, posture, ports, loot, per-proto status."""
+    """Left-pane campaign state — a compact mirror of the `status` command:
+    target, domain, posture, how many ports are known, one-line loot, lockout,
+    actions run, and any per-protocol status."""
     s = facts.snapshot()
-    tcp = [p for proto, p in s["open_ports"] if proto == "tcp"]
-    udp = [p for proto, p in s["open_ports"] if proto == "udp"]
+    st = scheduler.status()
     red = "on" if posture.red_unlocked() else "off"
+    n_tcp = sum(1 for proto, _ in s["open_ports"] if proto == "tcp")
+    n_udp = sum(1 for proto, _ in s["open_ports"] if proto == "udp")
+    ports = f"[b]{len(s['open_ports'])}[/] known"
+    if s["open_ports"]:
+        ports += f"  [dim]({n_tcp} tcp" + (f" · {n_udp} udp" if n_udp else "") + ")[/]"
     lockout = s["lockout"] if s["lockout"] != -1 else "?"
     rows = [
         f"[b]TARGET[/]   {s['ip']}",
         f"[b]DOMAIN[/]   {s['domain'] or '—'}",
         f"[b]POSTURE[/]  {_tier_tag(posture.level)}  [dim](dial {posture.dial} · red {red})[/]",
         "",
-        f"[b]PORTS[/]    [b]{len(s['open_ports'])}[/] open",
-        "  tcp " + (" ".join(map(str, tcp)) or "—"),
-    ]
-    if udp:
-        rows.append("  udp " + " ".join(map(str, udp)))
-    rows += [
-        "",
-        "[b]LOOT[/]",
-        f"  users    [b]{len(s['users'])}[/]",
-        f"  creds    {len(s['creds'])} cand · [b]{len(s['valid_creds'])}[/] valid",
-        f"  hashes   {', '.join(s['hashes']) or '—'}",
-        f"  lockout  {lockout}",
+        f"[b]PORTS[/]    {ports}",
+        f"[b]LOOT[/]     {len(s['users'])} users · "
+        f"[b]{len(s['valid_creds'])}[/]/{len(s['creds'])} creds [dim](valid/cand)[/]",
+        f"[b]HASHES[/]   {', '.join(s['hashes']) or '—'}",
+        f"[b]LOCKOUT[/]  {lockout}",
+        f"[b]ACTIONS[/]  {st['completed']} run",
     ]
     if s["proto_status"]:
         rows += ["", "[b]STATUS[/]"] + [
@@ -245,6 +245,23 @@ def _build_dashboard(router, scheduler, registry, facts, posture):
                 _state_markup(facts, posture, scheduler))
             self._rebuild_actions()
 
+        def _action_row(self, action, state, info):
+            """(label_markup, runnable) for one action row, by planner state.
+            Per-instance fan-out (e.g. version_detect/port) collapses to ×N."""
+            glyph, colour = _TIER_STYLE[action.tier]
+            name = action.name
+            if state == "available":
+                tag = f" [dim]×{info}[/]" if info and info > 1 else ""
+                desc = action.footprint.summary or ""
+                return f"[{colour}]{glyph}[/] {name}{tag}  [dim]{desc}[/]", True
+            if state == "exhausted":
+                return f"[dim]✓ {name}[/]", False
+            if state == "dormant":
+                reason = ", ".join(r.label for r in info) or "preconditions"
+                return f"[dim]○ {name} — needs {reason}[/]", False
+            # blocked: gate met, posture/tool holds it back
+            return f"[yellow]◐[/] [dim]{name} — {info}[/]", False
+
         def _rebuild_actions(self) -> None:
             lv = self.query_one("#actions", ListView)
             keep = None
@@ -253,43 +270,16 @@ def _build_dashboard(router, scheduler, registry, facts, posture):
                 keep = cur.action_name
             lv.clear()
 
-            # Available — collapse per-instance fan-out (e.g. version_detect/port)
-            # into one row per action, with an ×N count.
-            counts: dict[str, int] = {}
-            actions: dict[str, object] = {}
-            for a, _args in registry.available(facts, posture, scheduler.tried):
-                counts[a.name] = counts.get(a.name, 0) + 1
-                actions[a.name] = a
-            lv.append(_ActionItem("AVAILABLE", header=True))
-            if counts:
-                for name in sorted(counts):
-                    a = actions[name]
-                    glyph, colour = _TIER_STYLE[a.tier]
-                    n = counts[name]
-                    tag = f" [dim]×{n}[/]" if n > 1 else ""
-                    desc = a.footprint.summary or ""
-                    lv.append(_ActionItem(
-                        f"[{colour}]{glyph}[/] {name}{tag}  [dim]{desc}[/]",
-                        action_name=name, runnable=True))
-            else:
-                lv.append(_ActionItem("  [dim](none — raise noise or feed a fact)[/]",
-                                      header=True))
-
-            dormant = registry.dormant(facts)
-            if dormant:
-                lv.append(_ActionItem("DORMANT", header=True))
-                for a, missing in dormant:
-                    reason = ", ".join(r.label for r in missing) or "preconditions"
-                    lv.append(_ActionItem(
-                        f"[dim]○ {a.name} — needs {reason}[/]",
-                        action_name=a.name, runnable=False))
-
-            exhausted = registry.exhausted(facts, scheduler.tried)
-            if exhausted:
-                lv.append(_ActionItem("EXHAUSTED", header=True))
-                for a in exhausted:
-                    lv.append(_ActionItem(f"[dim]✓ {a.name}[/]",
-                                          action_name=a.name, runnable=False))
+            # Grouped by path: each service/branch is a section that lights up and
+            # progresses as facts arrive (step into the LDAP path, the SMB path…).
+            for group, rows in registry.grouped(facts, posture, scheduler.tried):
+                ps = facts.proto_status(group)
+                badge = f"  [dim]\\[{ps.value}][/]" if ps is not None else ""
+                lv.append(_ActionItem(f"▸ {group.upper()}{badge}", header=True))
+                for action, state, info in rows:
+                    label, runnable = self._action_row(action, state, info)
+                    lv.append(_ActionItem(label, action_name=action.name,
+                                          runnable=runnable))
 
             if keep:                       # restore highlight after rebuild
                 for i, child in enumerate(lv.children):

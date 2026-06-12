@@ -179,12 +179,14 @@ def build_registry() -> ActionRegistry:
 
     reg.register(Action(
         "recon.parse_prior", Tier.PASSIVE, _h_parse_prior,
+        group="discovery", order=0,
         footprint=Footprint(summary="reads saved nmap XML (local only)"),
         gate=lambda f: any(f.machine_dir.joinpath("raw").glob("*_services.xml")),
     ))
 
     reg.register(Action(
         "discovery.tcp_ports", Tier.GREEN, _h_tcp_ports,
+        group="discovery", order=1,
         footprint=Footprint(
             summary="full TCP SYN sweep",
             network="SYN sweep — firewall connection logs / IDS port-scan signature",
@@ -193,12 +195,14 @@ def build_registry() -> ActionRegistry:
     ))
     reg.register(Action(
         "discovery.udp_top100", Tier.GREEN, _h_udp_ports,
+        group="discovery", order=2,
         footprint=Footprint(summary="top-100 UDP sweep",
                             network="UDP probes — firewall/IDS"),
         deps=("nmap",),
     ))
     reg.register(Action(
         "svc.version_detect", Tier.GREEN, _h_version_detect,
+        group="discovery", order=3,
         footprint=Footprint(summary="per-port -sV banner grab",
                             network="extra connection + banner grab per port"),
         gate=lambda f: bool(_open_tcp_ports(f)),
@@ -209,6 +213,7 @@ def build_registry() -> ActionRegistry:
 
     reg.register(Action(
         "smb.anon_enum", Tier.GREEN, _h_smb_anon,
+        group="smb", order=1,
         footprint=Footprint(
             summary="anonymous SMB: null session, RID cycle, shares, users",
             windows_events=("4624 (type 3, often below audit)",),
@@ -221,6 +226,7 @@ def build_registry() -> ActionRegistry:
 
     reg.register(Action(
         "ldap.anon_bind", Tier.GREEN, _h_ldap_anon,
+        group="ldap", order=1,
         footprint=Footprint(summary="anonymous LDAP bind + directory reads"),
         gate=lambda f: _ldap_port(f) is not None,
         requires=(Requirement("ldap_port", "LDAP (tcp/389|636|3268|3269) open"),),
@@ -229,6 +235,7 @@ def build_registry() -> ActionRegistry:
 
     reg.register(Action(
         "kerberos.asrep_roast", Tier.YELLOW, _h_asrep_roast,
+        group="kerberos", order=1,
         footprint=Footprint(
             summary="AS-REP roast: one AS-REQ (no pre-auth) per known user",
             windows_events=("4768 (TGT requested)", "4771 (pre-auth failed)"),
@@ -241,6 +248,7 @@ def build_registry() -> ActionRegistry:
 
     reg.register(Action(
         "crack.hashes", Tier.PASSIVE, _h_crack,
+        group="creds", order=1,
         footprint=Footprint(
             summary="offline hashcat + rockyou on captured hashes (local only)"),
         gate=lambda f: f.has("hash"),
@@ -250,6 +258,7 @@ def build_registry() -> ActionRegistry:
 
     reg.register(Action(
         "creds.spray", Tier.YELLOW, _h_creds_spray,
+        group="creds", order=2,
         footprint=Footprint(
             summary="spray candidate password(s) across the user list (SMB/WinRM)",
             windows_events=("4625 (failed logon)", "4624 (logon) on a hit"),
@@ -262,6 +271,7 @@ def build_registry() -> ActionRegistry:
 
     reg.register(Action(
         "ad.authenticated_core", Tier.YELLOW, _h_ad_core,
+        group="ad", order=1,
         footprint=Footprint(
             summary="authenticated AD enum: ldapdomaindump, kerberoast, "
                     "BloodHound, ADCS, secretsdump-if-admin",

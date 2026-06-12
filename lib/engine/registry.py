@@ -18,6 +18,10 @@ from lib.engine.action import Action, Requirement
 from lib.engine.facts import FactStore
 from lib.engine.posture import Posture
 
+# Top-level ordering of path groups in the console. Groups not listed here are
+# appended alphabetically, so a new group still shows up without a code change.
+GROUP_ORDER = ["discovery", "smb", "ldap", "kerberos", "creds", "ad", "access"]
+
 
 def instance_key(name: str, args: dict) -> str:
     """Stable identity for one dispatched instance. Per-port actions get a
@@ -103,6 +107,49 @@ class ActionRegistry:
             if all(k in tried for k in keys):
                 out.append(action)
         return out
+
+    def grouped(
+        self,
+        facts: FactStore,
+        posture: Posture,
+        tried: set[str] | None = None,
+        tools: set[str] | None = None,
+    ) -> list[tuple[str, list[tuple[Action, str, object]]]]:
+        """The console's by-path view: ``[(group, [(action, state, info)])]``.
+
+        ``state`` is one of:
+          * ``available``  — runnable now; ``info`` = instance count (int)
+          * ``blocked``    — gate met but posture/tool blocks it; ``info`` = reason
+          * ``dormant``    — gate unmet, waiting on a fact; ``info`` = [Requirement]
+          * ``exhausted``  — run to completion; ``info`` = None
+
+        Groups are ordered by ``GROUP_ORDER`` then alphabetically; actions within a
+        group by their ``order`` then name."""
+        tried = tried or set()
+        avail_counts: dict[str, int] = {}
+        for action, args in self.available(facts, posture, tried, tools):
+            avail_counts[action.name] = avail_counts.get(action.name, 0) + 1
+        exhausted_names = {a.name for a in self.exhausted(facts, tried)}
+
+        buckets: dict[str, list[tuple[Action, str, object]]] = {}
+        for action in self._actions.values():
+            if action.name in avail_counts:
+                row = (action, "available", avail_counts[action.name])
+            elif action.name in exhausted_names:
+                row = (action, "exhausted", None)
+            elif not action.is_available(facts):
+                row = (action, "dormant", action.missing_requirements(facts))
+            else:
+                # gate satisfied but not runnable → posture or missing tool
+                row = (action, "blocked",
+                       self.why(action.name, facts, posture, tried, tools))
+            buckets.setdefault(action.group, []).append(row)
+
+        for rows in buckets.values():
+            rows.sort(key=lambda r: (r[0].order, r[0].name))
+
+        ordered_names = GROUP_ORDER + sorted(set(buckets) - set(GROUP_ORDER))
+        return [(g, buckets[g]) for g in ordered_names if g in buckets]
 
     def why(
         self,

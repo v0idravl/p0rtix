@@ -103,11 +103,16 @@ duplicate per-port sections. Dedup happens when ports/services become facts.
 
 ## Sliced rollout
 
-### Slice 1 — path grouping + state-pane summary (UI-only, low risk)
-- [ ] Add `group`/`order` to `Action`; tag existing actions.
-- [ ] `registry.groups()`; dashboard renders grouped sections with state glyphs.
-- [ ] State pane trimmed to the `status` summary; hashes shown by crack-state.
-- [ ] Pilot tests: grouped rendering, state-summary content.
+### Slice 1 — path grouping + state-pane summary (UI-only, low risk) ✅
+- [x] Add `group`/`order` to `Action`; tag existing actions.
+- [x] `registry.grouped()`; dashboard renders grouped sections with state glyphs
+      (available `●` / blocked `◐` / dormant `○`+reason / exhausted `✓`), proto
+      status badge on the group header.
+- [x] State pane trimmed to the `status` summary (target/domain/#ports/loot/
+      lockout/actions). Hashes-by-crack-state deferred to Slice 5 (needs the fact
+      model); shown as a kind list for now.
+- [x] Pilot + registry tests: grouped ordering/state, grouped rendering,
+      state-summary content. (94 pass)
 
 ### Slice 2 — decompose the monoliths + `creds.test`
 - [ ] Split `ad.authenticated_core` into the granular `ad`/`ldap`/`kerberos`
