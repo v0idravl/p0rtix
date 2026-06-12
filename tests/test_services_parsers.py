@@ -64,3 +64,16 @@ def test_parse_nxc_users_legacy_format(tmp_path):
 def test_parse_nxc_users_marks_complete(tmp_path):
     fs = _run(_NXC_TABLE, tmp_path)
     assert fs.users_complete
+
+
+def test_notable_spider_files_flags_foothold_loot(tmp_path):
+    from pathlib import Path
+    names = ["winrm_backup.zip", "LAPS.x64.msi", "boring.jpg", "notes.txt",
+             "legacyy_dev_auth.pfx", "web.config", "passwords.xlsx", "photo.png"]
+    files = [Path(tmp_path / n) for n in names]
+    for f in files:
+        f.write_text("x")
+    notable = {p.name for p in services._notable_spider_files(files)}
+    assert {"winrm_backup.zip", "LAPS.x64.msi", "legacyy_dev_auth.pfx",
+            "web.config", "passwords.xlsx"} <= notable
+    assert "boring.jpg" not in notable and "photo.png" not in notable

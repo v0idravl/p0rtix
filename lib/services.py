@@ -519,6 +519,31 @@ def _parse_enum4linux(output: str, findings: Findings, runner: Runner):
             findings.bullet(f"  `{line.strip()}`")
 
 
+# File types / name hints worth flagging when spidered off a share — creds,
+# key material, backups, configs that commonly hold the next foothold.
+_NOTABLE_SUFFIXES = {
+    ".zip", ".7z", ".tar", ".gz", ".rar", ".bak", ".vhd", ".vhdx", ".ova",
+    ".pfx", ".p12", ".key", ".pem", ".ppk", ".crt", ".kdbx",
+    ".config", ".xml", ".ini", ".conf", ".ps1", ".bat", ".vbs", ".cmd",
+    ".rdp", ".msi", ".kdb", ".vmdk",
+}
+_NOTABLE_NAME_HINTS = ("backup", "cred", "passw", "secret", "unattend",
+                       "sysprep", "id_rsa", ".env", "vault")
+
+
+def _notable_spider_files(files: list) -> list:
+    """Pick foothold-grade files (key material, backups, creds, configs) from a
+    spidered set, deduped and capped for the findings list."""
+    seen, out = set(), []
+    for p in files:
+        name = p.name.lower()
+        if p.suffix.lower() in _NOTABLE_SUFFIXES or any(h in name for h in _NOTABLE_NAME_HINTS):
+            if p.name not in seen:
+                seen.add(p.name)
+                out.append(p)
+    return out[:25]
+
+
 def _smb_spider(ip: str, shares: list[str], runner: Runner,
                 findings: Findings, available: set[str],
                 user: str = "", password: str = ""):
@@ -562,10 +587,18 @@ def _smb_spider(ip: str, shares: list[str], runner: Runner,
                 "-o", f"DOWNLOAD_FLAG=True", f"OUTPUT_FOLDER={str(loot_dir)}",
                 "MAX_FILE_SIZE=5000000",
             ]
-            out3 = runner.run(cmd3, f"smb_spider_{share}_nxc_spider", timeout=120)
+            runner.run(cmd3, f"smb_spider_{share}_nxc_spider", timeout=300)
             findings.cmd(" ".join(cmd3))
-            if "Downloaded" in out3 or "file" in out3.lower():
-                findings.bullet(f"  spider_plus downloaded files to `{loot_dir}`")
+            # spider_plus streams files to disk as it walks, so even if the module
+            # overruns its timeout the loot is already downloaded. Report on what
+            # actually landed, and surface foothold-grade files explicitly.
+            downloaded = [p for p in loot_dir.rglob("*") if p.is_file()]
+            if downloaded:
+                findings.bullet(f"  spider_plus downloaded {len(downloaded)} file(s) to `{loot_dir}`")
+                for p in _notable_spider_files(downloaded):
+                    rel = p.relative_to(loot_dir)
+                    findings.bullet(f"  ⚠ **notable file:** `{rel}`")
+                    findings.add_summary(f"SMB loot in `{share}`: `{p.name}`")
 
 
 # ── SNMP (161, 162 UDP) ───────────────────────────────────────────────────────
