@@ -287,12 +287,19 @@ def _build_dashboard(router, scheduler, registry, facts, posture):
             lv.clear()
 
             # Grouped by path: each service/branch is a section that lights up and
-            # progresses as facts arrive (step into the LDAP path, the SMB path…).
+            # progresses as facts arrive. The list stays actionable — only
+            # available actions and ones ready-but-blocked-by-noise/tool are shown;
+            # fact-dormant and exhausted actions are hidden (inspect via the
+            # `dormant` / `exhausted` commands) so the list isn't cluttered.
             for group, rows in registry.grouped(facts, posture, scheduler.tried):
+                shown = [(a, s, i) for (a, s, i) in rows
+                         if s in ("available", "blocked")]
+                if not shown:
+                    continue
                 ps = facts.proto_status(group)
                 badge = f"  [dim]\\[{ps.value}][/]" if ps is not None else ""
                 lv.append(_ActionItem(f"▸ {group.upper()}{badge}", header=True))
-                for action, state, info in rows:
+                for action, state, info in shown:
                     label, runnable = self._action_row(action, state, info)
                     lv.append(_ActionItem(label, action_name=action.name,
                                           runnable=runnable))

@@ -17,10 +17,37 @@ import shlex
 import subprocess
 
 
+def _recover_tmux_env() -> None:
+    """`sudo` strips $TMUX/$TMUX_PANE, so a p0rtix launched with `sudo` inside tmux
+    looks like it isn't. We're root, so read the invoking shell's environment from
+    /proc and copy the vars back — then `tmux new-window` targets the real session.
+    Best-effort and silent (non-Linux / no /proc just leaves things as-is)."""
+    if os.environ.get("TMUX"):
+        return
+    try:
+        pid = os.getppid()
+        for _ in range(8):
+            if pid <= 1:
+                break
+            with open(f"/proc/{pid}/environ", "rb") as fh:
+                env = dict(c.split(b"=", 1) for c in fh.read().split(b"\0") if b"=" in c)
+            if b"TMUX" in env:
+                os.environ["TMUX"] = env[b"TMUX"].decode(errors="replace")
+                if b"TMUX_PANE" in env:
+                    os.environ["TMUX_PANE"] = env[b"TMUX_PANE"].decode(errors="replace")
+                return
+            with open(f"/proc/{pid}/stat") as fh:
+                stat = fh.read()
+            pid = int(stat[stat.rindex(")") + 1:].split()[1])   # ppid (after comm)
+    except (OSError, ValueError, IndexError):
+        pass
+
+
 def in_tmux() -> bool:
     """True when p0rtix is running inside a tmux session — then a shell can open
     as a new tmux window (the TUI keeps running, detach/switch/close with tmux)
-    instead of suspending the whole app."""
+    instead of suspending the whole app. Recovers $TMUX past sudo first."""
+    _recover_tmux_env()
     return bool(os.environ.get("TMUX"))
 
 

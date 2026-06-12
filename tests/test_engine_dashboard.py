@@ -184,3 +184,28 @@ def test_state_pane_is_status_summary(tmp_path):
             assert "known" in txt          # ports shown as a count, not a dump
 
     _run(body())
+
+
+def test_action_list_hides_fact_dormant_actions(tmp_path):
+    # The list stays actionable: fact-dormant actions are not shown (only
+    # available + ready-but-blocked-by-noise/tool).
+    fs, posture, reg, sched, router = _wire(tmp_path)
+    app = _build_dashboard(router, sched, reg, fs, posture)
+
+    async def body():
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            labels = [getattr(c, "label_text", "") for c in
+                      app.query_one("#actions", _ListView()).children]
+            text = "\n".join(labels)
+            # smb.anon_enum is fact-dormant (no 445) → not in the list
+            assert "smb.anon_enum" not in text
+            # discovery is available → present
+            assert any("discovery.tcp_quick" in l for l in labels)
+
+    _run(body())
+
+
+def _ListView():
+    from textual.widgets import ListView
+    return ListView

@@ -159,3 +159,24 @@ def test_hash_cracked_event_emitted(tmp_path):
     fs.add_hash("kerberoast", "sqlsvc")
     fs.mark_hash_cracked("sqlsvc", "Summer2024")
     assert events.count("hash") == 2             # capture + crack both notify
+
+
+# ── a known credential seeds the user list + spray candidates ─────────────────
+def test_valid_cred_seeds_userlist_and_spray_candidate(tmp_path):
+    fs = FactStore("10.0.0.1", None, "cred-seed", str(tmp_path))
+    fs.add_valid_cred("legacyy", "E3R$Q62^12p7PLlC", "WINRM")
+    assert "legacyy" in fs.snapshot()["users"]          # → roasting / enum
+    assert "E3R$Q62^12p7PLlC" in fs.snapshot()["creds"]  # → spray candidate
+
+
+def test_cred_pair_seeds_userlist(tmp_path):
+    fs = FactStore("10.0.0.1", None, "pair-seed", str(tmp_path))
+    fs.add_cred_pair("svc-alfresco", "s3rvice")
+    assert "svc-alfresco" in fs.snapshot()["users"]
+    assert "s3rvice" in fs.snapshot()["creds"]
+
+
+def test_machine_account_cred_not_added_as_user(tmp_path):
+    fs = FactStore("10.0.0.1", None, "mach", str(tmp_path))
+    fs.add_valid_cred("DC01$", "machinehash", "SMB")
+    assert "DC01$" not in fs.snapshot()["users"]         # machine acct excluded

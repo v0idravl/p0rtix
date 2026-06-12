@@ -115,6 +115,7 @@ def _capture_call(seen):
 
 def test_local_shell_uses_seam(tmp_path, monkeypatch):
     monkeypatch.delenv("TMUX", raising=False)        # force the blocking path
+    monkeypatch.setattr(access, "_recover_tmux_env", lambda: None)
     calls = {}
     monkeypatch.setattr(access.subprocess, "call",
                         lambda argv, cwd=None: calls.update(argv=argv, cwd=cwd) or 0)
@@ -134,6 +135,7 @@ def test_launch_shell_uses_tmux_window_when_in_tmux(tmp_path, monkeypatch):
 
 def test_launch_shell_blocks_without_tmux(tmp_path, monkeypatch):
     monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.setattr(access, "_recover_tmux_env", lambda: None)
     seen = {}
     monkeypatch.setattr(access.subprocess, "call", _capture_call(seen))
     access.launch_shell(["evil-winrm", "-i", "10.0.0.1"])

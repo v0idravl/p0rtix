@@ -95,6 +95,13 @@ class FactStore(Workspace):
         key = (user, password)
         is_new = key not in self._known_valid
         super().add_valid_cred(user, password, service)
+        # A confirmed credential teaches two more facts: its account is a real
+        # user (→ the user list, for roasting/enum) and its password is a spray
+        # candidate (→ against every other user). Both are deduped.
+        if user and not user.endswith("$"):
+            self.add_user(user, authoritative=True)
+        if password:
+            self.add_cred(password)
         if is_new:
             self._emit(FactEvent("valid_cred", key))
 
@@ -194,7 +201,9 @@ class FactStore(Workspace):
             is_new = bool(key[0]) and key not in self._cred_pairs and key not in self._known_valid
             if is_new:
                 self._cred_pairs.add(key)
-        # also surface the password as a spray candidate
+        # surface the account as a user and the password as a spray candidate
+        if key[0] and not key[0].endswith("$"):
+            self.add_user(key[0], authoritative=True)
         self.add_cred(password)
         if is_new:
             self._emit(FactEvent("cred_pair", key))
