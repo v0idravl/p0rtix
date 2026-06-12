@@ -119,17 +119,37 @@ def _ldap_port(facts: FactStore) -> int | None:
     return None
 
 
-def _h_ldap_anon(ctx) -> ActionResult:
-    from lib import services
+def _ldap_svc(ctx) -> Service:
     port = _ldap_port(ctx.facts) or 389
-    svc = Service(port=port, proto="tcp", name="ldap", version="",
-                  is_web=False, scheme="", hostname=ctx.domain or "")
-    discoveries = services._ldap(ctx.ip, svc, ctx.runner, ctx.findings, ctx.available)
-    # If anonymous bind yielded no base DN / users, mark the branch dormant.
+    return Service(port=port, proto="tcp", name="ldap", version="",
+                   is_web=False, scheme="", hostname=ctx.domain or "")
+
+
+def _h_ldap_domain_info(ctx) -> ActionResult:
+    from lib import services
+    services._ldap_domain_info(ctx.ip, _ldap_svc(ctx), ctx.runner, ctx.findings, ctx.available)
+    return ActionResult(ok=True, summary="LDAP domain info (base DN, policy, computers)")
+
+
+def _h_ldap_users(ctx) -> ActionResult:
+    from lib import services
+    services._ldap_users(ctx.ip, _ldap_svc(ctx), ctx.runner, ctx.findings, ctx.available)
+    # If anonymous bind yielded nothing, mark the branch dormant until a cred.
     if not ctx.facts.has("users") and not ctx.facts.has("domain"):
         ctx.facts.set_proto_status("ldap", ProtoStatus.ANON_DENIED)
-    return ActionResult(ok=True, summary="anonymous LDAP enumeration",
-                        discoveries=discoveries or [])
+    return ActionResult(ok=True, summary="LDAP users + AS-REP-roastable")
+
+
+def _h_ldap_groups(ctx) -> ActionResult:
+    from lib import services
+    services._ldap_groups(ctx.ip, _ldap_svc(ctx), ctx.runner, ctx.findings, ctx.available)
+    return ActionResult(ok=True, summary="LDAP groups + privileged accounts")
+
+
+def _h_ldap_delegation(ctx) -> ActionResult:
+    from lib import services
+    services._ldap_delegation(ctx.ip, _ldap_svc(ctx), ctx.runner, ctx.findings, ctx.available)
+    return ActionResult(ok=True, summary="LDAP delegation surface")
 
 
 # ── yellow: AS-REP roast (unlocked by domain + a user list) ───────────────────
@@ -432,17 +452,27 @@ def build_registry() -> ActionRegistry:
         supersedes=("smb.enum4linux",),     # no-overlap: this covers enum4linux ground
     ))
 
-    reg.register(Action(
-        "ldap.anon_bind", Tier.GREEN, _h_ldap_anon,
-        group="ldap", order=1,
-        footprint=Footprint(summary="anonymous LDAP bind + directory reads"),
-        gate=lambda f: _ldap_port(f) is not None,
-        requires=(Requirement("ldap_port", "LDAP (tcp/389|636|3268|3269) open"),),
-        deps=("ldapsearch",),
-        # once anon bind is denied, don't keep re-offering it — the branch waits
-        # for a credential (or an operator `recheck ldap`).
-        suppressed_by=(ProtoStatus.ANON_DENIED,),
-    ))
+    # Anonymous LDAP, decomposed into cohesive sub-actions. `run ldap` runs the
+    # whole branch; each is also individually runnable. All gated on an LDAP port,
+    # and suppressed once the branch is ANON_DENIED (waits for a cred / recheck).
+    _ldap_gate = lambda f: _ldap_port(f) is not None        # noqa: E731
+    _ldap_req = (Requirement("ldap_port", "LDAP (tcp/389|636|3268|3269) open"),)
+    for _name, _order, _h, _desc in (
+        ("ldap.domain_info", 1, _h_ldap_domain_info,
+         "anonymous LDAP: base DN, password policy, computers"),
+        ("ldap.users", 2, _h_ldap_users,
+         "anonymous LDAP: domain users + AS-REP-roastable accounts"),
+        ("ldap.groups", 3, _h_ldap_groups,
+         "anonymous LDAP: groups + privileged (adminCount) accounts"),
+        ("ldap.delegation", 4, _h_ldap_delegation,
+         "anonymous LDAP: unconstrained / constrained delegation"),
+    ):
+        reg.register(Action(
+            _name, Tier.GREEN, _h, group="ldap", order=_order,
+            footprint=Footprint(summary=_desc),
+            gate=_ldap_gate, requires=_ldap_req, deps=("ldapsearch",),
+            suppressed_by=(ProtoStatus.ANON_DENIED,),
+        ))
 
     reg.register(Action(
         "kerberos.userenum", Tier.YELLOW, _h_userenum,

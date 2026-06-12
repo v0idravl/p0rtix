@@ -685,47 +685,32 @@ def _snmp_v3(ip: str, runner: Runner, findings: Findings):
 
 # ── LDAP (389, 636, 3268, 3269) ───────────────────────────────────────────────
 
-def _ldap(ip, service, runner, findings, available):
-    """
-    Full LDAP/AD enumeration including:
-      - Password policy
-      - Users, computers, groups
-      - AS-REP roastable accounts (no pre-auth)
-      - Constrained / unconstrained delegation
-      - AdminSDHolder-protected accounts
-      - ldapdomaindump structured dump
-      - BloodHound collection attempt
-      - certipy ADCS template enumeration
-    """
+def _ldap_connect(ip, service, runner, findings, available):
+    """Shared anonymous-LDAP setup: base-DN discovery + domain derivation. Returns
+    a context dict, or None if ldapsearch is missing / the connection failed /
+    anonymous bind is disabled. The base query is cached, so the cohesive ldap.*
+    sub-actions can each call this cheaply and run independently."""
     port = service.port
     domain = service.hostname  # set by orchestrator from --domain
-
     gc_mode = port in (3268, 3269)
     proto = "ldaps" if port in (636, 3269) else "ldap"
     uri = f"{proto}://{ip}:{port}"
     # LDAPS against a DC almost always presents a self-signed / internal-CA cert;
-    # without relaxing verification ldapsearch aborts with "Can't contact LDAP
-    # server" before any query runs. Only needed for the ldaps:// ports.
+    # without relaxing verification ldapsearch aborts before any query runs.
     ldap_env = {"LDAPTLS_REQCERT": "never"} if proto == "ldaps" else None
-
-    if gc_mode:
-        findings.note("Global Catalog port — enumerating forest-wide AD objects")
 
     if "ldapsearch" not in available:
         findings.note("`ldapsearch` not available")
-        return []
+        return None
 
-    # 1. Base DN discovery
     cmd_base = ["ldapsearch", "-x", "-H", uri, "-b", "", "-s", "base"]
     out_base = runner.run(cmd_base, f"ldap_{port}_base", env=ldap_env)
-    findings.cmd(" ".join(cmd_base))
 
-    # Detect hard connection failure (not just auth denied) — skip all further queries
     _conn_fail_markers = ("Can't contact LDAP server", "ldap_sasl_bind(SIMPLE)",
                           "Connection refused", "No route to host", "timed out")
     if any(m in out_base for m in _conn_fail_markers):
         findings.note(f"LDAP connection failed on port {port} — skipping anonymous queries")
-        return []
+        return None
 
     # Root DSE often exposes dnsHostName even on anonymous bind — grab it early
     m_dns = re.search(r"dnsHostName:\s*(\S+)", out_base)
@@ -735,110 +720,125 @@ def _ldap(ip, service, runner, findings, available):
     base_dn = _extract_ldap_base(out_base)
     if not base_dn and domain:
         base_dn = "DC=" + ",DC=".join(domain.split("."))
-    if base_dn:
-        findings.bullet(f"Base DN: `{base_dn}`")
-    else:
-        findings.code_block(_trim(out_base))
-        findings.note("Anonymous bind may be disabled — LDAP queries skipped.")
-        return []
+    if not base_dn:
+        findings.note("Anonymous LDAP bind may be disabled — queries skipped.")
+        return None
 
-    def lq(label: str, filt: str, *attrs) -> str:
-        cmd = ["ldapsearch", "-x", "-H", uri, "-b", base_dn, filt, *attrs]
-        out = runner.run(cmd, f"ldap_{port}_{label}", timeout=60, env=ldap_env)
-        findings.cmd(" ".join(cmd))
-        if not out.strip() or "# numEntries" not in out:
-            if "Operations error" in out or "Insufficient access rights" in out or "strongerAuth" in out:
-                findings.note(f"LDAP `{label}`: anonymous bind denied by server (Operations error / auth required)")
-            elif "No such object" in out:
-                findings.note(f"LDAP `{label}`: no matching objects")
-        return out
-
-    # 2. Password policy
-    out_pp = lq("password_policy", "(objectClass=domain)",
-                "minPwdLength", "maxPwdAge", "lockoutThreshold", "lockoutDuration", "pwdProperties")
-    _parse_password_policy(out_pp, findings, runner.ws)
-
-    # 3. Users
-    out_users = lq("users", "(objectClass=person)",
-                   "sAMAccountName", "description", "mail", "userAccountControl", "memberOf")
-    _parse_ldap_users(out_users, findings, runner)
-
-    # 4. Computers — store FQDNs for /etc/hosts auto-add in orchestrator
-    out_comp = lq("computers", "(objectClass=computer)",
-                  "sAMAccountName", "operatingSystem", "operatingSystemVersion", "dNSHostName")
-    for fqdn in _parse_ldap_computers(out_comp, findings):
-        runner.ws.add_hostname(fqdn)
-
-    # 5. Groups
-    out_grp = lq("groups", "(objectClass=group)", "cn", "description", "member")
-    groups = re.findall(r"^cn:\s+(.+)", out_grp, re.MULTILINE)
-    if groups:
-        findings.bullet(f"**Groups ({len(groups)}):** {', '.join(groups[:20])}" +
-                        (" …" if len(groups) > 20 else ""))
-
-    # Derive domain from base DN if --domain wasn't provided, and persist it
-    # so the post-enum phase can use it for GetNPUsers / kerbrute with the
-    # complete user list (assembled from all parallel handlers).
     effective_domain = domain or _dn_to_domain(base_dn)
     if effective_domain and not gc_mode:
         runner.ws.set_discovered_domain(effective_domain)
 
-    # 6. AS-REP roastable (userAccountControl bit 4194304 = DONT_REQ_PREAUTH)
-    out_asrep = lq("asrep_roastable",
-                   "(&(objectClass=user)(userAccountControl:1.2.840.113556.1.4.803:=4194304))",
-                   "sAMAccountName")
+    return {"uri": uri, "base_dn": base_dn, "ldap_env": ldap_env,
+            "port": port, "domain": effective_domain, "gc_mode": gc_mode}
+
+
+def _lq(ctx, runner, findings, label: str, filt: str, *attrs) -> str:
+    """Run one anonymous ldapsearch query against the connect context."""
+    cmd = ["ldapsearch", "-x", "-H", ctx["uri"], "-b", ctx["base_dn"], filt, *attrs]
+    out = runner.run(cmd, f"ldap_{ctx['port']}_{label}", timeout=60, env=ctx["ldap_env"])
+    findings.cmd(" ".join(cmd))
+    if not out.strip() or "# numEntries" not in out:
+        if "Operations error" in out or "Insufficient access rights" in out or "strongerAuth" in out:
+            findings.note(f"LDAP `{label}`: anonymous bind denied by server")
+        elif "No such object" in out:
+            findings.note(f"LDAP `{label}`: no matching objects")
+    return out
+
+
+# ── cohesive anonymous-LDAP sub-actions (each a "thing you're looking for") ────
+def _ldap_domain_info(ip, service, runner, findings, available) -> None:
+    """Base DN, password policy (→ lockout threshold), and computers."""
+    ctx = _ldap_connect(ip, service, runner, findings, available)
+    if not ctx:
+        return
+    findings.bullet(f"Base DN: `{ctx['base_dn']}`")
+    out_pp = _lq(ctx, runner, findings, "password_policy", "(objectClass=domain)",
+                 "minPwdLength", "maxPwdAge", "lockoutThreshold", "lockoutDuration", "pwdProperties")
+    _parse_password_policy(out_pp, findings, runner.ws)
+    out_comp = _lq(ctx, runner, findings, "computers", "(objectClass=computer)",
+                   "sAMAccountName", "operatingSystem", "operatingSystemVersion", "dNSHostName")
+    for fqdn in _parse_ldap_computers(out_comp, findings):
+        runner.ws.add_hostname(fqdn)
+
+
+def _ldap_users(ip, service, runner, findings, available) -> None:
+    """Domain users + AS-REP-roastable accounts (DONT_REQ_PREAUTH)."""
+    ctx = _ldap_connect(ip, service, runner, findings, available)
+    if not ctx:
+        return
+    out_users = _lq(ctx, runner, findings, "users", "(objectClass=person)",
+                    "sAMAccountName", "description", "mail", "userAccountControl", "memberOf")
+    _parse_ldap_users(out_users, findings, runner)
+    out_asrep = _lq(ctx, runner, findings, "asrep_roastable",
+                    "(&(objectClass=user)(userAccountControl:1.2.840.113556.1.4.803:=4194304))",
+                    "sAMAccountName")
     asrep = re.findall(r"sAMAccountName:\s+(.+)", out_asrep)
     if asrep:
         findings.bullet(f"**AS-REP roastable (no pre-auth required): {', '.join(asrep)}**")
         findings.add_summary(f"AS-REP roastable accounts (LDAP UAC flag): {', '.join(asrep)}")
-        findings.note(f"Crack with: `impacket-GetNPUsers {effective_domain}/ -no-pass -dc-ip {ip} -request -format hashcat`")
+        findings.note(f"Crack with: `impacket-GetNPUsers {ctx['domain']}/ -no-pass -dc-ip {ip} -request -format hashcat`")
 
-    # 7. Unconstrained delegation — exclude DCs (SERVER_TRUST_ACCOUNT=8192);
-    # a DC holding unconstrained delegation is by design, only non-DCs are a find.
-    out_uncons = lq("unconstrained_delegation",
-                    "(&(objectClass=computer)"
-                    "(userAccountControl:1.2.840.113556.1.4.803:=524288)"
-                    "(!(userAccountControl:1.2.840.113556.1.4.803:=8192)))",
-                    "sAMAccountName", "dNSHostName")
-    uncons = re.findall(r"sAMAccountName:\s+(.+)", out_uncons)
-    if uncons:
-        findings.bullet(f"**Unconstrained delegation (non-DC):** {', '.join(uncons)}")
 
-    # 8. Constrained delegation
-    out_cons = lq("constrained_delegation", "(msDS-AllowedToDelegateTo=*)",
-                  "sAMAccountName", "msDS-AllowedToDelegateTo")
-    cons = re.findall(r"sAMAccountName:\s+(.+)", out_cons)
-    if cons:
-        findings.bullet(f"**Constrained delegation:** {', '.join(cons)}")
-
-    # 9. AdminSDHolder-protected accounts (high-privilege)
-    out_admin = lq("admincount", "(adminCount=1)", "sAMAccountName")
+def _ldap_groups(ip, service, runner, findings, available) -> None:
+    """Groups + AdminSDHolder-protected (privileged) accounts."""
+    ctx = _ldap_connect(ip, service, runner, findings, available)
+    if not ctx:
+        return
+    out_grp = _lq(ctx, runner, findings, "groups", "(objectClass=group)", "cn", "description", "member")
+    groups = re.findall(r"^cn:\s+(.+)", out_grp, re.MULTILINE)
+    if groups:
+        findings.bullet(f"**Groups ({len(groups)}):** {', '.join(groups[:20])}" +
+                        (" …" if len(groups) > 20 else ""))
+    out_admin = _lq(ctx, runner, findings, "admincount", "(adminCount=1)", "sAMAccountName")
     admins = re.findall(r"sAMAccountName:\s+(.+)", out_admin)
     if admins:
         findings.bullet(f"**AdminSDHolder-protected (privileged):** {', '.join(admins)}")
 
-    # 10. ADCS — certipy requires credentials; collected in creds mode
-    if "certipy-ad" in available and domain:
-        findings.note(
-            f"ADCS enumeration requires credentials — run with: "
-            f"`certipy-ad find -u USER@{domain} -p PASS -dc-ip {ip} -vulnerable -stdout`"
-        )
 
-    # 11. ldapdomaindump — requires credentials; collected in creds mode
-    if "ldapdomaindump" in available and domain:
-        findings.note(
-            f"ldapdomaindump requires credentials — run with: "
-            f"`ldapdomaindump -u '{domain}\\USER' -p PASS {ip} -o loot/ldapdomaindump`"
-        )
+def _ldap_delegation(ip, service, runner, findings, available) -> None:
+    """Unconstrained (non-DC) + constrained delegation — Kerberos attack surface."""
+    ctx = _ldap_connect(ip, service, runner, findings, available)
+    if not ctx:
+        return
+    out_uncons = _lq(ctx, runner, findings, "unconstrained_delegation",
+                     "(&(objectClass=computer)"
+                     "(userAccountControl:1.2.840.113556.1.4.803:=524288)"
+                     "(!(userAccountControl:1.2.840.113556.1.4.803:=8192)))",
+                     "sAMAccountName", "dNSHostName")
+    uncons = re.findall(r"sAMAccountName:\s+(.+)", out_uncons)
+    if uncons:
+        findings.bullet(f"**Unconstrained delegation (non-DC):** {', '.join(uncons)}")
+    out_cons = _lq(ctx, runner, findings, "constrained_delegation", "(msDS-AllowedToDelegateTo=*)",
+                   "sAMAccountName", "msDS-AllowedToDelegateTo")
+    cons = re.findall(r"sAMAccountName:\s+(.+)", out_cons)
+    if cons:
+        findings.bullet(f"**Constrained delegation:** {', '.join(cons)}")
 
-    # 12. BloodHound — requires credentials; collected in creds mode
-    if "bloodhound-python" in available and domain:
-        findings.note(
-            f"BloodHound requires credentials — run with: "
-            f"`bloodhound-python -d {domain} -u USER -p PASS "
-            f"-ns {ip} -c All --auth-method ntlm --zip`"
-        )
 
+def _ldap(ip, service, runner, findings, available):
+    """Full anonymous LDAP/AD enumeration (classic path) — runs every cohesive
+    sub-step in sequence. The console exposes each as its own `ldap.*` action."""
+    if service.port in (3268, 3269):
+        findings.note("Global Catalog port — enumerating forest-wide AD objects")
+    ctx = _ldap_connect(ip, service, runner, findings, available)
+    if not ctx:
+        return []
+    _ldap_domain_info(ip, service, runner, findings, available)
+    _ldap_users(ip, service, runner, findings, available)
+    _ldap_groups(ip, service, runner, findings, available)
+    _ldap_delegation(ip, service, runner, findings, available)
+
+    # Credentialed follow-ups belong to creds mode — leave the operator a hint.
+    domain = ctx["domain"]
+    if domain and "certipy-ad" in available:
+        findings.note(f"ADCS enumeration requires credentials — run with: "
+                      f"`certipy-ad find -u USER@{domain} -p PASS -dc-ip {ip} -vulnerable -stdout`")
+    if domain and "ldapdomaindump" in available:
+        findings.note(f"ldapdomaindump requires credentials — run with: "
+                      f"`ldapdomaindump -u '{domain}\\USER' -p PASS {ip} -o loot/ldapdomaindump`")
+    if domain and "bloodhound-python" in available:
+        findings.note(f"BloodHound requires credentials — run with: "
+                      f"`bloodhound-python -d {domain} -u USER -p PASS -ns {ip} -c All --auth-method ntlm --zip`")
     return []
 
 

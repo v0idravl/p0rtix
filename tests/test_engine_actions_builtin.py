@@ -41,8 +41,9 @@ def _setup(tmp_path, level, *, output="", tools=None):
 def test_registry_has_phase1_actions(tmp_path):
     reg = build_registry()
     names = {a.name for a in reg.all()}
-    assert {"discovery.tcp_ports", "svc.version_detect",
-            "smb.anon_enum", "ldap.anon_bind"} <= names
+    assert {"discovery.tcp_ports", "svc.version_detect", "smb.anon_enum",
+            "ldap.domain_info", "ldap.users", "ldap.groups",
+            "ldap.delegation"} <= names
 
 
 def test_discovery_adds_open_ports_as_facts(tmp_path, monkeypatch):
@@ -333,3 +334,24 @@ def test_tcp_common_records_coverage(tmp_path, monkeypatch):
     sched.run_action("discovery.tcp_common")
     assert fs.has("tcp/22") and fs.has("tcp/80")
     assert 22 in fs.scanned_tcp()
+
+
+def test_ldap_branch_decomposed_into_cohesive_actions(tmp_path, monkeypatch):
+    from lib import services
+    from lib.engine.action import Tier
+    calls = []
+    for fn in ("_ldap_domain_info", "_ldap_users", "_ldap_groups", "_ldap_delegation"):
+        monkeypatch.setattr(services, fn,
+                            (lambda name: lambda ip, svc, r, f, a: calls.append(name))(fn))
+    fs, posture, reg, sched = _setup(tmp_path, Tier.GREEN, tools=_ALL_TOOLS)
+
+    ldap_actions = {"ldap.domain_info", "ldap.users", "ldap.groups", "ldap.delegation"}
+    assert "ldap.anon_bind" not in {a.name for a in reg.all()}     # monolith gone
+    assert ldap_actions <= {a.name for a, _ in reg.dormant(fs)}    # need an LDAP port
+
+    fs.add_open_port("tcp", 389)
+    # `run ldap` runs the whole branch
+    n = sched.run_group("ldap")
+    assert n == 4
+    assert set(calls) == {"_ldap_domain_info", "_ldap_users",
+                          "_ldap_groups", "_ldap_delegation"}
