@@ -24,6 +24,9 @@ class Runner:
 
     def __init__(self, ws: Workspace):
         self._ws = ws
+        # When True, run() bypasses the cached raw file and re-executes, writing
+        # back to the same file. The engine flips this on for an explicit re-run.
+        self.fresh = False
 
     @property
     def ws(self) -> Workspace:
@@ -41,12 +44,15 @@ class Runner:
         env: extra environment variables, merged over the inherited environment.
         """
         existing = next(self._ws.raw_dir.glob(f"*_{label}.txt"), None)
-        if existing:
+        if existing and not self.fresh:
             cached = existing.read_text()
             sep = "# " + "=" * 60 + "\n\n"
             return cached.split(sep, 1)[-1] if sep in cached else cached
 
-        raw_path = self._ws.raw_dir / f"{self._ws.next_raw_label(label)}.txt"
+        # fresh re-run overwrites the existing raw file in place; otherwise a new
+        # numbered file is created.
+        raw_path = existing if (existing and self.fresh) \
+            else self._ws.raw_dir / f"{self._ws.next_raw_label(label)}.txt"
         cmd_str = shlex.join(cmd)
         _log.debug("RUN [%s]: %s", label, cmd_str)
 

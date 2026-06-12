@@ -198,3 +198,38 @@ def test_run_group_dispatches_only_that_branch(tmp_path):
     n = sched.run_group("discovery")
     assert n == 2 and set(ran) == {"a", "b"}        # smb.x untouched
     assert "x" not in ran
+
+
+def test_explicit_run_reruns_but_bulk_skips(tmp_path):
+    fs = _store(tmp_path)
+    reg = ActionRegistry()
+    ran = []
+    reg.register(Action("a", Tier.GREEN,
+                        lambda c: ran.append(1) or ActionResult()))
+    sched = Scheduler(reg, fs, _green())
+
+    sched.run_action("a")
+    assert ran == [1]
+    sched.run_action("a")               # explicit re-run repeats it
+    assert ran == [1, 1]
+    sched.run_all_at_or_below()         # bulk still skips completed work
+    assert ran == [1, 1]
+
+
+def test_rerun_enables_fresh_on_runner(tmp_path):
+    class _R:
+        def __init__(self, ws):
+            self.ws = ws
+            self.fresh = False
+            self.saw_fresh = []
+    fs = _store(tmp_path)
+    reg = ActionRegistry()
+    runner = _R(fs)
+    reg.register(Action("a", Tier.GREEN,
+                        lambda c: c.runner.saw_fresh.append(c.runner.fresh) or ActionResult()))
+    sched = Scheduler(reg, fs, _green(), runner=runner)
+
+    sched.run_action("a")               # first run: not fresh
+    sched.run_action("a")               # re-run: fresh during dispatch
+    assert runner.saw_fresh == [False, True]
+    assert runner.fresh is False        # reset afterwards

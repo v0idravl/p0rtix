@@ -27,7 +27,7 @@ commands:
   actions [--all]              runnable actions (--all includes dormant/exhausted)
   dormant | exhausted          greyed-out (missing inputs) / already-run actions
   why <action>                 explain an action's state
-  run <action> [port]          dispatch one action (optionally one port)
+  run <action> [port]          dispatch one action (re-runs it fresh if already done)
   run <group> | run-all|auto   dispatch a whole branch / everything at/below posture
   noise <green|yellow|red>     raise/lower the noise ceiling
   set domain <d> | add user <u> | creds add <u:p>   populate facts by hand

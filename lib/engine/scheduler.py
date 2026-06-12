@@ -152,22 +152,48 @@ class Scheduler:
                 dispatched += 1
         return dispatched
 
+    def _rearm_for_rerun(self, action: Action, port: int | None = None) -> bool:
+        """Drop the tried-state for an action's instance(s) so an *explicit* run
+        repeats it. Bulk runs (run-all / run-group) never call this, so they still
+        skip completed work — only a deliberate `run <action>` re-runs. Returns
+        True if anything was actually re-armed (i.e. this is a genuine re-run)."""
+        target = instance_key(action.name, {"port": port}) if port is not None else None
+        with self._lock:
+            cleared = {k for k in self._tried
+                       if k.split("#", 1)[0] == action.name
+                       and (target is None or k == target)}
+            self._tried -= cleared
+        if cleared:
+            self._save_state()
+        return bool(cleared)
+
     def run_action(self, name: str, posture: Posture | None = None,
                    *, port: int | None = None) -> int:
         """Dispatch available instances of one named action. With `port`, dispatch
-        only the instance for that port (e.g. version-detect a single service)."""
+        only the instance for that port (e.g. version-detect a single service).
+
+        An explicit run repeats a previously-run action (manual override) — the
+        tried-state is re-armed first, and the runner re-executes (no cached
+        output) for the re-run, so `run <action>` always does the thing fresh."""
         posture = posture or self._posture
         action = self._registry.get(name)
         if action is None:
             return 0
+        rerun = self._rearm_for_rerun(action, port)
+        if rerun and self._runner is not None:
+            self._runner.fresh = True
         n = 0
-        for a, args in self._registry.available(self._facts, posture, self._tried, self._tools):
-            if a.name != name:
-                continue
-            if port is not None and args.get("port") != port:
-                continue
-            self.dispatch(a, args)
-            n += 1
+        try:
+            for a, args in self._registry.available(self._facts, posture, self._tried, self._tools):
+                if a.name != name:
+                    continue
+                if port is not None and args.get("port") != port:
+                    continue
+                self.dispatch(a, args)
+                n += 1
+        finally:
+            if rerun and self._runner is not None:
+                self._runner.fresh = False
         return n
 
     def run_group(self, group: str, posture: Posture | None = None) -> int:
