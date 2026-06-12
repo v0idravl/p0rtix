@@ -303,30 +303,50 @@ def _smb_run_zerologon(ip: str, port: int, runner: Runner, buf: Findings) -> Non
         buf.code_block(_trim(out))
 
 
-def _smb_run_null_session(ip: str, port: int, runner: Runner,
-                          buf: Findings, available: set) -> None:
-    # Null session probe — always run, reveals domain/hostname regardless
-    cmd_null = ["nxc", "smb", ip, "-u", "", "-p", ""]
-    out_null = runner.run(cmd_null, f"smb_{port}_nxc_null")
-    buf.cmd(" ".join(cmd_null))
-    buf.code_block(_trim(out_null))
-
-    # Extract domain and DC hostname from nxc banner: (name:DC) (domain:administrator.htb)
+def _smb_probe(ip: str, port: int, runner: Runner, available: set) -> str:
+    """Silent null-session probe — sets domain + DC hostname facts from the nxc
+    banner. Returns the raw output (for null-auth detection). Cached, so the
+    cohesive smb.* sub-actions can each call it cheaply."""
+    out_null = runner.run(["nxc", "smb", ip, "-u", "", "-p", ""], f"smb_{port}_nxc_null")
     m_domain = re.search(r"\(domain:([^)]+)\)", out_null)
     m_name   = re.search(r"\(name:([^)]+)\)", out_null)
     if m_domain:
         discovered = m_domain.group(1).strip().lower()
         runner.ws.set_discovered_domain(discovered)
         if m_name:
-            dc_fqdn = f"{m_name.group(1).strip().lower()}.{discovered}"
-            runner.ws.add_hostname(dc_fqdn)
+            runner.ws.add_hostname(f"{m_name.group(1).strip().lower()}.{discovered}")
+    return out_null
 
-    # RID cycling — enumerate all domain users/groups via SID brute-force.
-    # Works even when LDAP and --users return ACCESS_DENIED (only needs null session).
+
+def _smb_shares_enum(ip: str, port: int, runner: Runner, available: set):
+    """Silent: returns (readable_shares, auth_user, auth_pass). Null session
+    first, Guest fallback on ACCESS_DENIED. Parsing goes to a throwaway buffer so
+    callers that only need the auth/list don't double-print."""
+    sink = ServiceBuffer(port, "tcp")
+    auth_user, auth_pass = "", ""
+    out_shares = runner.run(["nxc", "smb", ip, "-u", "", "-p", "", "--shares"],
+                            f"smb_{port}_nxc_shares")
+    readable = _parse_nxc_shares(out_shares, sink)
+    if not readable and "STATUS_ACCESS_DENIED" in out_shares:
+        out_guest = runner.run(["nxc", "smb", ip, "-u", "Guest", "-p", ""],
+                               f"smb_{port}_nxc_guest")
+        if "[+]" in out_guest:
+            out_gs = runner.run(["nxc", "smb", ip, "-u", "Guest", "-p", "", "--shares"],
+                                f"smb_{port}_nxc_shares_guest")
+            readable = _parse_nxc_shares(out_gs, sink)
+            if readable:
+                auth_user, auth_pass = "Guest", ""
+    return readable, auth_user, auth_pass
+
+
+# ── cohesive anonymous-SMB sub-actions ────────────────────────────────────────
+def _smb_users(ip: str, port: int, runner: Runner, buf: Findings, available: set) -> None:
+    """RID cycling + nxc --users (the domain roster)."""
+    out_null = _smb_probe(ip, port, runner, available)
+    m_domain = re.search(r"\(domain:([^)]+)\)", out_null)
     null_auth_ok = "(Null Auth:True)" in out_null or bool(re.search(r"\[\+\].*\\:", out_null))
     if null_auth_ok and m_domain and "impacket-lookupsid" in available:
-        discovered_domain = m_domain.group(1).strip().lower()
-        target = f"{discovered_domain}/@{ip}"
+        target = f"{m_domain.group(1).strip().lower()}/@{ip}"
         cmd_rid = ["impacket-lookupsid", "-no-pass", target]
         buf.cmd(" ".join(cmd_rid))
         out_rid = runner.run(cmd_rid, f"smb_{port}_lookupsid", timeout=120)
@@ -339,58 +359,70 @@ def _smb_run_null_session(ip: str, port: int, runner: Runner,
             for u in rid_users:
                 runner.ws.add_user(u, authoritative=True)
             runner.ws.mark_users_complete()
-            buf.bullet(
-                "**RID cycling found {} user(s): {}{}**".format(
-                    len(rid_users),
-                    ", ".join(rid_users[:15]),
-                    " …" if len(rid_users) > 15 else "",
-                )
-            )
-            buf.add_summary(
-                "RID cycling: {}{}".format(
-                    ", ".join(rid_users[:5]),
-                    " …" if len(rid_users) > 5 else "",
-                )
-            )
+            buf.bullet("**RID cycling found {} user(s): {}{}**".format(
+                len(rid_users), ", ".join(rid_users[:15]),
+                " …" if len(rid_users) > 15 else ""))
+            buf.add_summary("RID cycling: {}{}".format(
+                ", ".join(rid_users[:5]), " …" if len(rid_users) > 5 else ""))
         else:
             buf.note("RID cycling: no users returned (null session may lack RPC read access)")
 
-    # Share enumeration: null session first, fall back to Guest if ACCESS_DENIED
-    auth_user, auth_pass = "", ""
-    readable_shares: list[str] = []
-
-    cmd_shares = ["nxc", "smb", ip, "-u", "", "-p", "", "--shares"]
-    out_shares = runner.run(cmd_shares, f"smb_{port}_nxc_shares")
-    buf.cmd(" ".join(cmd_shares))
-    readable_shares = _parse_nxc_shares(out_shares, buf)
-
-    if not readable_shares and "STATUS_ACCESS_DENIED" in out_shares:
-        cmd_guest = ["nxc", "smb", ip, "-u", "Guest", "-p", ""]
-        out_guest = runner.run(cmd_guest, f"smb_{port}_nxc_guest")
-        buf.cmd(" ".join(cmd_guest))
-        buf.code_block(_trim(out_guest))
-
-        if "[+]" in out_guest:
-            cmd_guest_shares = ["nxc", "smb", ip, "-u", "Guest", "-p", "", "--shares"]
-            out_guest_shares = runner.run(cmd_guest_shares, f"smb_{port}_nxc_shares_guest")
-            buf.cmd(" ".join(cmd_guest_shares))
-            readable_shares = _parse_nxc_shares(out_guest_shares, buf)
-            if readable_shares:
-                auth_user, auth_pass = "Guest", ""
-
-    if readable_shares:
-        label = "Guest" if auth_user else "anonymous"
-        buf.add_summary(f"SMB: {label} read access — shares: {', '.join(readable_shares)}")
-
-    # User enumeration with best available auth
+    _, auth_user, auth_pass = _smb_shares_enum(ip, port, runner, available)
     cmd_users = ["nxc", "smb", ip, "-u", auth_user, "-p", auth_pass, "--users"]
     out_users = runner.run(cmd_users, f"smb_{port}_nxc_users")
     buf.cmd(" ".join(cmd_users))
     _parse_nxc_users(out_users, buf, runner)
 
-    if readable_shares:
-        _smb_spider(ip, readable_shares, runner, buf, available,
-                    user=auth_user, password=auth_pass)
+
+def _smb_shares(ip: str, port: int, runner: Runner, buf: Findings, available: set) -> None:
+    """Anonymous / Guest share access."""
+    _smb_probe(ip, port, runner, available)
+    readable, auth_user, _ = _smb_shares_enum(ip, port, runner, available)
+    buf.h4("SMB Shares")
+    if readable:
+        label = "Guest" if auth_user else "anonymous"
+        buf.bullet(f"**{label} READ access:** {', '.join(readable)}")
+        buf.add_summary(f"SMB: {label} read access — shares: {', '.join(readable)}")
+    else:
+        buf.note("No anonymously / Guest-readable shares")
+
+
+def _smb_spider_shares(ip: str, port: int, runner: Runner, buf: Findings, available: set) -> None:
+    """Recursively list/download interesting files from readable shares.
+    (`_smb_spider` is defined later in this module; name-resolved at call time.)"""
+    _smb_probe(ip, port, runner, available)
+    readable, auth_user, auth_pass = _smb_shares_enum(ip, port, runner, available)
+    if readable:
+        _smb_spider(ip, readable, runner, buf, available, user=auth_user, password=auth_pass)
+    else:
+        buf.note("No readable shares to spider")
+
+
+def _smb_policy(ip: str, port: int, runner: Runner, buf: Findings, available: set) -> None:
+    """Domain password / lockout policy (→ safe-to-spray signal)."""
+    _smb_probe(ip, port, runner, available)
+    cmd = ["nxc", "smb", ip, "-u", "Guest", "-p", "", "--pass-pol"]
+    out = runner.run(cmd, f"smb_{port}_nxc_passpol")
+    buf.cmd(" ".join(cmd))
+    buf.h4("Password Policy")
+    m = re.search(r"Account Lockout Threshold:\s*(\d+|None)", out, re.IGNORECASE)
+    if m:
+        thr = 0 if m.group(1).lower() == "none" else int(m.group(1))
+        runner.ws.set_lockout_threshold(thr)
+        note = " — no lockout, safe to spray" if thr == 0 else ""
+        buf.bullet(f"Account lockout threshold: **{thr}**{note}")
+    else:
+        buf.code_block(_trim(out))
+
+
+def _smb_run_null_session(ip: str, port: int, runner: Runner,
+                          buf: Findings, available: set) -> None:
+    """Full anonymous SMB enumeration (classic path) — runs every cohesive
+    sub-step. The console exposes each as its own `smb.*` action."""
+    _smb_users(ip, port, runner, buf, available)
+    _smb_shares(ip, port, runner, buf, available)
+    _smb_spider_shares(ip, port, runner, buf, available)
+    _smb_policy(ip, port, runner, buf, available)
 
 
 def _smb_run_enum4linux(ip: str, port: int, runner: Runner, buf: Findings) -> None:

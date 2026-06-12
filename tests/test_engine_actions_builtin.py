@@ -41,7 +41,7 @@ def _setup(tmp_path, level, *, output="", tools=None):
 def test_registry_has_phase1_actions(tmp_path):
     reg = build_registry()
     names = {a.name for a in reg.all()}
-    assert {"discovery.tcp_ports", "svc.version_detect", "smb.anon_enum",
+    assert {"discovery.tcp_ports", "svc.version_detect", "smb.users",
             "ldap.domain_info", "ldap.users", "ldap.groups",
             "ldap.delegation"} <= names
 
@@ -71,22 +71,22 @@ def test_version_detect_is_per_port_and_gated(tmp_path, monkeypatch):
     assert sorted(args["port"] for _, args in avail) == [22, 445]
 
 
-def test_smb_anon_gated_on_445_and_pushes_facts(tmp_path, monkeypatch):
+def test_smb_users_gated_on_445_and_pushes_facts(tmp_path, monkeypatch):
     from lib.engine.action import Tier
 
-    def fake_null(ip, port, runner, buf, available):
+    def fake_users(ip, port, runner, buf, available):
         runner.ws.add_user("alice", authoritative=True)
         runner.ws.set_discovered_domain("test.htb")
 
-    monkeypatch.setattr(services, "_smb_run_null_session", fake_null)
+    monkeypatch.setattr(services, "_smb_users", fake_users)
     fs, posture, reg, sched = _setup(tmp_path, Tier.GREEN)
 
     # gated out before 445 is known
-    assert "smb.anon_enum" not in {a.name for a, _ in reg.available(fs, posture, sched.tried)}
+    assert "smb.users" not in {a.name for a, _ in reg.available(fs, posture, sched.tried)}
     fs.add_open_port("tcp", 445)
-    assert "smb.anon_enum" in {a.name for a, _ in reg.available(fs, posture, sched.tried)}
+    assert "smb.users" in {a.name for a, _ in reg.available(fs, posture, sched.tried)}
 
-    sched.run_action("smb.anon_enum")
+    sched.run_action("smb.users")
     assert "alice" in fs.snapshot()["users"]
     assert fs.discovered_domain == "test.htb"
 
@@ -96,11 +96,11 @@ def test_run_all_cascade_discovery_to_enumeration(tmp_path, monkeypatch):
     monkeypatch.setattr(nmap, "discover_tcp_open", lambda ip, r, ws, exclude=None: [445])
     monkeypatch.setattr(nmap, "version_detect",
                         lambda ip, ports, r, ws: [])
-
-    def fake_null(ip, port, runner, buf, available):
-        runner.ws.add_user("bob", authoritative=True)
-
-    monkeypatch.setattr(services, "_smb_run_null_session", fake_null)
+    # neutralise the other smb sub-actions; smb.users records the user
+    for fn in ("_smb_shares", "_smb_spider_shares", "_smb_policy"):
+        monkeypatch.setattr(services, fn, lambda *a, **k: None)
+    monkeypatch.setattr(services, "_smb_users",
+                        lambda ip, port, runner, buf, available: runner.ws.add_user("bob", authoritative=True))
     fs, posture, reg, sched = _setup(tmp_path, Tier.GREEN)
 
     sched.run_all_at_or_below()
@@ -108,14 +108,16 @@ def test_run_all_cascade_discovery_to_enumeration(tmp_path, monkeypatch):
     # discovery ran, then 445 unlocked both version-detect (port 445) and smb
     assert "discovery.tcp_ports" in names
     assert instance_key("svc.version_detect", {"port": 445}) in sched.tried
-    assert "smb.anon_enum" in names
+    assert "smb.users" in names
     assert "bob" in fs.snapshot()["users"]
 
 
-def test_smb_supersedes_enum4linux(tmp_path):
+def test_smb_branch_decomposed_and_users_supersedes_enum4linux(tmp_path):
     reg = build_registry()
-    smb = reg.get("smb.anon_enum")
-    assert "smb.enum4linux" in smb.supersedes
+    names = {a.name for a in reg.all()}
+    assert {"smb.users", "smb.shares", "smb.spider", "smb.policy"} <= names
+    assert "smb.anon_enum" not in names
+    assert "smb.enum4linux" in reg.get("smb.users").supersedes
 
 
 # ── AS-REP roast + crack (the Forest foothold chain) ──────────────────────────
@@ -355,3 +357,18 @@ def test_ldap_branch_decomposed_into_cohesive_actions(tmp_path, monkeypatch):
     assert n == 4
     assert set(calls) == {"_ldap_domain_info", "_ldap_users",
                           "_ldap_groups", "_ldap_delegation"}
+
+
+def test_smb_branch_group_runs_all_four(tmp_path, monkeypatch):
+    from lib import services
+    from lib.engine.action import Tier
+    calls = []
+    for fn in ("_smb_users", "_smb_shares", "_smb_spider_shares", "_smb_policy"):
+        monkeypatch.setattr(services, fn,
+                            (lambda name: lambda ip, port, r, buf, a: calls.append(name))(fn))
+    fs, posture, reg, sched = _setup(tmp_path, Tier.GREEN, tools=_ALL_TOOLS)
+    fs.add_open_port("tcp", 445)
+
+    n = sched.run_group("smb")
+    assert n == 4
+    assert set(calls) == {"_smb_users", "_smb_shares", "_smb_spider_shares", "_smb_policy"}

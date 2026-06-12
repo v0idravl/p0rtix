@@ -41,14 +41,14 @@ def test_console_mode_runs_in_line_mode(tmp_path, monkeypatch):
 
     pushed = {}
 
-    def fake_null(ip, port, runner, buf, available):
+    def fake_users(ip, port, runner, buf, available):
         runner.ws.add_user("alice", authoritative=True)
         pushed["ran"] = True
 
-    monkeypatch.setattr(services, "_smb_run_null_session", fake_null)
+    monkeypatch.setattr(services, "_smb_users", fake_users)
 
     script = iter(["noise green", "run discovery.tcp_ports",
-                   "run smb.anon_enum", "status", "exit"])
+                   "run smb.users", "status", "exit"])
     monkeypatch.setattr("builtins.input", lambda *a: next(script))
 
     run_console_mode("192.0.2.10", None, "cli-console", _args(tmp_path),
@@ -65,8 +65,8 @@ def test_console_mode_dial9_autoruns_without_input(tmp_path, monkeypatch):
     monkeypatch.setattr(nmap, "discover_tcp_open", lambda ip, r, ws, exclude=None: [445])
     monkeypatch.setattr(nmap, "discover_udp", lambda ip, r, ws: [])
     monkeypatch.setattr(nmap, "version_detect", lambda ip, ports, r, ws: [])
-    monkeypatch.setattr(services, "_smb_run_null_session",
-                        lambda ip, port, runner, buf, available: None)
+    for fn in ("_smb_users", "_smb_shares", "_smb_spider_shares", "_smb_policy"):
+        monkeypatch.setattr(services, fn, lambda *a, **k: None)
 
     # dial 9 should auto-run everything up front, so an immediate EOF still works.
     monkeypatch.setattr("builtins.input", lambda *a: (_ for _ in ()).throw(EOFError))

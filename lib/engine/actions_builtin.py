@@ -106,10 +106,28 @@ def _h_version_detect(ctx) -> ActionResult:
 
 
 # ── green: anonymous SMB / LDAP (wrap existing handler bodies) ─────────────────
-def _h_smb_anon(ctx) -> ActionResult:
+def _h_smb_users(ctx) -> ActionResult:
     from lib import services
-    services._smb_run_null_session(ctx.ip, 445, ctx.runner, ctx.findings, ctx.available)
-    return ActionResult(ok=True, summary="anonymous SMB enumeration")
+    services._smb_users(ctx.ip, 445, ctx.runner, ctx.findings, ctx.available)
+    return ActionResult(ok=True, summary="SMB users (RID cycle + --users)")
+
+
+def _h_smb_shares(ctx) -> ActionResult:
+    from lib import services
+    services._smb_shares(ctx.ip, 445, ctx.runner, ctx.findings, ctx.available)
+    return ActionResult(ok=True, summary="SMB share access")
+
+
+def _h_smb_spider(ctx) -> ActionResult:
+    from lib import services
+    services._smb_spider_shares(ctx.ip, 445, ctx.runner, ctx.findings, ctx.available)
+    return ActionResult(ok=True, summary="SMB share spidering")
+
+
+def _h_smb_policy(ctx) -> ActionResult:
+    from lib import services
+    services._smb_policy(ctx.ip, 445, ctx.runner, ctx.findings, ctx.available)
+    return ActionResult(ok=True, summary="SMB password/lockout policy")
 
 
 def _ldap_port(facts: FactStore) -> int | None:
@@ -439,17 +457,32 @@ def build_registry() -> ActionRegistry:
         deps=("nmap",),
     ))
 
+    # Anonymous SMB, decomposed into cohesive sub-actions. `run smb` runs the
+    # whole branch; each is also individually runnable.
+    _smb_gate = lambda f: f.has("tcp/445")          # noqa: E731
+    _smb_req = (Requirement("tcp/445", "SMB (tcp/445) open"),)
+    _smb_evt = Footprint(windows_events=("4624 (type 3, often below audit)",))
     reg.register(Action(
-        "smb.anon_enum", Tier.GREEN, _h_smb_anon,
-        group="smb", order=1,
-        footprint=Footprint(
-            summary="anonymous SMB: null session, RID cycle, shares, users",
-            windows_events=("4624 (type 3, often below audit)",),
-        ),
-        gate=lambda f: f.has("tcp/445"),
-        requires=(Requirement("tcp/445", "SMB (tcp/445) open"),),
-        deps=("nxc",),
-        supersedes=("smb.enum4linux",),     # no-overlap: this covers enum4linux ground
+        "smb.users", Tier.GREEN, _h_smb_users, group="smb", order=1,
+        footprint=Footprint(summary="anonymous SMB: RID cycle + --users (domain roster)",
+                            windows_events=_smb_evt.windows_events),
+        gate=_smb_gate, requires=_smb_req, deps=("nxc",),
+        supersedes=("smb.enum4linux",),     # no-overlap: covers enum4linux ground
+    ))
+    reg.register(Action(
+        "smb.shares", Tier.GREEN, _h_smb_shares, group="smb", order=2,
+        footprint=Footprint(summary="anonymous / Guest share access"),
+        gate=_smb_gate, requires=_smb_req, deps=("nxc",),
+    ))
+    reg.register(Action(
+        "smb.spider", Tier.GREEN, _h_smb_spider, group="smb", order=3,
+        footprint=Footprint(summary="recursively list/download files from readable shares"),
+        gate=_smb_gate, requires=_smb_req, deps=("nxc",),
+    ))
+    reg.register(Action(
+        "smb.policy", Tier.GREEN, _h_smb_policy, group="smb", order=4,
+        footprint=Footprint(summary="domain password / lockout policy (safe-to-spray signal)"),
+        gate=_smb_gate, requires=_smb_req, deps=("nxc",),
     ))
 
     # Anonymous LDAP, decomposed into cohesive sub-actions. `run ldap` runs the

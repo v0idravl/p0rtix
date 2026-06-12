@@ -68,8 +68,8 @@ def test_dial_drives_green_autorun(tmp_path, monkeypatch):
     monkeypatch.setattr(nmap, "discover_tcp_open", lambda ip, r, ws, exclude=None: [445])
     monkeypatch.setattr(nmap, "discover_udp", lambda ip, r, ws: [])
     monkeypatch.setattr(nmap, "version_detect", lambda ip, ports, r, ws: [])
-    monkeypatch.setattr(services, "_smb_run_null_session",
-                        lambda ip, port, runner, buf, available: None)
+    for fn in ("_smb_users", "_smb_shares", "_smb_spider_shares", "_smb_policy"):
+        monkeypatch.setattr(services, fn, lambda *a, **k: None)
 
     fs, posture, reg, sched = _wire(tmp_path, dial=2)   # dial 2 → auto green
     apply_dial_autorun(sched, posture)
@@ -77,4 +77,4 @@ def test_dial_drives_green_autorun(tmp_path, monkeypatch):
     assert posture.level is Tier.GREEN
     names = {n for n, _ in sched.completed}
     assert "discovery.tcp_ports" in names      # auto-ran the green sweep
-    assert "smb.anon_enum" in names            # and cascaded into 445 enum
+    assert "smb.users" in names                # and cascaded into 445 enum

@@ -79,10 +79,10 @@ def test_new_fact_unlocks_action_in_list(tmp_path):
     async def body():
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            assert "smb.anon_enum" not in _runnable_names(app)
+            assert "smb.users" not in _runnable_names(app)
             fs.add_open_port("tcp", 445)          # emit fact on the UI thread
             await pilot.pause()
-            assert "smb.anon_enum" in _runnable_names(app)
+            assert "smb.users" in _runnable_names(app)
 
     _run(body())
 
@@ -160,9 +160,9 @@ def test_actions_rendered_grouped_by_path(tmp_path):
             # group headers present, in path order
             assert any("DISCOVERY" in l for l in labels)
             assert any("▸ SMB" in l for l in labels)
-            # the SMB header sits above the smb.anon_enum row
+            # the SMB header sits above the smb.users row
             smb_hdr = next(i for i, l in enumerate(labels) if "▸ SMB" in l)
-            smb_row = next(i for i, l in enumerate(labels) if "smb.anon_enum" in l)
+            smb_row = next(i for i, l in enumerate(labels) if "smb.users" in l)
             assert smb_hdr < smb_row
 
     _run(body())
@@ -198,8 +198,8 @@ def test_action_list_hides_fact_dormant_actions(tmp_path):
             labels = [getattr(c, "label_text", "") for c in
                       app.query_one("#actions", _ListView()).children]
             text = "\n".join(labels)
-            # smb.anon_enum is fact-dormant (no 445) → not in the list
-            assert "smb.anon_enum" not in text
+            # smb.users is fact-dormant (no 445) → not in the list
+            assert "smb.users" not in text
             # discovery is available → present
             assert any("discovery.tcp_quick" in l for l in labels)
 
