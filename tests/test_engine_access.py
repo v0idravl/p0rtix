@@ -106,9 +106,35 @@ def test_shell_command_ssh_when_only_22(tmp_path):
     assert cmd[0] == "sshpass" and "root@10.10.10.10" in cmd
 
 
+def _capture_call(seen):
+    def _call(argv, **kw):
+        seen["argv"] = argv
+        return 0
+    return _call
+
+
 def test_local_shell_uses_seam(tmp_path, monkeypatch):
+    monkeypatch.delenv("TMUX", raising=False)        # force the blocking path
     calls = {}
     monkeypatch.setattr(access.subprocess, "call",
                         lambda argv, cwd=None: calls.update(argv=argv, cwd=cwd) or 0)
     access.local_shell(str(tmp_path))
     assert calls["cwd"] == str(tmp_path)
+
+
+def test_launch_shell_uses_tmux_window_when_in_tmux(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,1234,0")
+    monkeypatch.setattr(access.subprocess, "call", _capture_call(seen))
+    rc = access.launch_shell(["evil-winrm", "-i", "10.0.0.1", "-u", "a", "-p", "b"])
+    assert rc == 0
+    assert seen["argv"][:2] == ["tmux", "new-window"]
+    assert any("evil-winrm" in part for part in seen["argv"])
+
+
+def test_launch_shell_blocks_without_tmux(tmp_path, monkeypatch):
+    monkeypatch.delenv("TMUX", raising=False)
+    seen = {}
+    monkeypatch.setattr(access.subprocess, "call", _capture_call(seen))
+    access.launch_shell(["evil-winrm", "-i", "10.0.0.1"])
+    assert seen["argv"][0] == "evil-winrm"      # direct spawn, not tmux

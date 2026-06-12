@@ -364,6 +364,11 @@ def _build_dashboard(router, scheduler, registry, facts, posture):
 
         def _launch_local_shell(self) -> None:
             from lib.engine import access
+            if access.in_tmux():
+                access.local_shell(facts.machine_dir)     # new tmux window, non-blocking
+                self._log("[b]› opened a shell in a new tmux window[/] "
+                          "[dim](prefix+n to switch back)[/]")
+                return
             self._log("[b]› dropping to a shell in the workspace — `exit` to "
                       "return to the console[/]")
             with self.suspend():
@@ -376,6 +381,13 @@ def _build_dashboard(router, scheduler, registry, facts, posture):
             if "access.shell" not in avail:
                 self._log("[yellow]access.shell: " + registry.why(
                     "access.shell", facts, posture, scheduler.tried) + "[/]")
+                return
+            from lib.engine import access
+            if access.in_tmux():
+                scheduler.run_action("access.shell")      # new tmux window, non-blocking
+                self._log("[b]› opened the shell in a new tmux window[/] "
+                          "[dim](prefix+n to switch back)[/]")
+                self._refresh()
                 return
             self._log("[b]› handing off to interactive shell — exit it to return[/]")
             with self.suspend():

@@ -13,7 +13,31 @@ Kept pure + seam-mockable: `shell_command()` decides what to launch (no I/O);
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
+
+
+def in_tmux() -> bool:
+    """True when p0rtix is running inside a tmux session — then a shell can open
+    as a new tmux window (the TUI keeps running, detach/switch/close with tmux)
+    instead of suspending the whole app."""
+    return bool(os.environ.get("TMUX"))
+
+
+def _tmux_new_window(argv=None, *, name=None, cwd=None) -> bool:
+    """Open a new tmux window running `argv` (or a default shell), without leaving
+    the current window. Returns True on success."""
+    cmd = ["tmux", "new-window"]
+    if name:
+        cmd += ["-n", name]
+    if cwd:
+        cmd += ["-c", str(cwd)]
+    if argv:
+        cmd.append(shlex.join(argv))
+    try:
+        return subprocess.call(cmd) == 0
+    except FileNotFoundError:
+        return False
 
 
 def _prefer_user(pairs):
@@ -58,7 +82,11 @@ def shell_command(facts, ip: str) -> list[str] | None:
 def local_shell(cwd) -> int:
     """Drop the operator into a local `$SHELL` rooted at the workspace dir — for a
     quick manual command without leaving the console or hunting flags/passwords.
-    Blocks until they exit. Same spawn discipline as the remote handoff."""
+
+    Inside tmux this opens a new window (non-blocking; the console keeps running);
+    otherwise it blocks in a child shell until they exit."""
+    if in_tmux() and _tmux_new_window(name="p0rtix-cwd", cwd=cwd):
+        return 0
     sh = os.environ.get("SHELL", "/bin/bash")
     try:
         return subprocess.call([sh], cwd=str(cwd))
@@ -69,9 +97,12 @@ def local_shell(cwd) -> int:
 
 
 def launch_shell(cmd: list[str]) -> int:
-    """Spawn the interactive session, inheriting the terminal, and block until the
-    operator exits it. The single spawn seam — the TUI wraps this in App.suspend()
-    and tests monkeypatch it. Returns the child exit code."""
+    """Spawn the interactive session. Inside tmux it opens as a new window (the
+    console keeps running — detach/switch/close with tmux); otherwise it inherits
+    the terminal and blocks (the TUI wraps that case in App.suspend()). The single
+    spawn seam — tests monkeypatch it. Returns the child exit code (0 for tmux)."""
+    if in_tmux() and _tmux_new_window(cmd, name="p0rtix-shell"):
+        return 0
     try:
         return subprocess.call(cmd)
     except FileNotFoundError:
