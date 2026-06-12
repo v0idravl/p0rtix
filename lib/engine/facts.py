@@ -54,6 +54,7 @@ class FactStore(Workspace):
         self._open_ports: set[tuple[str, int]] = set()   # (proto, port)
         self._services: list[Service] = []
         self._admin_creds: set[tuple[str, str]] = set()
+        self._cred_pairs: set[tuple[str, str]] = set()   # unverified (user, pass) pairs
         self._hashes: set[str] = set()                   # kinds: "asrep"|"kerberoast"|"ntlm"
         self._engine_lock = threading.Lock()             # guards the new fields above
 
@@ -167,6 +168,21 @@ class FactStore(Workspace):
         with self._engine_lock:
             return list(self._services)
 
+    def add_cred_pair(self, user: str, password: str) -> None:
+        """Record an **unverified** (user, password) pair — e.g. a cracked hash's
+        principal, or one the operator wants to test. Distinct from a valid_cred
+        (confirmed) and a bare cred candidate (password only). Unlocks
+        `creds.test`, which verifies it as that specific pair rather than spraying."""
+        key = (user.strip(), password)
+        with self._engine_lock:
+            is_new = bool(key[0]) and key not in self._cred_pairs and key not in self._known_valid
+            if is_new:
+                self._cred_pairs.add(key)
+        # also surface the password as a spray candidate
+        self.add_cred(password)
+        if is_new:
+            self._emit(FactEvent("cred_pair", key))
+
     def add_hash(self, kind: str) -> None:
         """Record that a crackable hash of `kind` (asrep/kerberoast/ntlm) has been
         captured. Unlocks the offline crack action ("unlock on new fact")."""
@@ -201,6 +217,9 @@ class FactStore(Workspace):
             return bool(self._known_users)
         if key == "cred":               # a candidate password (cracked/leaked), unvalidated
             return bool(self._known_creds)
+        if key == "cred_pair":          # an unverified (user, pass) pair to test
+            with self._engine_lock:
+                return bool(self._cred_pairs)
         if key == "valid_cred":
             return bool(self._known_valid)
         if key == "admin_cred":
@@ -228,6 +247,7 @@ class FactStore(Workspace):
             open_ports = sorted(self._open_ports, key=lambda x: (x[0], x[1]))
             proto_status = {k: v.value for k, v in self._proto_status.items()}
             admin = len(self._admin_creds)
+            cred_pairs = sorted(self._cred_pairs)
             hashes = sorted(self._hashes)
         return {
             "ip": self.ip,
@@ -242,6 +262,7 @@ class FactStore(Workspace):
             "open_ports": open_ports,
             "proto_status": proto_status,
             "hashes": hashes,
+            "cred_pairs": cred_pairs,
         }
 
     # ── reload from disk (pick up external edits to loot/*.txt) ────────────────

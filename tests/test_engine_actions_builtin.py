@@ -21,7 +21,8 @@ class _FakeRunner:
 
 
 _ALL_TOOLS = {"nmap", "nxc", "ldapsearch", "impacket-lookupsid",
-              "impacket-GetNPUsers", "hashcat"}
+              "impacket-GetNPUsers", "hashcat", "ldapdomaindump",
+              "impacket-GetUserSPNs", "bloodhound-python", "bloodyAD"}
 
 
 def _setup(tmp_path, level, *, output="", tools=None):
@@ -183,14 +184,55 @@ def test_creds_spray_promotes_candidate_to_valid(tmp_path, monkeypatch):
     assert ("svc-alfresco", "s3rvice") in {(u, p) for u, p in fs._known_valid}
 
 
-def test_ad_core_gated_on_valid_cred_and_domain(tmp_path):
+_GRANULAR_AD = {"ldap.domaindump", "kerberos.kerberoast",
+                "bloodhound.collect", "ad.writable_objects"}
+
+
+def test_granular_ad_actions_gated_on_valid_cred_and_domain(tmp_path):
     from lib.engine.action import Tier
     fs, posture, reg, sched = _setup(tmp_path, Tier.YELLOW, tools=_ALL_TOOLS)
 
-    assert "ad.authenticated_core" in {a.name for a, _ in reg.dormant(fs)}
+    # the monolith is gone; each AD step is its own action
+    assert "ad.authenticated_core" not in {a.name for a in reg.all()}
+    dormant = {a.name for a, _ in reg.dormant(fs)}
+    assert _GRANULAR_AD <= dormant
+
     fs.set_discovered_domain("htb.local")
     fs.add_valid_cred("svc-alfresco", "s3rvice", "SMB")
-    assert "ad.authenticated_core" in {a.name for a, _ in reg.available(fs, posture, sched.tried)}
+    avail = {a.name for a, _ in reg.available(fs, posture, sched.tried)}
+    assert _GRANULAR_AD <= avail
+
+
+def test_creds_test_verifies_pair_without_spray(tmp_path):
+    from lib.engine.action import Tier
+    # nxc reports a WinRM hit for the exact pair
+    out = "WINRM  10.0.0.1  5985  DC  [+] htb.local\\svc-alfresco:s3rvice (Pwn3d!)\n"
+    fs, posture, reg, sched = _setup(tmp_path, Tier.YELLOW, output=out, tools=_ALL_TOOLS)
+
+    # dormant until there's a pair to test
+    assert "creds.test" in {a.name for a, _ in reg.dormant(fs)}
+    fs.add_cred_pair("svc-alfresco", "s3rvice")
+    fs.add_open_port("tcp", 445)
+    fs.add_open_port("tcp", 5985)
+    assert "creds.test" in {a.name for a, _ in reg.available(fs, posture, sched.tried)}
+
+    sched.run_action("creds.test")
+    # the pair is confirmed (Pwn3d! → admin), recorded as a valid/admin cred
+    assert fs.has("valid_cred") and fs.has("admin_cred")
+    assert ("svc-alfresco", "s3rvice") in {(u, p) for u, p in fs._known_valid}
+
+
+def test_crack_records_cred_pair_for_targeted_test(tmp_path, monkeypatch):
+    from lib.engine.action import Tier
+    from lib import crack
+    monkeypatch.setattr(crack, "crack_hashes",
+                        lambda ws, r, f, a: [("svc-alfresco", "s3rvice")])
+    fs, posture, reg, sched = _setup(tmp_path, Tier.PASSIVE, tools=_ALL_TOOLS)
+    fs.add_hash("asrep")
+
+    sched.run_action("crack.hashes")
+    assert fs.has("cred_pair")
+    assert ("svc-alfresco", "s3rvice") in set(fs.snapshot()["cred_pairs"])
 
 
 def test_pick_enum_cred_prefers_user_over_machine(tmp_path):

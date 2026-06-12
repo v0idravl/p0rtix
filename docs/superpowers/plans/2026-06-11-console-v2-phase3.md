@@ -114,12 +114,19 @@ duplicate per-port sections. Dedup happens when ports/services become facts.
 - [x] Pilot + registry tests: grouped ordering/state, grouped rendering,
       state-summary content. (94 pass)
 
-### Slice 2 — decompose the monoliths + `creds.test`
-- [ ] Split `ad.authenticated_core` into the granular `ad`/`ldap`/`kerberos`
-      actions wrapping the existing `credsmode` step bodies.
-- [ ] Add `creds.test`; keep `creds.spray` as the deliberate fan-out.
-- [ ] Delete the monoliths once parity confirmed live on Forest.
-- [ ] Tests: each granular action gated/independently runnable.
+### Slice 2 — decompose the monoliths + `creds.test` ✅
+- [x] Extracted `_ad_ldapdomaindump` / `_ad_kerberoast` / `_ad_bloodhound` from
+      `_ad_core` (classic mode unchanged — it now calls them). Granular engine
+      actions `ldap.domaindump` / `kerberos.kerberoast` / `bloodhound.collect` /
+      `ad.writable_objects` replace the `ad.authenticated_core` monolith.
+- [x] Added `creds.test` (verify known pair as-is + emit handoff command) vs
+      `creds.spray` (deliberate fan-out). New `cred_pair` fact; crack records the
+      cracked principal so it's testable, not just sprayable.
+- [x] Monolith action removed; classic `_ad_core` retains ADCS/shadow/secretsdump
+      (exploitation-leaning steps deferred to the access/RED slice).
+- [x] Tests: granular gating, creds.test verify, crack→cred_pair. Live-validated
+      on Forest (each AD step ran independently; creds.test confirmed svc-alfresco
+      SMB access + WinRM handoff). 96 pass.
 
 ### Slice 3 — per-proto status drives availability
 - [ ] `proto_status` consulted in `available`/`dormant`/`why`; dormant-until-fact.
