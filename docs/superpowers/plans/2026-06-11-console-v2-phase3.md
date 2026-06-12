@@ -146,10 +146,14 @@ duplicate per-port sections. Dedup happens when ports/services become facts.
 - [x] Tests: dedup, full-excludes-quick, single-port run. Live on Forest: quick
       got 18 AD ports, full completed to 24 excluding the swept set. 101 pass.
 
-### Slice 5 — hash crack-state model
-- [ ] Per-hash `(kind, cracked, plaintext)` in facts; crack action updates it.
-- [ ] UI: uncracked/cracked grouping; actionable.
-- [ ] Tests.
+### Slice 5 — hash crack-state model ✅
+- [x] FactStore hashes are per-`(kind, principal)` records with `cracked`/
+      `plaintext`; `add_hash(kind, principal)`, `mark_hash_cracked(principal, pt)`,
+      `has("hash:uncracked")`. asrep/kerberoast register per principal; crack flips
+      them and `crack.hashes` gates on `hash:uncracked` (closes when all cracked).
+- [x] UI: state pane shows `N uncracked · M cracked`; `hashes` command lists them
+      by crack-state (uncracked→crack, cracked→plaintext). Type demoted to a tag.
+- [x] Tests: crack-state model, event emit, crack closes the action. 104 pass.
 
 ### Slice 6 — access verify + opt-in shell (doctrine amendment)
 - [ ] `creds.test` + handoff-command export.

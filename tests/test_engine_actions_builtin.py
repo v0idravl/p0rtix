@@ -301,3 +301,19 @@ def test_run_single_version_detect_instance(tmp_path, monkeypatch):
     assert n == 1
     assert instance_key("svc.version_detect", {"port": 445}) in sched.tried
     assert instance_key("svc.version_detect", {"port": 22}) not in sched.tried
+
+
+def test_crack_marks_hash_cracked_and_closes_action(tmp_path, monkeypatch):
+    from lib.engine.action import Tier
+    from lib import crack
+    monkeypatch.setattr(crack, "crack_hashes",
+                        lambda ws, r, f, a: [("svc-alfresco", "s3rvice")])
+    fs, posture, reg, sched = _setup(tmp_path, Tier.PASSIVE, tools=_ALL_TOOLS)
+    fs.add_hash("asrep", "svc-alfresco")
+    assert "crack.hashes" in {a.name for a, _ in reg.available(fs, posture, sched.tried)}
+
+    sched.run_action("crack.hashes")
+    # hash flipped to cracked → crack.hashes no longer offered
+    assert not fs.has("hash:uncracked")
+    assert fs.snapshot()["hashes"][0]["plaintext"] == "s3rvice"
+    assert "crack.hashes" not in {a.name for a, _ in reg.available(fs, posture, sched.tried)}

@@ -56,7 +56,8 @@ class FactStore(Workspace):
         self._services: list[Service] = []
         self._admin_creds: set[tuple[str, str]] = set()
         self._cred_pairs: set[tuple[str, str]] = set()   # unverified (user, pass) pairs
-        self._hashes: set[str] = set()                   # kinds: "asrep"|"kerberoast"|"ntlm"
+        # captured hashes keyed by (kind, principal) → {cracked: bool, plaintext}
+        self._hashes: dict[tuple[str, str], dict] = {}
         self._engine_lock = threading.Lock()             # guards the new fields above
 
     # ── event plumbing ────────────────────────────────────────────────────────
@@ -198,16 +199,36 @@ class FactStore(Workspace):
         if is_new:
             self._emit(FactEvent("cred_pair", key))
 
-    def add_hash(self, kind: str) -> None:
-        """Record that a crackable hash of `kind` (asrep/kerberoast/ntlm) has been
-        captured. Unlocks the offline crack action ("unlock on new fact")."""
+    def add_hash(self, kind: str, principal: str = "", *,
+                 cracked: bool = False, plaintext: str | None = None) -> None:
+        """Record a captured hash of `kind` (asrep/kerberoast/ntlm) for `principal`.
+        Unlocks the offline crack action while any hash is uncracked. Type is
+        secondary — the actionable axis is cracked vs uncracked."""
         kind = kind.strip().lower()
+        if not kind:
+            return
+        key = (kind, principal.strip())
         with self._engine_lock:
-            is_new = bool(kind) and kind not in self._hashes
-            if kind:
-                self._hashes.add(kind)
-        if is_new:
-            self._emit(FactEvent("hash", kind))
+            rec = self._hashes.get(key)
+            changed = rec is None or (cracked and not rec["cracked"])
+            if rec is None:
+                self._hashes[key] = {"cracked": cracked, "plaintext": plaintext}
+            elif cracked and not rec["cracked"]:
+                rec.update(cracked=True, plaintext=plaintext)
+        if changed:
+            self._emit(FactEvent("hash", key))
+
+    def mark_hash_cracked(self, principal: str, plaintext: str) -> None:
+        """Flip every captured hash for `principal` to cracked with its plaintext."""
+        principal = principal.strip()
+        changed = False
+        with self._engine_lock:
+            for (kind, prin), rec in self._hashes.items():
+                if prin == principal and not rec["cracked"]:
+                    rec.update(cracked=True, plaintext=plaintext)
+                    changed = True
+        if changed:
+            self._emit(FactEvent("hash", ("cracked", principal)))
 
     def set_proto_status(self, proto: str, status: ProtoStatus) -> None:
         with self._engine_lock:
@@ -253,9 +274,13 @@ class FactStore(Workspace):
         if key == "hash":
             with self._engine_lock:
                 return bool(self._hashes)
-        if key.startswith("hash:"):
+        if key == "hash:uncracked":
             with self._engine_lock:
-                return key.split(":", 1)[1] in self._hashes
+                return any(not r["cracked"] for r in self._hashes.values())
+        if key.startswith("hash:"):
+            want = key.split(":", 1)[1]
+            with self._engine_lock:
+                return any(kind == want for (kind, _prin) in self._hashes)
         if "/" in key:
             proto, _, port = key.partition("/")
             try:
@@ -271,7 +296,11 @@ class FactStore(Workspace):
             proto_status = {k: v.value for k, v in self._proto_status.items()}
             admin = len(self._admin_creds)
             cred_pairs = sorted(self._cred_pairs)
-            hashes = sorted(self._hashes)
+            hashes = [
+                {"kind": kind, "principal": prin,
+                 "cracked": rec["cracked"], "plaintext": rec["plaintext"]}
+                for (kind, prin), rec in sorted(self._hashes.items())
+            ]
             scanned_tcp = len(self._scanned_tcp)
         return {
             "ip": self.ip,

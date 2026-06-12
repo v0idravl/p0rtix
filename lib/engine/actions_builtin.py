@@ -134,6 +134,18 @@ def _ensure_users_file(facts: FactStore) -> Path:
     return path
 
 
+def _register_hashes(facts, kind: str, lines) -> int:
+    """Record each captured hash line under its principal (so the UI can show
+    uncracked→crack / cracked→plaintext, keyed by account)."""
+    from lib.workspace import Workspace
+    n = 0
+    for line in lines:
+        if line.strip():
+            facts.add_hash(kind, Workspace._krb_principal(line))
+            n += 1
+    return n
+
+
 def _h_asrep_roast(ctx) -> ActionResult:
     domain = ctx.facts.discovered_domain or ctx.domain
     if not domain:
@@ -151,7 +163,7 @@ def _h_asrep_roast(ctx) -> ActionResult:
         ctx.findings.bullet("**AS-REP roastable hash(es) found — crack with `hashcat -m 18200`**")
         ctx.findings.code_block("\n".join(lines))
         ctx.findings.add_summary("**AS-REP hash(es) in `loot/asrep.hash`** — crack: `hashcat -m 18200`")
-        ctx.facts.add_hash("asrep")
+        _register_hashes(ctx.facts, "asrep", lines)
         return ActionResult(ok=True, summary=f"{len(lines)} AS-REP hash(es) captured")
     ctx.facts.set_proto_status("kerberos", ProtoStatus.EXHAUSTED)
     return ActionResult(ok=True, summary="no AS-REP roastable accounts")
@@ -162,10 +174,11 @@ def _h_crack(ctx) -> ActionResult:
     from lib import crack
     cracked = crack.crack_hashes(ctx.facts, ctx.runner, ctx.findings, ctx.available)
     # Record each cracked (user, password) as a targeted pair so creds.test can
-    # verify it as itself instead of spraying it across the whole user list.
+    # verify it as itself instead of spraying it, and flip the hash to cracked.
     for user, password in cracked:
         if user:
             ctx.facts.add_cred_pair(user, password)
+            ctx.facts.mark_hash_cracked(user, password)
     if cracked:
         return ActionResult(ok=True, summary=f"cracked {len(cracked)} password(s)")
     return ActionResult(ok=True, summary="no hashes cracked")
@@ -228,7 +241,10 @@ def _h_kerberoast(ctx) -> ActionResult:
     n = credsmode._ad_kerberoast(ctx.ip, domain, user, pw, ctx.runner,
                                  ctx.findings, ctx.facts, ctx.available)
     if n:
-        ctx.facts.add_hash("kerberoast")
+        kfile = ctx.facts.loot_dir / "kerberoast.hash"
+        lines = kfile.read_text().splitlines() if kfile.exists() else []
+        _register_hashes(ctx.facts, "kerberoast",
+                         [l for l in lines if "$krb5tgs$" in l])
     return ActionResult(ok=True, summary=f"{n} kerberoastable hash(es)")
 
 
@@ -386,9 +402,9 @@ def build_registry() -> ActionRegistry:
         "crack.hashes", Tier.PASSIVE, _h_crack,
         group="creds", order=1,
         footprint=Footprint(
-            summary="offline hashcat + rockyou on captured hashes (local only)"),
-        gate=lambda f: f.has("hash"),
-        requires=(Requirement("hash", "a captured hash (AS-REP/Kerberoast/NTLM)"),),
+            summary="offline hashcat + rockyou on uncracked hashes (local only)"),
+        gate=lambda f: f.has("hash:uncracked"),
+        requires=(Requirement("hash:uncracked", "an uncracked hash"),),
         deps=("hashcat",),
     ))
 

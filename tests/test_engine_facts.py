@@ -134,3 +134,28 @@ def test_reload_picks_up_external_edits(tmp_path):
     assert new == 2                              # bob + charlie are new
     new_users = {e.value for e in events if e.kind == "user"}
     assert new_users == {"bob", "charlie"}       # alice already known — silent
+
+
+# ── Slice 5: hash crack-state model ───────────────────────────────────────────
+def test_hash_tracks_cracked_state(tmp_path):
+    fs = FactStore("10.0.0.1", None, "hash-test", str(tmp_path))
+    fs.add_hash("asrep", "svc-alfresco")
+    assert fs.has("hash") and fs.has("hash:uncracked") and fs.has("hash:asrep")
+
+    h = fs.snapshot()["hashes"][0]
+    assert h == {"kind": "asrep", "principal": "svc-alfresco",
+                 "cracked": False, "plaintext": None}
+
+    fs.mark_hash_cracked("svc-alfresco", "s3rvice")
+    assert not fs.has("hash:uncracked")          # nothing left to crack
+    h = fs.snapshot()["hashes"][0]
+    assert h["cracked"] and h["plaintext"] == "s3rvice"
+
+
+def test_hash_cracked_event_emitted(tmp_path):
+    fs = FactStore("10.0.0.1", None, "hash-ev", str(tmp_path))
+    events = []
+    fs.subscribe(lambda ev: events.append(ev.kind))
+    fs.add_hash("kerberoast", "sqlsvc")
+    fs.mark_hash_cracked("sqlsvc", "Summer2024")
+    assert events.count("hash") == 2             # capture + crack both notify

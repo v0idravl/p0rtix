@@ -23,7 +23,7 @@ _GLYPH = {Tier.PASSIVE: "·", Tier.GREEN: "🟢", Tier.YELLOW: "🟡", Tier.RED:
 _HELP = """\
 commands:
   status                       campaign overview (posture, ports, loot counts)
-  facts | ports                dump the fact store / open ports
+  facts | ports | hashes       dump the fact store / open ports / captured hashes
   actions [--all]              runnable actions (--all includes dormant/exhausted)
   dormant | exhausted          greyed-out (missing inputs) / already-run actions
   why <action>                 explain an action's state
@@ -92,6 +92,23 @@ class CommandRouter:
         if not ports:
             return "(no open ports — run discovery.tcp_ports)"
         return "  ".join(f"{proto}/{port}" for proto, port in ports)
+
+    def _cmd_hashes(self, args) -> str:
+        hashes = self._facts.snapshot()["hashes"]
+        if not hashes:
+            return "(no hashes captured)"
+        uncracked = [h for h in hashes if not h["cracked"]]
+        cracked = [h for h in hashes if h["cracked"]]
+        lines = []
+        if uncracked:
+            lines.append("uncracked (run crack.hashes):")
+            for h in uncracked:
+                lines.append(f"  {h['principal'] or '?'}  [{h['kind']}]")
+        if cracked:
+            lines.append("cracked:")
+            for h in cracked:
+                lines.append(f"  {h['principal'] or '?'} : {h['plaintext']}  [{h['kind']}]")
+        return "\n".join(lines)
 
     def _cmd_actions(self, args) -> str:
         show_all = "--all" in args
@@ -201,6 +218,7 @@ class CommandRouter:
         "status": _cmd_status,
         "facts": _cmd_facts,
         "ports": _cmd_ports,
+        "hashes": _cmd_hashes,
         "actions": _cmd_actions,
         "dormant": _cmd_dormant,
         "exhausted": _cmd_exhausted,

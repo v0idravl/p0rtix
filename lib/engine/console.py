@@ -108,6 +108,20 @@ def _tier_tag(tier: Tier) -> str:
     return f"[{colour}]{glyph}[/] [{colour}]{tier.label}[/]"
 
 
+def _hash_summary(hashes) -> str:
+    """Hashes by the axis that matters: uncracked (→ crack) vs cracked."""
+    if not hashes:
+        return "—"
+    cracked = sum(1 for h in hashes if h["cracked"])
+    uncr = len(hashes) - cracked
+    parts = []
+    if uncr:
+        parts.append(f"[yellow]{uncr} uncracked[/]")
+    if cracked:
+        parts.append(f"[green]{cracked} cracked[/]")
+    return " · ".join(parts)
+
+
 def _state_markup(facts, posture, scheduler) -> str:
     """Left-pane campaign state — a compact mirror of the `status` command:
     target, domain, posture, how many ports are known, one-line loot, lockout,
@@ -131,7 +145,7 @@ def _state_markup(facts, posture, scheduler) -> str:
         f"[b]PORTS[/]    {ports}",
         f"[b]LOOT[/]     {len(s['users'])} users · "
         f"[b]{len(s['valid_creds'])}[/]/{len(s['creds'])} creds [dim](valid/cand)[/]",
-        f"[b]HASHES[/]   {', '.join(s['hashes']) or '—'}",
+        f"[b]HASHES[/]   {_hash_summary(s['hashes'])}",
         f"[b]LOCKOUT[/]  {lockout}",
         f"[b]ACTIONS[/]  {st['completed']} run",
     ]
