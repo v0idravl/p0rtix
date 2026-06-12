@@ -205,6 +205,14 @@ class FactStore(Workspace):
         with self._engine_lock:
             return self._proto_status.get(proto)
 
+    def clear_proto_status(self, proto: str) -> None:
+        """Forget a protocol's status (operator `recheck` override) so a dormant
+        branch can be re-armed."""
+        with self._engine_lock:
+            existed = self._proto_status.pop(proto, None) is not None
+        if existed:
+            self._emit(FactEvent("proto_status", (proto, None)))
+
     # ── queries ───────────────────────────────────────────────────────────────
     def has(self, key: str) -> bool:
         """Answer a named-fact check used by Action gates / `requires`.

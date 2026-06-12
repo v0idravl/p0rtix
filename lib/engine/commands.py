@@ -31,6 +31,7 @@ commands:
   noise <green|yellow|red>     raise/lower the noise ceiling
   set domain <d> | add user <u> | creds add <u:p>   populate facts by hand
   reload | recheck users       refresh loot from disk / re-arm user-list actions
+  recheck <proto>              re-arm a dormant branch (e.g. recheck ldap)
   help | exit"""
 
 
@@ -184,7 +185,11 @@ class CommandRouter:
         if args and args[0].lower() == "users":
             self._sched.recheck_users()
             return "user-list actions re-armed"
-        return "usage: recheck users"
+        if args:
+            proto = args[0].lower()
+            n = self._sched.recheck(proto)
+            return f"{proto} branch re-armed ({n} action(s))"
+        return "usage: recheck users | recheck <proto>"
 
     def _cmd_help(self, args) -> str:
         return _HELP

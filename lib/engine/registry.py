@@ -62,6 +62,13 @@ class ActionRegistry:
                 return True
         return False
 
+    def _status_suppressed(self, action: Action, facts: FactStore) -> bool:
+        """True if the action's group/proto is in a status that sends it dormant
+        (e.g. an anonymous probe once the branch is ANON_DENIED)."""
+        if not action.suppressed_by:
+            return False
+        return facts.proto_status(action.group) in action.suppressed_by
+
     # ── queries ───────────────────────────────────────────────────────────────
     def available(
         self,
@@ -81,6 +88,8 @@ class ActionRegistry:
             if tools is not None and action.deps and not set(action.deps) <= tools:
                 continue
             if self._is_superseded(action, tried):
+                continue
+            if self._status_suppressed(action, facts):
                 continue
             for args in self._expand(action, facts):
                 if instance_key(action.name, args) not in tried:
@@ -137,6 +146,11 @@ class ActionRegistry:
                 row = (action, "available", avail_counts[action.name])
             elif action.name in exhausted_names:
                 row = (action, "exhausted", None)
+            elif self._status_suppressed(action, facts):
+                st = facts.proto_status(action.group)
+                reason = (f"{action.group} branch {st.value if st else 'blocked'} — "
+                          f"recheck {action.group} to re-arm")
+                row = (action, "dormant", [Requirement("recheck", reason)])
             elif not action.is_available(facts):
                 row = (action, "dormant", action.missing_requirements(facts))
             else:
@@ -170,6 +184,11 @@ class ActionRegistry:
             if missing:
                 return "dormant — needs: " + ", ".join(r.label for r in missing)
             return "dormant — preconditions not met"
+
+        if self._status_suppressed(action, facts):
+            st = facts.proto_status(action.group)
+            return (f"dormant — {action.group} branch is "
+                    f"{st.value if st else 'blocked'} (recheck {action.group} to re-arm)")
 
         if not posture.allows(action.tier):
             if action.tier.label == "red" and not posture.red_unlocked():

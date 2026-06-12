@@ -107,6 +107,11 @@ class Action:
     instances: Optional[Callable[["FactStore"], list[dict]]] = None
     deps: tuple[str, ...] = ()           # required tool names (checked vs available set)
     supersedes: tuple[str, ...] = ()     # skip these once this one has run
+    # ProtoStatus values of this action's `group` that send it dormant (e.g. an
+    # anonymous probe is pointless once the branch is ANON_DENIED) until a new
+    # fact or an operator `recheck` clears the status. Kept as a plain tuple to
+    # avoid an action→facts import; compared by identity against facts.proto_status.
+    suppressed_by: tuple = ()
     # Red pre-flight: (ok, message). False aborts before the action runs.
     precondition: Optional[Callable[["ActionContext"], tuple[bool, str]]] = None
 

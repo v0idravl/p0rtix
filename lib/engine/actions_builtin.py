@@ -327,6 +327,9 @@ def build_registry() -> ActionRegistry:
         gate=lambda f: _ldap_port(f) is not None,
         requires=(Requirement("ldap_port", "LDAP (tcp/389|636|3268|3269) open"),),
         deps=("ldapsearch",),
+        # once anon bind is denied, don't keep re-offering it — the branch waits
+        # for a credential (or an operator `recheck ldap`).
+        suppressed_by=(ProtoStatus.ANON_DENIED,),
     ))
 
     reg.register(Action(

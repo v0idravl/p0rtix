@@ -171,6 +171,19 @@ class Scheduler:
         self._facts.users_complete = False
         self._dirty = True
 
+    def recheck(self, proto: str) -> int:
+        """Re-arm a dormant branch (operator override): forget the protocol's
+        status and drop the tried-state of every action in that group, so they
+        become runnable again. Returns the number of actions re-armed."""
+        self._facts.clear_proto_status(proto)
+        group_actions = {a.name for a in self._registry.all() if a.group == proto}
+        with self._lock:
+            self._tried = {k for k in self._tried
+                           if k.split("#", 1)[0] not in group_actions}
+        self._dirty = True
+        self._save_state()
+        return len(group_actions)
+
     def reload(self) -> int:
         """Re-read loot files into the fact store (picks up external edits)."""
         return self._facts.reload()

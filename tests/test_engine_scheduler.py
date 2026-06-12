@@ -161,3 +161,23 @@ def test_recheck_users_clears_collect_once(tmp_path):
     assert fs.users_complete is True
     sched.recheck_users()
     assert fs.users_complete is False
+
+
+def test_recheck_rearms_a_dormant_branch(tmp_path):
+    from lib.engine.facts import ProtoStatus
+    fs = _store(tmp_path)
+    reg = ActionRegistry()
+    reg.register(Action("ldap.anon_bind", Tier.GREEN, lambda ctx: ActionResult(),
+                        group="ldap", suppressed_by=(ProtoStatus.ANON_DENIED,)))
+    sched = Scheduler(reg, fs, _green())
+
+    sched.run_action("ldap.anon_bind")
+    fs.set_proto_status("ldap", ProtoStatus.ANON_DENIED)
+    assert "ldap.anon_bind" in sched.tried
+    assert "ldap.anon_bind" not in {a.name for a, _ in reg.available(fs, sched._posture)}
+
+    n = sched.recheck("ldap")
+    assert n == 1
+    assert fs.proto_status("ldap") is None              # status cleared
+    assert "ldap.anon_bind" not in sched.tried          # tried-state dropped
+    assert "ldap.anon_bind" in {a.name for a, _ in reg.available(fs, sched._posture)}

@@ -128,10 +128,13 @@ duplicate per-port sections. Dedup happens when ports/services become facts.
       on Forest (each AD step ran independently; creds.test confirmed svc-alfresco
       SMB access + WinRM handoff). 96 pass.
 
-### Slice 3 — per-proto status drives availability
-- [ ] `proto_status` consulted in `available`/`dormant`/`why`; dormant-until-fact.
-- [ ] `scheduler.recheck(proto)` override + `recheck <proto>` command.
-- [ ] Tests: anon-denied LDAP goes dormant, re-arms on a cred.
+### Slice 3 — per-proto status drives availability ✅
+- [x] `Action.suppressed_by` + `registry._status_suppressed`; consulted in
+      `available`/`grouped`/`why`. `ldap.anon_bind` suppressed by ANON_DENIED →
+      dormant ("ldap branch anon_denied — recheck ldap to re-arm").
+- [x] `facts.clear_proto_status`; `scheduler.recheck(proto)` clears the status +
+      drops the group's tried-state; `recheck <proto>` command + help.
+- [x] Tests: status-suppressed dormancy + re-arm, scheduler.recheck. 98 pass.
 
 ### Slice 4 — tiered incremental discovery + dedup
 - [ ] `scanned_ports` fact; `discovery.tcp_top100/top1000/full` scanning the delta.

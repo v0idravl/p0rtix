@@ -213,3 +213,33 @@ def test_grouped_marks_exhausted(tmp_path):
     tried = {"smb.anon_enum"}
     rows = dict(reg.grouped(fs, _green_posture(), tried=tried))["smb"]
     assert rows[0][1] == "exhausted"
+
+
+# ── per-proto status drives availability (Slice 3) ────────────────────────────
+def _status_registry():
+    from lib.engine.facts import ProtoStatus
+    reg = ActionRegistry()
+    reg.register(Action("ldap.anon_bind", Tier.GREEN, _noop, group="ldap",
+                        suppressed_by=(ProtoStatus.ANON_DENIED,)))
+    return reg
+
+
+def test_status_suppressed_action_goes_dormant_and_rearms(tmp_path):
+    from lib.engine.facts import ProtoStatus
+    reg = _status_registry()
+    fs = _store(tmp_path)
+    posture = _green_posture()
+
+    # available while the branch has no status
+    assert "ldap.anon_bind" in {a.name for a, _ in reg.available(fs, posture)}
+
+    # a denial sends it dormant (not re-offered)
+    fs.set_proto_status("ldap", ProtoStatus.ANON_DENIED)
+    assert "ldap.anon_bind" not in {a.name for a, _ in reg.available(fs, posture)}
+    assert "anon_denied" in reg.why("ldap.anon_bind", fs, posture)
+    rows = dict(reg.grouped(fs, posture))["ldap"]
+    assert rows[0][1] == "dormant"
+
+    # clearing the status re-arms it (operator `recheck`)
+    fs.clear_proto_status("ldap")
+    assert "ldap.anon_bind" in {a.name for a, _ in reg.available(fs, posture)}
