@@ -94,56 +94,300 @@ def run_console(scheduler, registry, facts, posture, *, banner=None,
 
 
 # ── Textual dashboard (only touched when textual is importable) ───────────────
-def _run_textual(router, scheduler, registry, facts, posture) -> None:
-    """Build and run the full-screen dashboard. Imports Textual lazily so this
-    module imports cleanly without the dependency."""
-    from textual.app import App, ComposeResult
-    from textual.containers import Horizontal, Vertical
-    from textual.widgets import Footer, Header, Input, RichLog, Static
+# Tier → (glyph, rich-colour) for the action list and detail pane.
+_TIER_STYLE = {
+    Tier.PASSIVE: ("·", "dim"),
+    Tier.GREEN:   ("●", "green"),
+    Tier.YELLOW:  ("●", "yellow"),
+    Tier.RED:     ("●", "red"),
+}
 
-    GLYPH = {Tier.PASSIVE: "·", Tier.GREEN: "[green]●[/]",
-             Tier.YELLOW: "[yellow]●[/]", Tier.RED: "[red]●[/]"}
+
+def _tier_tag(tier: Tier) -> str:
+    glyph, colour = _TIER_STYLE[tier]
+    return f"[{colour}]{glyph}[/] [{colour}]{tier.label}[/]"
+
+
+def _state_markup(facts, posture, scheduler) -> str:
+    """Left-pane campaign state — target, posture, ports, loot, per-proto status."""
+    s = facts.snapshot()
+    tcp = [p for proto, p in s["open_ports"] if proto == "tcp"]
+    udp = [p for proto, p in s["open_ports"] if proto == "udp"]
+    red = "on" if posture.red_unlocked() else "off"
+    lockout = s["lockout"] if s["lockout"] != -1 else "?"
+    rows = [
+        f"[b]TARGET[/]   {s['ip']}",
+        f"[b]DOMAIN[/]   {s['domain'] or '—'}",
+        f"[b]POSTURE[/]  {_tier_tag(posture.level)}  [dim](dial {posture.dial} · red {red})[/]",
+        "",
+        f"[b]PORTS[/]    [b]{len(s['open_ports'])}[/] open",
+        "  tcp " + (" ".join(map(str, tcp)) or "—"),
+    ]
+    if udp:
+        rows.append("  udp " + " ".join(map(str, udp)))
+    rows += [
+        "",
+        "[b]LOOT[/]",
+        f"  users    [b]{len(s['users'])}[/]",
+        f"  creds    {len(s['creds'])} cand · [b]{len(s['valid_creds'])}[/] valid",
+        f"  hashes   {', '.join(s['hashes']) or '—'}",
+        f"  lockout  {lockout}",
+    ]
+    if s["proto_status"]:
+        rows += ["", "[b]STATUS[/]"] + [
+            f"  {k} = {v}" for k, v in sorted(s["proto_status"].items())
+        ]
+    return "\n".join(rows)
+
+
+def _run_textual(router, scheduler, registry, facts, posture) -> None:
+    """Launch the full-screen operator dashboard (blocks until the user quits)."""
+    _build_dashboard(router, scheduler, registry, facts, posture).run()
+
+
+def _build_dashboard(router, scheduler, registry, facts, posture):
+    """Build the operator dashboard App (without running it — the test harness
+    drives it via Textual's Pilot). Imports Textual lazily so this module imports
+    cleanly without the dependency.
+
+    Layout (top→bottom): header · [state | actions] · action detail · result log ·
+    command input · footer. Actions are a navigable/clickable list grouped
+    Available / Dormant / Exhausted; selecting a runnable one dispatches it on a
+    worker thread (so a multi-minute scan never freezes the UI) and streams the
+    result into the log via the scheduler's on_output hook."""
+    from rich.markdown import Markdown
+    from textual.app import App, ComposeResult
+    from textual.containers import Horizontal
+    from textual.widgets import (Footer, Header, Input, Label, ListItem,
+                                 ListView, RichLog, Static)
+
+    class _ActionItem(ListItem):
+        """A ListView row that remembers which action it represents."""
+        def __init__(self, label: str, *, action_name=None, runnable=False,
+                     header=False):
+            super().__init__(Label(label))
+            self.label_text = label            # plain text, for tests/inspection
+            self.action_name = action_name
+            self.runnable = runnable
+            if header:
+                self.add_class("group")
+                self.disabled = True
 
     class Dashboard(App):
+        TITLE = "p0rtix — operator console"
         CSS = """
-        #state { width: 38%; border: round $primary; }
-        #actions { width: 62%; border: round $primary; }
+        #top { height: 45%; }
+        #state {
+            width: 34%; border: round $primary; padding: 0 1;
+        }
+        #actions-title { dock: top; padding: 0 1;
+            background: $primary; color: $text; text-style: bold; }
+        #actionpane { width: 1fr; border: round $accent; }
+        #actions { height: 1fr; background: $surface; }
+        #actions > .group { color: $text-muted; text-style: bold; }
+        #detail { height: 5; border: round $secondary; padding: 0 1; }
         #log { height: 1fr; border: round $primary; }
-        Input { dock: bottom; }
+        /* No dock: let the input flow as the last child so it sits directly
+           above the Footer instead of overlapping it. */
+        #cmd { height: 3; }
         """
-        BINDINGS = [("ctrl+c", "quit", "Quit")]
+        BINDINGS = [
+            ("ctrl+c", "quit", "Quit"),
+            ("ctrl+r", "run_all", "Run all (≤posture)"),
+            ("ctrl+o", "focus_cmd", "Command"),
+            ("f1", "help", "Help"),
+        ]
 
         def compose(self) -> ComposeResult:
             yield Header(show_clock=True)
-            with Horizontal():
-                yield Static(id="state")
-                yield Static(id="actions")
-            yield RichLog(id="log", highlight=True, markup=True)
-            yield Input(placeholder="command (try 'help')")
+            with Horizontal(id="top"):
+                yield Static(_state_markup(facts, posture, scheduler), id="state")
+                with Horizontal(id="actionpane"):
+                    yield Static("ACTIONS  (↑↓ to browse · enter/click to run)",
+                                 id="actions-title")
+                    yield ListView(id="actions")
+            yield Static("Select an action to see what it does and the trace it "
+                         "leaves.", id="detail")
+            yield RichLog(id="log", highlight=True, markup=True, wrap=True)
+            yield Input(placeholder="command — type 'help', or run actions from the "
+                        "list above", id="cmd")
             yield Footer()
 
+        # ── lifecycle ──────────────────────────────────────────────────────────
         def on_mount(self) -> None:
+            scheduler._on_output = self._on_action_output
             facts.subscribe(self._on_fact)
-            self._refresh()
+            self._log("[b green]p0rtix operator console[/] — F1 for help. "
+                      "Actions unlock as facts arrive; greyed-out rows show what "
+                      "they're waiting on.")
+            self._rebuild_actions()
+
+        # ── fact events (may arrive on a worker thread OR the UI thread) ─────────
+        def _marshal(self, fn, *args) -> None:
+            """Run `fn` on the UI thread. Actions run on worker threads (→ marshal),
+            but command-box mutations (`set domain`, `add user`) emit facts on the
+            UI thread already, where call_from_thread would raise — so fall back to
+            a direct call."""
+            try:
+                self.call_from_thread(fn, *args)
+            except RuntimeError:
+                fn(*args)
 
         def _on_fact(self, _ev) -> None:
-            # Marshalled onto the UI thread — handlers may run on worker threads.
-            self.call_from_thread(self._refresh)
+            self._marshal(self._refresh)
 
+        def _on_action_output(self, name, summary, rendered) -> None:
+            self._marshal(self._emit_result, name, summary, rendered)
+
+        # ── rendering ───────────────────────────────────────────────────────────
         def _refresh(self) -> None:
-            self.query_one("#state", Static).update(router.dispatch("status"))
-            self.query_one("#actions", Static).update(router.dispatch("actions --all"))
+            self.query_one("#state", Static).update(
+                _state_markup(facts, posture, scheduler))
+            self._rebuild_actions()
+
+        def _rebuild_actions(self) -> None:
+            lv = self.query_one("#actions", ListView)
+            keep = None
+            cur = lv.highlighted_child
+            if isinstance(cur, _ActionItem):
+                keep = cur.action_name
+            lv.clear()
+
+            # Available — collapse per-instance fan-out (e.g. version_detect/port)
+            # into one row per action, with an ×N count.
+            counts: dict[str, int] = {}
+            actions: dict[str, object] = {}
+            for a, _args in registry.available(facts, posture, scheduler.tried):
+                counts[a.name] = counts.get(a.name, 0) + 1
+                actions[a.name] = a
+            lv.append(_ActionItem("AVAILABLE", header=True))
+            if counts:
+                for name in sorted(counts):
+                    a = actions[name]
+                    glyph, colour = _TIER_STYLE[a.tier]
+                    n = counts[name]
+                    tag = f" [dim]×{n}[/]" if n > 1 else ""
+                    desc = a.footprint.summary or ""
+                    lv.append(_ActionItem(
+                        f"[{colour}]{glyph}[/] {name}{tag}  [dim]{desc}[/]",
+                        action_name=name, runnable=True))
+            else:
+                lv.append(_ActionItem("  [dim](none — raise noise or feed a fact)[/]",
+                                      header=True))
+
+            dormant = registry.dormant(facts)
+            if dormant:
+                lv.append(_ActionItem("DORMANT", header=True))
+                for a, missing in dormant:
+                    reason = ", ".join(r.label for r in missing) or "preconditions"
+                    lv.append(_ActionItem(
+                        f"[dim]○ {a.name} — needs {reason}[/]",
+                        action_name=a.name, runnable=False))
+
+            exhausted = registry.exhausted(facts, scheduler.tried)
+            if exhausted:
+                lv.append(_ActionItem("EXHAUSTED", header=True))
+                for a in exhausted:
+                    lv.append(_ActionItem(f"[dim]✓ {a.name}[/]",
+                                          action_name=a.name, runnable=False))
+
+            if keep:                       # restore highlight after rebuild
+                for i, child in enumerate(lv.children):
+                    if isinstance(child, _ActionItem) and child.action_name == keep:
+                        lv.index = i
+                        break
+
+        def _emit_result(self, name, summary, rendered) -> None:
+            log = self.query_one("#log", RichLog)
+            log.write(f"[b cyan]✓ {name}[/] — {summary or 'done'}")
+            if rendered.strip():
+                log.write(Markdown(rendered))
+
+        def _log(self, text) -> None:
+            self.query_one("#log", RichLog).write(text)
+
+        # ── interaction ─────────────────────────────────────────────────────────
+        def on_list_view_highlighted(self, event) -> None:
+            item = event.item
+            detail = self.query_one("#detail", Static)
+            if not isinstance(item, _ActionItem) or not item.action_name:
+                detail.update("Select an action to see what it does and the trace "
+                              "it leaves.")
+                return
+            a = registry.get(item.action_name)
+            if a is None:
+                return
+            why = registry.why(item.action_name, facts, posture, scheduler.tried)
+            fp = a.footprint
+            lines = [f"{_tier_tag(a.tier)}  [b]{a.name}[/]   [i]{why}[/]"]
+            if fp.summary:
+                lines.append(fp.summary)
+            trace = []
+            if fp.network:
+                trace.append(f"network: {fp.network}")
+            if fp.windows_events:
+                trace.append("win-events: " + ", ".join(fp.windows_events))
+            if fp.linux_logs:
+                trace.append("linux: " + ", ".join(fp.linux_logs))
+            if trace:
+                lines.append("[dim]" + "   ".join(trace) + "[/]")
+            detail.update("\n".join(lines))
+
+        def on_list_view_selected(self, event) -> None:
+            item = event.item
+            if not isinstance(item, _ActionItem) or not item.action_name:
+                return
+            if item.runnable:
+                self._run_action(item.action_name)
+            else:
+                self._log(f"[yellow]{item.action_name}[/]: "
+                          + registry.why(item.action_name, facts, posture,
+                                         scheduler.tried))
+
+        def _run_action(self, name) -> None:
+            self._log(f"[b]› running [cyan]{name}[/]…[/]")
+            self.run_worker(lambda: self._dispatch(name), thread=True,
+                            group="actions", exit_on_error=False)
+
+        def _dispatch(self, name) -> None:          # worker thread
+            n = scheduler.run_action(name)
+            if not n:
+                why = registry.why(name, facts, posture, scheduler.tried)
+                self.call_from_thread(self._log, f"[yellow]{name}: {why}[/]")
+            self.call_from_thread(self._refresh)
 
         def on_input_submitted(self, event: Input.Submitted) -> None:
             line = event.value.strip()
             event.input.value = ""
+            if not line:
+                return
             if line.lower() in ("exit", "quit"):
                 self.exit()
                 return
-            self.query_one("#log", RichLog).write(f"[b]> {line}[/]")
-            out = router.dispatch(line)
-            if out:
-                self.query_one("#log", RichLog).write(out)
-            self._refresh()
+            self._log(f"[b]> {line}[/]")
+            # run/run-all/auto go through the worker so the UI stays responsive;
+            # everything else is cheap and runs inline.
+            low = line.lower()
+            if low in ("run-all", "auto"):
+                self.action_run_all()
+            elif low.startswith("run "):
+                self._run_action(line.split(None, 1)[1].strip())
+            else:
+                out = router.dispatch(line)
+                if out:
+                    self._log(out)
+                self._refresh()
 
-    Dashboard().run()
+        # ── bindings ─────────────────────────────────────────────────────────────
+        def action_run_all(self) -> None:
+            self._log(f"[b]› run-all at/below [cyan]{posture.level.label}[/]…[/]")
+            self.run_worker(lambda: scheduler.run_all_at_or_below(posture),
+                            thread=True, group="actions", exit_on_error=False)
+
+        def action_focus_cmd(self) -> None:
+            self.query_one("#cmd", Input).focus()
+
+        def action_help(self) -> None:
+            self._log(router.dispatch("help"))
+
+    return Dashboard()

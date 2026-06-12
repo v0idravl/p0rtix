@@ -43,6 +43,7 @@ class Scheduler:
         runner=None,
         findings=None,
         tools: set[str] | None = None,
+        on_output=None,
     ):
         self._registry = registry
         self._facts = facts
@@ -52,6 +53,9 @@ class Scheduler:
         self._runner = runner
         self._findings = findings
         self._tools = tools
+        # Optional UI sink: called as on_output(action_name, summary, rendered_md)
+        # after each action completes, so a console can stream results inline.
+        self._on_output = on_output
 
         self._lock = threading.Lock()
         self._queue: deque[tuple[Action, dict]] = deque()
@@ -118,10 +122,16 @@ class Scheduler:
         return result
 
     def _on_done(self, action: Action, args: dict, buf: ServiceBuffer, result) -> None:
+        rendered = buf.render()
         if self._findings is not None:
             self._findings.flush_service_buffer(buf)
         self._completed.append((action.name, args))
         self._save_state()
+        if self._on_output is not None:
+            try:
+                self._on_output(action.name, getattr(result, "summary", ""), rendered)
+            except Exception:   # a UI sink must never break the engine
+                pass
 
     # ── run-all (cascading, bounded by posture) ───────────────────────────────
     def run_all_at_or_below(self, posture: Posture | None = None) -> int:
