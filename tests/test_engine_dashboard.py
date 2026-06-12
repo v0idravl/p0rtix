@@ -209,3 +209,28 @@ def test_action_list_hides_fact_dormant_actions(tmp_path):
 def _ListView():
     from textual.widgets import ListView
     return ListView
+
+
+def test_rebuild_resets_stale_index_no_nav_crash(tmp_path):
+    # Regression: hiding dormant/exhausted shrinks the list; a stale ListView
+    # index left from a longer list IndexError'd on the next arrow-key nav.
+    from lib.engine.registry import instance_key
+    fs, posture, reg, sched, router = _wire(tmp_path)
+    app = _build_dashboard(router, sched, reg, fs, posture)
+
+    async def body():
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            from textual.widgets import ListView
+            lv = app.query_one("#actions", ListView)
+            lv.index = len(lv.children) - 1          # highlight the last row
+            # shrink the list: complete everything available → fewer rows shown
+            for a, args in reg.available(fs, posture, sched.tried):
+                sched._tried.add(instance_key(a.name, args))
+            app._rebuild_actions()
+            await pilot.pause()
+            assert lv.index is None or lv.index < len(lv.children)
+            await pilot.press("down")                # must not crash
+            await pilot.press("up")
+
+    _run(body())

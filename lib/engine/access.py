@@ -128,8 +128,13 @@ def launch_shell(cmd: list[str]) -> int:
     console keeps running — detach/switch/close with tmux); otherwise it inherits
     the terminal and blocks (the TUI wraps that case in App.suspend()). The single
     spawn seam — tests monkeypatch it. Returns the child exit code (0 for tmux)."""
-    if in_tmux() and _tmux_new_window(cmd, name="p0rtix-shell"):
-        return 0
+    if in_tmux():
+        # Wrap so the window persists even if the session ends/fails fast (a bad
+        # cred would otherwise flash a window shut and look like nothing happened).
+        sh = os.environ.get("SHELL", "/bin/bash")
+        inner = shlex.join(cmd) + '; echo; read -rp "[session ended — Enter to close] "'
+        if _tmux_new_window([sh, "-c", inner], name="p0rtix-shell"):
+            return 0
     try:
         return subprocess.call(cmd)
     except FileNotFoundError:

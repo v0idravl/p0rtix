@@ -112,6 +112,11 @@ class Action:
     # fact or an operator `recheck` clears the status. Kept as a plain tuple to
     # avoid an action→facts import; compared by identity against facts.proto_status.
     suppressed_by: tuple = ()
+    # When True, the action is only ever dispatched by an explicit `run <action>`
+    # — never swept up by run-all / run <group> / the dial. For deliberate,
+    # operator-initiated steps (e.g. dropping a shell) that shouldn't fire as a
+    # side effect of a bulk run.
+    manual_only: bool = False
     # Red pre-flight: (ok, message). False aborts before the action runs.
     precondition: Optional[Callable[["ActionContext"], tuple[bool, str]]] = None
 

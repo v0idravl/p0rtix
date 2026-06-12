@@ -68,33 +68,32 @@ def _wire(tmp_path, dial=0):
     return fs, posture, reg, sched
 
 
-def test_access_shell_is_red_and_locked_until_armed(tmp_path):
+def test_access_shell_is_manual_only_yellow(tmp_path):
     fs, posture, reg, sched = _wire(tmp_path, dial=0)
     fs.add_open_port("tcp", 5985)
     fs.add_valid_cred("svc-alfresco", "s3rvice", "WINRM")
 
     shell = reg.get("access.shell")
-    assert shell.tier is Tier.RED
-    # RED locked at dial 0 → not available even with a cred+service
+    assert shell.tier is Tier.YELLOW and shell.manual_only
+    # available for an explicit run at YELLOW (no arming needed)
     posture.raise_to(Tier.YELLOW)
-    assert "access.shell" not in {a.name for a, _ in reg.available(fs, posture, sched.tried)}
-
-    # arm RED → available
-    posture.arm_dangerous()
-    posture.raise_to(Tier.RED)
     assert "access.shell" in {a.name for a, _ in reg.available(fs, posture, sched.tried)}
 
 
-def test_access_shell_invokes_launch(tmp_path, monkeypatch):
+def test_access_shell_not_swept_by_run_all_or_group(tmp_path, monkeypatch):
     launched = {}
     monkeypatch.setattr(access, "launch_shell",
                         lambda cmd: launched.setdefault("cmd", cmd) or 0)
-    fs, posture, reg, sched = _wire(tmp_path, dial=7)   # dial 7 arms RED
-    posture.raise_to(Tier.RED)
+    fs, posture, reg, sched = _wire(tmp_path, dial=0)
+    posture.raise_to(Tier.YELLOW)
     fs.add_open_port("tcp", 5985)
     fs.add_valid_cred("svc-alfresco", "s3rvice", "WINRM")
 
-    sched.run_action("access.shell")
+    sched.run_all_at_or_below()        # bulk run must NOT spawn a shell
+    sched.run_group("access")          # nor a group run
+    assert "cmd" not in launched
+
+    sched.run_action("access.shell")   # explicit run does
     assert launched["cmd"][0] == "evil-winrm"
 
 

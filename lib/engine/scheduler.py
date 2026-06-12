@@ -141,7 +141,9 @@ class Scheduler:
         posture = posture or self._posture
         dispatched = 0
         while True:
-            avail = self._registry.available(self._facts, posture, self._tried, self._tools)
+            avail = [(a, args) for a, args
+                     in self._registry.available(self._facts, posture, self._tried, self._tools)
+                     if not a.manual_only]                 # never auto-run these
             if not avail:
                 break
             for action, args in avail:
@@ -205,7 +207,7 @@ class Scheduler:
         while True:
             avail = [(a, args) for a, args
                      in self._registry.available(self._facts, posture, self._tried, self._tools)
-                     if a.group == group]
+                     if a.group == group and not a.manual_only]
             if not avail:
                 break
             for a, args in avail:

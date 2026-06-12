@@ -86,3 +86,27 @@ def test_reload_reports_new_facts(tmp_path):
     router, fs, posture, sched = _build(tmp_path)
     (fs.loot_dir / "users.txt").write_text("alice\nbob\n")
     assert "2 new fact" in router.dispatch("reload")
+
+
+def test_add_commands_are_cohesive(tmp_path):
+    from lib.engine.actions_builtin import build_registry
+    from lib.engine.commands import CommandRouter
+    from lib.engine.facts import FactStore
+    from lib.engine.posture import Posture
+    from lib.engine.scheduler import Scheduler
+
+    class _R:
+        def __init__(self, ws): self.ws = ws
+    fs = FactStore("10.0.0.1", None, "addcmd", str(tmp_path))
+    posture = Posture(); reg = build_registry()
+    sched = Scheduler(reg, fs, posture, runner=_R(fs))
+    router = CommandRouter(sched, reg, fs, posture)
+
+    router.dispatch("add user bob")
+    router.dispatch("add creds alice:Passw0rd!")
+    router.dispatch("add domain corp.local")
+    snap = fs.snapshot()
+    assert "bob" in snap["users"]
+    assert "alice" in snap["users"] and "Passw0rd!" in snap["creds"]
+    assert ("alice", "Passw0rd!") in {(u, p) for u, p in fs._known_valid}
+    assert snap["domain"] == "corp.local"

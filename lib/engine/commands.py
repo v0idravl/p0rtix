@@ -30,7 +30,8 @@ commands:
   run <action> [port]          dispatch one action (re-runs it fresh if already done)
   run <group> | run-all|auto   dispatch a whole branch / everything at/below posture
   noise <green|yellow|red>     raise/lower the noise ceiling
-  set domain <d> | add user <u> | creds add <u:p>   populate facts by hand
+  add user <u> | add creds <u:p> | add domain <d>   populate facts by hand
+  set dangerous on             arm RED-tier actions
   reload | recheck users       refresh loot from disk / re-arm user-list actions
   recheck <proto>              re-arm a dormant branch (e.g. recheck ldap)
   shell                        drop to a local shell in the workspace dir
@@ -191,17 +192,25 @@ class CommandRouter:
         return "usage: set domain <d> | set dangerous on"
 
     def _cmd_add(self, args) -> str:
-        if len(args) >= 2 and args[0].lower() == "user":
+        """Cohesive populate-facts verb: add user|creds|domain <value>."""
+        sub = args[0].lower() if args else ""
+        if sub == "user" and len(args) >= 2:
             self._facts.add_user(args[1])
             return f"user added: {args[1]}"
-        return "usage: add user <name>"
-
-    def _cmd_creds(self, args) -> str:
-        if len(args) >= 2 and args[0].lower() == "add" and ":" in args[1]:
+        if sub in ("cred", "creds") and len(args) >= 2 and ":" in args[1]:
             u, p = args[1].split(":", 1)
             self._facts.add_valid_cred(u, p, "manual")
-            return f"credential added: {u}"
-        return "usage: creds add <user:pass>"
+            return f"credential added: {u} (seeded user + spray candidate)"
+        if sub == "domain" and len(args) >= 2:
+            self._facts.set_discovered_domain(args[1])
+            return f"domain set: {self._facts.discovered_domain}"
+        return "usage: add user <name> | add creds <user:pass> | add domain <d>"
+
+    def _cmd_creds(self, args) -> str:
+        # deprecated alias for `add creds` — kept so old muscle memory still works
+        if len(args) >= 2 and args[0].lower() == "add":
+            return self._cmd_add(["creds", args[1]])
+        return "usage: add creds <user:pass>"
 
     # ── overrides ─────────────────────────────────────────────────────────────
     def _cmd_reload(self, args) -> str:

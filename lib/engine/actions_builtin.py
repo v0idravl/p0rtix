@@ -544,16 +544,17 @@ def build_registry() -> ActionRegistry:
     ))
 
     reg.register(Action(
-        "access.shell", Tier.RED, _h_shell,
+        "access.shell", Tier.YELLOW, _h_shell,
         group="access", order=1,
+        manual_only=True,          # only ever via an explicit `run access.shell`
         footprint=Footprint(
-            summary="hand the terminal off to an interactive evil-winrm/psexec "
-                    "session (operator-driven; not C2)",
+            summary="hand the terminal off to an interactive evil-winrm/psexec/"
+                    "ssh session (operator-driven; not C2)",
             windows_events=("4624/4672 (interactive/admin logon)",
                             "7045 (psexec service install)")),
         gate=_can_shell,
         requires=(Requirement("valid_cred", "a valid credential"),
-                  Requirement("tcp/5985", "WinRM (5985) or admin SMB (445)")),
+                  Requirement("tcp/5985", "WinRM (5985) / admin SMB (445) / SSH (22)")),
     ))
 
     return reg

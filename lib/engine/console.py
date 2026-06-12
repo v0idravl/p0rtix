@@ -284,6 +284,10 @@ def _build_dashboard(router, scheduler, registry, facts, posture):
             cur = lv.highlighted_child
             if isinstance(cur, _ActionItem):
                 keep = cur.action_name
+            # Clear the highlight *before* clear()/append — a stale index left over
+            # from a longer previous list can otherwise point past the end of the
+            # rebuilt (shorter) list and IndexError on the next arrow-key nav.
+            lv.index = None
             lv.clear()
 
             # Grouped by path: each service/branch is a section that lights up and
@@ -291,6 +295,9 @@ def _build_dashboard(router, scheduler, registry, facts, posture):
             # available actions and ones ready-but-blocked-by-noise/tool are shown;
             # fact-dormant and exhausted actions are hidden (inspect via the
             # `dormant` / `exhausted` commands) so the list isn't cluttered.
+            # Track the highlight target by append order — clear()/append() are
+            # async, so reading lv.children back here would be stale.
+            keep_index, pos = None, 0
             for group, rows in registry.grouped(facts, posture, scheduler.tried):
                 shown = [(a, s, i) for (a, s, i) in rows
                          if s in ("available", "blocked")]
@@ -299,16 +306,16 @@ def _build_dashboard(router, scheduler, registry, facts, posture):
                 ps = facts.proto_status(group)
                 badge = f"  [dim]\\[{ps.value}][/]" if ps is not None else ""
                 lv.append(_ActionItem(f"▸ {group.upper()}{badge}", header=True))
+                pos += 1
                 for action, state, info in shown:
                     label, runnable = self._action_row(action, state, info)
                     lv.append(_ActionItem(label, action_name=action.name,
                                           runnable=runnable))
+                    if keep is not None and action.name == keep:
+                        keep_index = pos
+                    pos += 1
 
-            if keep:                       # restore highlight after rebuild
-                for i, child in enumerate(lv.children):
-                    if isinstance(child, _ActionItem) and child.action_name == keep:
-                        lv.index = i
-                        break
+            lv.index = keep_index          # valid position or None — never stale
 
         def _emit_result(self, name, summary, rendered) -> None:
             log = self.query_one("#log", RichLog)
