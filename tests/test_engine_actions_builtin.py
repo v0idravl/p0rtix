@@ -372,3 +372,24 @@ def test_smb_branch_group_runs_all_four(tmp_path, monkeypatch):
     n = sched.run_group("smb")
     assert n == 4
     assert set(calls) == {"_smb_users", "_smb_shares", "_smb_spider_shares", "_smb_policy"}
+
+
+def test_smb_policy_parses_lockout_and_sets_fact(tmp_path):
+    from lib.engine.action import Tier
+    out = ("SMB 10.0.0.1 445 DC [+] Dumping password info for domain: CORP\n"
+           "SMB 10.0.0.1 445 DC Minimum password length: 7\n"
+           "SMB 10.0.0.1 445 DC Account Lockout Threshold: None\n")
+    fs, posture, reg, sched = _setup(tmp_path, Tier.GREEN, output=out, tools=_ALL_TOOLS)
+    fs.add_open_port("tcp", 445)
+    sched.run_action("smb.policy")
+    assert fs.snapshot()["lockout"] == 0             # "None" → 0, propagated to status
+
+
+def test_smb_policy_notes_when_not_readable(tmp_path):
+    from lib.engine.action import Tier
+    # only the nxc banner, no policy → must NOT invent a lockout fact
+    out = "SMB 10.0.0.1 445 DC [*] Windows (name:DC) (domain:corp) (Null Auth:True)\n"
+    fs, posture, reg, sched = _setup(tmp_path, Tier.GREEN, output=out, tools=_ALL_TOOLS)
+    fs.add_open_port("tcp", 445)
+    sched.run_action("smb.policy")
+    assert fs.snapshot()["lockout"] == -1            # still unknown

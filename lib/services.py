@@ -399,20 +399,33 @@ def _smb_spider_shares(ip: str, port: int, runner: Runner, buf: Findings, availa
 
 
 def _smb_policy(ip: str, port: int, runner: Runner, buf: Findings, available: set) -> None:
-    """Domain password / lockout policy (→ safe-to-spray signal)."""
+    """Domain password / lockout policy (→ safe-to-spray signal). Tries a null
+    session first, then Guest; only reports when real policy comes back."""
     _smb_probe(ip, port, runner, available)
-    cmd = ["nxc", "smb", ip, "-u", "Guest", "-p", "", "--pass-pol"]
-    out = runner.run(cmd, f"smb_{port}_nxc_passpol")
-    buf.cmd(" ".join(cmd))
     buf.h4("Password Policy")
-    m = re.search(r"Account Lockout Threshold:\s*(\d+|None)", out, re.IGNORECASE)
+    out, used = "", None
+    for user in ("", "Guest"):
+        o = runner.run(["nxc", "smb", ip, "-u", user, "-p", "", "--pass-pol"],
+                       f"smb_{port}_nxc_passpol" + ("_guest" if user else ""))
+        if re.search(r"(?i)lockout threshold|minimum password length", o):
+            out, used = o, user
+            break
+    if not out:
+        buf.note("Password policy not readable anonymously — retry after creds "
+                 "(or see LDAP domain_info)")
+        return
+
+    buf.cmd(f"nxc smb {ip} -u '{used}' -p '' --pass-pol")
+    m = re.search(r"(?i)account lockout threshold\s*:\s*(\d+|none)", out)
     if m:
         thr = 0 if m.group(1).lower() == "none" else int(m.group(1))
         runner.ws.set_lockout_threshold(thr)
         note = " — no lockout, safe to spray" if thr == 0 else ""
         buf.bullet(f"Account lockout threshold: **{thr}**{note}")
-    else:
-        buf.code_block(_trim(out))
+        buf.add_summary(f"Lockout threshold: {thr}" + (" (safe to spray)" if thr == 0 else ""))
+    m2 = re.search(r"(?i)minimum password length\s*:\s*(\d+)", out)
+    if m2:
+        buf.bullet(f"Minimum password length: {m2.group(1)}")
 
 
 def _smb_run_null_session(ip: str, port: int, runner: Runner,

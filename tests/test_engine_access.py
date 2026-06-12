@@ -139,3 +139,21 @@ def test_launch_shell_blocks_without_tmux(tmp_path, monkeypatch):
     monkeypatch.setattr(access.subprocess, "call", _capture_call(seen))
     access.launch_shell(["evil-winrm", "-i", "10.0.0.1"])
     assert seen["argv"][0] == "evil-winrm"      # direct spawn, not tmux
+
+
+def test_shell_command_winrm_ssl_5986(tmp_path):
+    fs = _store(tmp_path)
+    fs.add_open_port("tcp", 5986)                    # WinRM over HTTPS, no 5985
+    fs.add_valid_cred("legacyy", "pw!", "WINRM")
+    cmd = access.shell_command(fs, "10.10.10.10")
+    assert cmd[0] == "evil-winrm" and "-S" in cmd    # SSL flag
+
+
+def test_can_shell_only_when_buildable(tmp_path):
+    from lib.engine.actions_builtin import _can_shell
+    fs = _store(tmp_path)
+    fs.add_open_port("tcp", 445)
+    fs.add_valid_cred("legacyy", "pw!", "SMB")       # non-admin + only SMB
+    assert not _can_shell(fs)                         # no shell buildable → not advertised
+    fs.add_open_port("tcp", 5986)
+    assert _can_shell(fs)                             # WinRM now → buildable

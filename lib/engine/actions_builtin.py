@@ -398,8 +398,12 @@ def _h_shell(ctx) -> ActionResult:
 
 
 def _can_shell(f) -> bool:
-    return (f.has("valid_cred") or f.has("admin_cred")) and \
-           (f.has("tcp/5985") or f.has("tcp/445") or f.has("tcp/22"))
+    # only advertise when a shell is actually buildable: admin over SMB, or a
+    # valid cred over WinRM (5985/5986) / SSH.
+    admin_smb = f.has("admin_cred") and f.has("tcp/445")
+    winrm = f.has("valid_cred") and (f.has("tcp/5985") or f.has("tcp/5986"))
+    ssh = f.has("valid_cred") and f.has("tcp/22")
+    return admin_smb or winrm or ssh
 
 
 def build_registry() -> ActionRegistry:
@@ -617,7 +621,7 @@ def build_registry() -> ActionRegistry:
                             "7045 (psexec service install)")),
         gate=_can_shell,
         requires=(Requirement("valid_cred", "a valid credential"),
-                  Requirement("tcp/5985", "WinRM (5985) / admin SMB (445) / SSH (22)")),
+                  Requirement("tcp/5985", "WinRM (5985/5986) / admin SMB (445) / SSH (22)")),
     ))
 
     return reg
