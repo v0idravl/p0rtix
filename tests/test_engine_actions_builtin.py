@@ -338,6 +338,46 @@ def test_tcp_common_records_coverage(tmp_path, monkeypatch):
     assert 22 in fs.scanned_tcp()
 
 
+def test_tcp_quick_records_coverage_without_escalation(tmp_path, monkeypatch):
+    from lib.engine.action import Tier
+    from lib import nmap
+    monkeypatch.setattr(nmap, "discover_tcp_quick", lambda ip, r, ws: [22, 80])
+
+    def _no_escalate(*a, **k):
+        raise AssertionError("must not escalate when real surface (80) is found")
+    monkeypatch.setattr(nmap, "discover_tcp_open", _no_escalate)
+    fs, posture, reg, sched = _setup(tmp_path, Tier.GREEN, tools=_ALL_TOOLS)
+    sched.run_action("discovery.tcp_quick")
+    assert fs.has("tcp/22") and fs.has("tcp/80")
+
+
+def test_tcp_quick_escalates_on_management_only_result(tmp_path, monkeypatch):
+    """A quick sweep that finds only SSH (Headless trap) must auto-escalate to a
+    full -p- sweep so a box living on an uncommon port isn't reported as mapped."""
+    from lib.engine.action import Tier
+    from lib import nmap
+    seen = {}
+    monkeypatch.setattr(nmap, "discover_tcp_quick", lambda ip, r, ws: [22])
+
+    def fake_full(ip, r, ws, exclude=None):
+        seen["exclude"] = set(exclude or set())
+        return [5000]                     # the real surface the curated list missed
+    monkeypatch.setattr(nmap, "discover_tcp_open", fake_full)
+    fs, posture, reg, sched = _setup(tmp_path, Tier.GREEN, tools=_ALL_TOOLS)
+
+    sched.run_action("discovery.tcp_quick")
+    # escalated: the missed port is now a fact, and coverage is the full range
+    assert fs.has("tcp/22") and fs.has("tcp/5000")
+    assert 65535 in fs.scanned_tcp()
+    # the escalation skipped ports the quick tier already swept
+    assert 22 in seen["exclude"]
+
+
+def test_tcp_quick_curated_list_covers_app_ports(tmp_path):
+    # the dev/app web ports a box can hide its whole surface behind
+    assert {3000, 5000, 8000, 8080, 8443, 9000} <= set(nmap.QUICK_TCP_PORTS)
+
+
 def test_ldap_branch_decomposed_into_cohesive_actions(tmp_path, monkeypatch):
     from lib import services
     from lib.engine.action import Tier

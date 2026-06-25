@@ -41,13 +41,43 @@ def _h_parse_prior(ctx) -> ActionResult:
 
 
 # ── green: discovery ──────────────────────────────────────────────────────────
+# Pure remote-management ports — finding only these means the quick sweep hasn't
+# located the box's actual service surface (SSH/RDP are how you log in, not what
+# you attack). Every other curated port is a service worth enumerating in place.
+_MGMT_ONLY_PORTS = {22, 3389}
+
+
+def _sparse_surface(ports) -> bool:
+    """True when a quick sweep result looks like it missed the box's real surface:
+    nothing open, or only remote-management ports. The classic trap is a host that
+    answers only on SSH while its whole app lives on an uncommon port (Headless:
+    everything was on 5000). Reading that as 'mapped' leaves the operator blind."""
+    ports = set(ports)
+    return len(ports) <= 2 and not (ports - _MGMT_ONLY_PORTS)
+
+
 def _h_tcp_quick(ctx) -> ActionResult:
     ports = nmap.discover_tcp_quick(ctx.ip, ctx.runner, ctx.runner.ws)
     ctx.facts.add_scanned_tcp(nmap.QUICK_TCP_PORTS)     # remember coverage
+    escalated = False
+    if _sparse_surface(ports):
+        # Don't declare the surface mapped off a suspiciously empty quick result —
+        # escalate to a full -p- sweep (skipping ports already covered) so a box
+        # living on an uncommon port isn't missed until the background scan lands.
+        ctx.findings.bullet(
+            f"Quick sweep sparse ({', '.join(map(str, ports)) or 'none'} — "
+            "management ports only) — auto-escalating to a full TCP sweep so the "
+            "surface isn't under-mapped")
+        exclude = ctx.facts.scanned_tcp()
+        more = nmap.discover_tcp_open(ctx.ip, ctx.runner, ctx.runner.ws, exclude=exclude)
+        ctx.facts.add_scanned_tcp(range(1, 65536))
+        ports = sorted(set(ports) | set(more))
+        escalated = True
     for p in ports:
         ctx.facts.add_open_port("tcp", p)
-    ctx.findings.bullet(f"Open TCP ports (quick): {', '.join(map(str, ports)) or 'none'}")
-    return ActionResult(ok=True, summary=f"{len(ports)} open TCP port(s) [quick]")
+    tag = "quick→full" if escalated else "quick"
+    ctx.findings.bullet(f"Open TCP ports ({tag}): {', '.join(map(str, ports)) or 'none'}")
+    return ActionResult(ok=True, summary=f"{len(ports)} open TCP port(s) [{tag}]")
 
 
 def _h_tcp_common(ctx) -> ActionResult:
@@ -615,7 +645,8 @@ def build_registry() -> ActionRegistry:
         "discovery.tcp_quick", Tier.GREEN, _h_tcp_quick,
         group="discovery", order=1,
         footprint=Footprint(
-            summary="quiet curated SYN sweep — AD profile (~60 ports)",
+            summary="quiet curated SYN sweep — AD + common web/app ports (~60); "
+                    "auto-escalates to a full -p- sweep on a management-only result",
             network="small SYN sweep — lower IDS footprint than -p-",
         ),
         deps=("nmap",),

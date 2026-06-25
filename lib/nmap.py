@@ -106,13 +106,14 @@ def run_port_discovery(ip: str, runner: Runner, ws: Workspace, findings: Finding
 # above, just split so version detection is no longer automatic.
 
 # Curated quiet sweep: the ports an internal-AD foothold actually cares about
-# (DCs, SMB/LDAP/Kerberos/ADCS/WinRM, common services). ~60 ports → fast & low
-# noise, run before committing to a full -p- sweep.
+# (DCs, SMB/LDAP/Kerberos/ADCS/WinRM) plus the common dev/app web ports a box's
+# whole surface can hide behind (3000/5000/8000/8080/8443/8888/9000 — Headless
+# lived on 5000). ~60 ports → fast & low noise, run before a full -p- sweep.
 QUICK_TCP_PORTS = [
     21, 22, 23, 25, 53, 80, 88, 110, 111, 135, 139, 143, 161, 389, 443, 445,
-    464, 465, 587, 593, 636, 873, 993, 995, 1433, 2049, 2375, 3128, 3268, 3269,
-    3306, 3389, 5432, 5985, 5986, 6379, 8000, 8080, 8443, 8888, 9389, 11211,
-    47001, 49152, 49664, 49665, 49666, 49667, 49668,
+    464, 465, 587, 593, 636, 873, 993, 995, 1433, 2049, 2375, 3000, 3128, 3268,
+    3269, 3306, 3389, 5000, 5432, 5985, 5986, 6379, 8000, 8080, 8443, 8888, 9000,
+    9389, 11211, 47001, 49152, 49664, 49665, 49666, 49667, 49668,
 ]
 
 
