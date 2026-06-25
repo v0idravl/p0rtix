@@ -159,15 +159,16 @@ If `-vulnerable` returns nothing despite enabled templates existing, a fallback 
 
 ## MCP Mode (AI agent)
 
-p0rtix can run as a [Model Context Protocol](https://modelcontextprotocol.io) server so an AI agent (Claude) drives a complete, fact-driven recon process. Install the optional dependency and launch against a target:
+p0rtix can run as a [Model Context Protocol](https://modelcontextprotocol.io) server so an AI agent (Claude) drives a complete, fact-driven recon process. The server registers **statically** (no target at launch); the agent calls `open_target(ip)` to begin, so one registration serves box after box.
 
 ```bash
 pip install -e '.[mcp]'          # adds the `mcp` SDK
-p0rtix-mcp 10.10.11.34 --domain test.htb --workspace ~/engagements
-# or: python3 p0rtix.py 10.10.11.34 --domain test.htb --mode mcp
+p0rtix-mcp --workspace ~/engagements
+# or: python3 p0rtix.py --mode mcp --workspace ~/engagements
+# (an optional trailing IP pre-opens one target: `p0rtix-mcp 10.10.11.34 --domain test.htb`)
 ```
 
-It speaks stdio; point your agent's MCP client config at the `p0rtix-mcp` command.
+It speaks stdio; point your agent's MCP client config at the `p0rtix-mcp` command. The agent's first call is `open_target(ip, domain?)`.
 
 **Doctrine — recon, not C2.** p0rtix owns reconnaissance and credentialed enumeration and stops there: it tests access (`creds.test`) and runs a single command non-interactively (`access.exec`), but never opens an interactive shell. Discovered facts leave via `export_handoff` for a separate exploitation agent (e.g. metasploitmcp).
 
@@ -175,7 +176,8 @@ It speaks stdio; point your agent's MCP client config at the `p0rtix-mcp` comman
 
 | Tool | Purpose |
 |------|---------|
-| `get_state` | discovered facts (ports, users, creds, hashes, signing) + scheduler status |
+| `open_target(ip, domain?, name?)` | start/resume a recon session — call first |
+| `get_state` | discovered facts (ports, versioned services, users, creds, hashes, signing) + progress |
 | `list_actions` | the catalogue with tier, group, footprint, and a `why` for planning |
 | `run_action(name, port?, args?)` | run one action; returns `{summary, facts_delta, findings_md}` |
 | `run_group(group)` / `run_all(noise?)` | run a branch / everything at/below the noise ceiling |
