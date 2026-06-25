@@ -5,7 +5,7 @@
 ██╔═══╝ ████╔╝██║██╔══██╗   ██║   ██║ ██╔██╗
 ██║     ╚██████╔╝██║  ██║   ██║   ██║██╔╝ ██╗
 ╚═╝      ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚═╝╚═╝  ╚═╝
-   scope-aware recon & enumeration · CLI + MCP
+   scope-aware recon & enumeration · MCP-first (CLI + TUI)
 ```
 
 ![python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
@@ -14,11 +14,14 @@
 ![license](https://img.shields.io/badge/license-educational%20%2F%20authorized%20use-3DA639)
 ![scope](https://img.shields.io/badge/scope-enforced-E03C31)
 
-**Scope-aware reconnaissance and enumeration for authorized security assessments** — drive it by
-hand or hand it to an AI agent over MCP. p0rtix collects repeatable evidence, keeps raw output
-intact, and never wanders outside the agreed scope. It is the **recon engine of the AI-offsec
-stack** ([sliver-mcp](https://github.com/v0idravl/sliver-mcp) for C2,
-[dagar-red](https://github.com/v0idravl/dagar-red) for the skill/judgment layer).
+**An MCP-first, scope-aware recon & enumeration framework for authorized security assessments** —
+primarily driven by an AI agent over MCP, and equally runnable standalone (interactive TUI or
+headless CLI). p0rtix collects repeatable evidence, keeps raw output intact, and never wanders
+outside the agreed scope. It owns the **recon → initial-access leg of the AI-offsec stack**: it
+enumerates and *tests* access, then hands off via `export_handoff` to the exploitation/privesc
+layer (Metasploit MCP) and on to C2 ([sliver-mcp](https://github.com/v0idravl/sliver-mcp)), with
+[dagar-red](https://github.com/v0idravl/dagar-red) supplying the skill/judgment layer across the
+chain.
 
 Built around a personal methodology reference ([hakiki](https://github.com/v0idravl/hakiki)) —
 port discovery, per-service enumeration, web directory/vhost busting, crawling, and SSL
@@ -75,11 +78,15 @@ avoid repeat network activity · credentialed AD workflow with loot separated fr
 
 ## 🧩 Part of the AI-offsec stack
 
-p0rtix is the **recon/enum layer** of a three-repo stack that drives a full authorized
-engagement under operator control:
+p0rtix is the **recon → initial-access leg** of the stack that drives a full authorized
+engagement under operator control. It also **bootstraps the engagement**: it initializes the
+workspace and evidence layout (`findings.md`, `raw/`, `loot/`, `report/`, `exploit/`) and seeds
+working artifacts like `loot/users.txt`. It enumerates, *tests* access, and hands the exploit
+candidate down the chain:
 
 ```text
-p0rtix      facts / recon / enum / offline-crack + the green->yellow->red noise floor   (you are here)
+p0rtix      init / facts / recon / enum / test-access / offline-crack + the green->yellow->red noise floor  (you are here)
+Metasploit  exploitation, sessions, privesc, post, pivoting   (via Metasploit MCP)
 sliver-mcp  C2 — listeners, implant/beacon generation, sessions/beacons, execution
 dagar-red   ATT&CK adversary-emulation skills — the judgment about which call to make next
 ```
