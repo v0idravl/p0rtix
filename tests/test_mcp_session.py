@@ -193,6 +193,60 @@ def test_run_group_aggregates_findings_md_and_actions(tmp_path, monkeypatch):
     assert {a["action"] for a in res["actions"]} >= {"smb.users", "smb.shares"}
 
 
+def test_run_group_explains_why_when_nothing_dispatched(tmp_path):
+    """dispatched:0 must come with a per-action `why` (delta: 'should say why'),
+    not a silent empty result — here SMB is dormant with no tcp/445 open."""
+    s = _session(tmp_path)
+    s.set_noise("green")
+    res = s.run_group("smb")            # no SMB port → nothing available
+    assert res["dispatched"] == 0
+    why = {r["action"]: r["why"] for r in res["why"]}
+    assert "smb.users" in why and "dormant" in why["smb.users"].lower()
+
+
+def test_run_all_explains_why_when_nothing_dispatched(tmp_path):
+    s = _session(tmp_path)              # PASSIVE, no facts → nothing green runs
+    res = s.run_all()
+    assert res["dispatched"] == 0
+    assert "noise" in res["why"].lower() or "list_actions" in res["why"]
+
+
+def test_version_detect_seeds_web_tech_for_web_service(tmp_path, monkeypatch):
+    """A versioned web service must populate web_tech immediately, so the handoff
+    isn't empty if the agent exports before a full web.enum pass (Optimum delta)."""
+    from lib.models import Service
+    monkeypatch.setattr(
+        nmap, "version_detect",
+        lambda ip, ports, r, ws: [Service(80, "tcp", "http",
+                                          "HttpFileServer httpd 2.3",
+                                          is_web=True, scheme="http")])
+    s = _session(tmp_path)
+    s.set_noise("green")
+    s.facts.add_open_port("tcp", 80)
+    s.run_action("svc.version_detect", port=80)
+    assert {"port": 80, "tech": "HttpFileServer httpd 2.3"} in s.get_state()["web_tech"]
+
+
+def test_handoff_flags_in_flight_full_scan(tmp_path, monkeypatch):
+    """export_handoff carries full_scan_running so the agent knows ports may still
+    be arriving and can re-export once the background sweep finishes."""
+    import threading
+    from lib import nmap
+    gate = threading.Event()
+    monkeypatch.setattr(nmap, "discover_tcp_open",
+                        lambda ip, r, ws, exclude=None, live=True: (gate.wait(2), [22])[1])
+    s = _session(tmp_path)
+    assert s.export_handoff()["full_scan_running"] is False
+    s.start_full_scan()
+    assert s.export_handoff()["full_scan_running"] is True   # in-flight
+    gate.set()
+    for _ in range(100):
+        if not s.background_status()["running"]:
+            break
+        import time; time.sleep(0.02)
+    assert s.export_handoff()["full_scan_running"] is False
+
+
 def test_background_full_scan_merges_ports(tmp_path, monkeypatch):
     """The background full-TCP sweep runs off the dispatch lock and lands new
     ports in the fact store; background_status reports completion."""

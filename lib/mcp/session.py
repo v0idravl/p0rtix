@@ -235,10 +235,25 @@ class McpSession:
             "findings_md": collected["findings_md"],
         }
 
+    def _group_why(self, group: str) -> list[dict]:
+        """Per-action state/why for one group — what a bulk run did NOT run and
+        why (dormant/blocked/exhausted), so dispatched:0 is explained, not silent."""
+        tried = self.scheduler.tried
+        rows = []
+        for a in sorted(self.registry.all(), key=lambda x: (x.order, x.name)):
+            if a.group != group:
+                continue
+            rows.append({"action": a.name,
+                         "why": self.registry.why(a.name, self.facts, self.posture,
+                                                  tried, self.available)})
+        return rows
+
     def run_group(self, group: str) -> dict:
         """Dispatch the whole branch (e.g. all SMB sub-actions). Returns the
         aggregated findings markdown and per-action summaries of every sub-action
-        dispatched, so a bulk run is never blind through the MCP response."""
+        dispatched, so a bulk run is never blind through the MCP response. When
+        nothing dispatched, `why` explains each action's state (exhausted/blocked/
+        dormant) instead of returning a silent dispatched:0."""
         with self._lock:
             if group not in self.registry.group_names():
                 return {"ok": False, "error": f"no such group: {group}"}
@@ -247,13 +262,17 @@ class McpSession:
             n = self.scheduler.run_group(group)
             after = self.facts.snapshot()
             collected = self._collect(start)
-        return {
+            why = self._group_why(group) if n == 0 else None
+        out = {
             "ok": True,
             "dispatched": n,
             "facts_delta": snapshot_diff(before, after),
             "actions": collected["actions"],
             "findings_md": collected["findings_md"],
         }
+        if why is not None:
+            out["why"] = why
+        return out
 
     def run_all(self, noise_ceiling: str | None = None) -> dict:
         """Run everything available at/below the noise ceiling, cascading on new
@@ -270,7 +289,7 @@ class McpSession:
             n = self.scheduler.run_all_at_or_below(self.posture)
             after = self.facts.snapshot()
             collected = self._collect(start)
-        return {
+        out = {
             "ok": True,
             "dispatched": n,
             "noise": self.posture.level.label,
@@ -278,6 +297,11 @@ class McpSession:
             "actions": collected["actions"],
             "findings_md": collected["findings_md"],
         }
+        if n == 0:
+            out["why"] = (f"nothing runnable at/below '{self.posture.level.label}' noise — "
+                          "raise the ceiling (set_noise) or seed a fact (add_fact); "
+                          "call list_actions(include_dormant=True) for per-action reasons")
+        return out
 
     # ── posture ───────────────────────────────────────────────────────────────
     def set_noise(self, level: str) -> dict:
@@ -339,12 +363,14 @@ class McpSession:
         return {"ok": True, "rechecked": proto.lower(), "rearmed": n}
 
     # ── background full-TCP sweep (delta 4: don't block recon on -p-) ──────────
+    def _bg_running(self) -> bool:
+        return bool(self._bg_thread is not None and self._bg_thread.is_alive())
+
     def _bg_snapshot(self) -> dict:
         """Current background-task state for get_state, with liveness refreshed."""
-        alive = bool(self._bg_thread is not None and self._bg_thread.is_alive())
         state = dict(self._bg_state or {})
         if state:
-            state["running"] = alive
+            state["running"] = self._bg_running()
         return state
 
     def start_full_scan(self) -> dict:
@@ -412,6 +438,10 @@ class McpSession:
             "cred_pairs": [{"user": u, "password": p} for u, p in snap["cred_pairs"]],
             "hashes": snap["hashes"],
             "users": snap["users"],
+            # True while a background full-TCP sweep is still running — open_ports/
+            # services here may be incomplete; re-export once it finishes (poll
+            # background_status / get_state.background).
+            "full_scan_running": self._bg_running(),
         }
 
 

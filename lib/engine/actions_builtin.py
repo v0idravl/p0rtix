@@ -104,6 +104,12 @@ def _h_version_detect(ctx) -> ActionResult:
     ctx.facts.add_services(services)
     for s in services:
         ctx.findings.bullet(f"{s.proto}/{s.port}: {s.name} {s.version}".rstrip())
+        # Seed web_tech from the versioned product so the fingerprint is non-empty
+        # the moment a web service is known — not gated on a later full web.enum
+        # pass (which then enriches it with whatweb tokens). Keeps the handoff/
+        # get_state web_tech populated even if the agent races ahead to export.
+        if s.is_web and (s.version or s.name):
+            ctx.facts.add_web_tech(s.port, (s.version or s.name).strip())
     return ActionResult(ok=True, summary=f"version-detected {port}")
 
 
