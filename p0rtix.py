@@ -89,10 +89,11 @@ def parse_args() -> argparse.Namespace:
                    help="force fresh nmap scans even when prior scan data exists")
     p.add_argument("--sample", action="store_true",
                    help="zip the workspace directory at end of scan")
-    p.add_argument("--mode", default="scan",
-                   help="init = create workspace skeleton only; scan = full recon (default); "
+    p.add_argument("--mode", default=None,
+                   help="init = create workspace skeleton only; scan = full recon; "
                         "creds = credentialed AD enum; scan,creds = both in one run; "
-                        "console = interactive operator console (engine v2)")
+                        "console = interactive operator console (engine v2). "
+                        "Default: console, or scan,creds when credentials are supplied")
     p.add_argument("--level", type=int, default=0, metavar="0-9",
                    help="console automation dial: 0 = manual/quiet (default), rising "
                         "levels auto-run up the noise ladder, 9 = run everything "
@@ -563,6 +564,15 @@ def main():
     print(BANNER)
     args = parse_args()
     ui.set_debug(args.debug)
+
+    # No --mode given drops to the console, unless credentials were supplied —
+    # then auto-promote to scan,creds so `p0rtix <ip> -u u -p p` just works.
+    if args.mode is None:
+        if args.username or args.creds:
+            ui.info("Credentials provided — running scan then creds phase (scan,creds mode)")
+            args.mode = "scan,creds"
+        else:
+            args.mode = "console"
 
     _VALID_MODES = {"init", "scan", "creds", "scan,creds", "followup", "console"}
     if args.mode not in _VALID_MODES:
