@@ -1,0 +1,21 @@
+name: tests
+
+# Runs the offline unit suite on every push to main (and any PR, if you ever open
+# one). Tools are faked and no packets are sent, so this is safe on a CI runner —
+# it never touches a real target. Informational, not a merge gate.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[test]"
+      - run: python -m pytest -q
