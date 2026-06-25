@@ -1,0 +1,31 @@
+p0rtix License — Educational and Authorized Use Only
+
+Copyright (c) 2026 v0idravl
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to use, copy,
+modify, and distribute the Software, subject to the following conditions:
+
+1. Authorized use only. The Software is provided exclusively for lawful security
+   research, education, and testing of systems that you own or for which you have
+   explicit, documented authorization (for example: personal labs, CTF platforms
+   such as HackTheBox or OffSec Proving Grounds, pwn.college, and contracted
+   assessments operating under written rules of engagement). Using the Software
+   to access, scan, or interact with systems without authorization is strictly
+   prohibited.
+
+2. The above copyright notice, this permission notice, and the authorized-use
+   condition shall be included in all copies or substantial portions of the
+   Software.
+
+3. Responsibility. The operator is solely responsible for compliance with all
+   applicable laws, rate limits, and rules of engagement. The scope-enforcement
+   features of the Software are a convenience guardrail, not a substitute for
+   authorization.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

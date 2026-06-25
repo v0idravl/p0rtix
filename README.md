@@ -1,65 +1,113 @@
-# p0rtix
+```text
+██████╗  ██████╗ ██████╗ ████████╗██╗██╗  ██╗
+██╔══██╗██╔═████╗██╔══██╗╚══██╔══╝██║╚██╗██╔╝
+██████╔╝██║██╔██║██████╔╝   ██║   ██║ ╚███╔╝
+██╔═══╝ ████╔╝██║██╔══██╗   ██║   ██║ ██╔██╗
+██║     ╚██████╔╝██║  ██║   ██║   ██║██╔╝ ██╗
+╚═╝      ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚═╝╚═╝  ╚═╝
+   scope-aware recon & enumeration · CLI + MCP
+```
 
-Scope-aware reconnaissance and enumeration for authorized security assessments. p0rtix is designed to help junior/internal pentesters collect repeatable evidence, keep raw output intact, and avoid follow-up activity outside the agreed target scope.
+![python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
+![mode](https://img.shields.io/badge/MCP-server-7C3AED)
+![platform](https://img.shields.io/badge/platform-Kali%20Linux-557C94?logo=kalilinux&logoColor=white)
+![license](https://img.shields.io/badge/license-educational%20%2F%20authorized%20use-3DA639)
+![scope](https://img.shields.io/badge/scope-enforced-E03C31)
 
-Built around a personal methodology reference ([hakiki](https://github.com/v0idravl/hakiki)) — covers
-port discovery, per-service enumeration, web directory/vhost busting, crawling, and SSL inspection.
-Results are written to a single `findings.md` as the scan progresses, with all raw tool output
-archived separately so nothing is lost.
+**Scope-aware reconnaissance and enumeration for authorized security assessments** — drive it by
+hand or hand it to an AI agent over MCP. p0rtix collects repeatable evidence, keeps raw output
+intact, and never wanders outside the agreed scope. It is the **recon engine of the AI-offsec
+stack** ([sliver-mcp](https://github.com/v0idravl/sliver-mcp) for C2,
+[dagar-red](https://github.com/v0idravl/dagar-red) for the skill/judgment layer).
 
-> **Authorized use only:** Run p0rtix only against systems where you have explicit permission and a documented scope. The tool preserves evidence and filters follow-up discovery, but the operator remains responsible for rate limits, rules of engagement, and legal authorization.
+Built around a personal methodology reference ([hakiki](https://github.com/v0idravl/hakiki)) —
+port discovery, per-service enumeration, web directory/vhost busting, crawling, and SSL
+inspection. Results stream to a single `findings.md` as the scan runs, with every raw tool
+output archived separately so nothing is lost.
+
+> ⚠️ **Authorized use only.** Run p0rtix only against systems where you have explicit permission
+> and a documented scope. The tool preserves evidence and filters follow-up discovery, but the
+> operator remains responsible for rate limits, rules of engagement, and legal authorization.
 
 ---
 
-## Features
+## ⚡ Quick start
 
-- Full TCP SYN scan + top-100 UDP with automatic confirmation of open|filtered ports
-- Service classification — routes web ports to web enumeration, everything else to per-service handlers
+```bash
+# clone + install
+git clone git@github.com:v0idravl/p0rtix.git && cd p0rtix
+python3 -m venv venv && ./venv/bin/pip install -e '.[mcp]'
+
+# scan a box (root needed for SYN scans + /etc/hosts writes)
+sudo python3 p0rtix.py 10.10.11.34 --domain test.htb --workspace ~/htb
+
+# read the results
+$EDITOR ~/htb/test.htb/findings.md      # key findings, live-updated
+ls     ~/htb/test.htb/raw/              # full tool output, command-headed
+
+# or run it as an MCP server and let an agent drive it
+p0rtix-mcp --workspace ~/engagements
+```
+
+---
+
+## 🧠 What it does
+
+- **Full TCP SYN scan + top-100 UDP** with automatic confirmation of `open|filtered` ports
+- **Service classification** — routes web ports to web enumeration, everything else to per-service handlers
 - **Web:** headers, WhatWeb fingerprint, redirect detection, SSL cert SAN extraction, directory bust, vhost bust, crawl (scope-filtered)
 - **Services:** FTP, SSH, SMTP, DNS, RPC/NFS, MSRPC, SMB, SNMP, LDAP, Rsync, MSSQL, Oracle, MySQL, RDP, PostgreSQL, WinRM, Redis, MongoDB
-- **Creds mode** (`--mode creds` or `--mode scan,creds`) — authenticated AD enumeration in authorized environments: SMB validation, ldapdomaindump, Kerberoasting, AS-REP roasting, BloodHound collection, ADCS template review, and evidence capture
-- **MCP server** (`--mode mcp` / `p0rtix-mcp`) — drives the recon engine from an AI agent (Claude) over the Model Context Protocol. A small generic tool surface (`list_actions`, `run_action`, `run_all`, `get_state`, `set_noise`, `set_breadth`, `export_handoff`) exposes the full fact-driven action catalogue; quiet/surgical by default via the noise ladder, with `export_handoff` emitting a structured inventory (creds, hosts, versioned services, web tech, known-RCE exploit candidates, hashes, relay targets) for an exploitation agent (e.g. metasploitmcp). Recon only — it tests access and runs single commands non-interactively, never an interactive shell
-- Reactive follow-up — discovered vhosts and SSL SANs prompt for `/etc/hosts` addition, then get fully enumerated
-- Scope enforcement — crawl and follow-up scans never touch out-of-scope hosts
-- Single `findings.md` updated in real time (key findings only)
-- `raw/` directory with every tool's full output, each file headed by the exact command
+- **Creds mode** (`--mode creds` / `--mode scan,creds`) — authenticated AD enumeration in authorized environments: SMB validation, ldapdomaindump, Kerberoasting, AS-REP roasting, BloodHound collection, ADCS template review, evidence capture
+- **MCP server** (`--mode mcp` / `p0rtix-mcp`) — drives the recon engine from an AI agent over the [Model Context Protocol](https://modelcontextprotocol.io); quiet/surgical by default via the noise ladder, with `export_handoff` emitting a structured inventory for an exploitation agent. Recon only — tests access and runs single commands non-interactively, never an interactive shell
+- **Reactive follow-up** — discovered vhosts and SSL SANs prompt for `/etc/hosts` addition, then get fully enumerated
+- **Scope enforcement** — crawl and follow-up never touch out-of-scope hosts
+- Single `findings.md` updated in real time; `raw/` directory with every tool's full output, each file headed by the exact command
 - Prompts before installing missing tools via `apt`, `pip`/`pipx`, `go install`, or selected GitHub release downloads
 
----
+### What this demonstrates
 
-## What this demonstrates
-
-- Practical Python orchestration around common pentest tools without hiding raw evidence
-- Scope-aware follow-up logic for crawled URLs, vhosts, SSL SANs, and resolved hostnames
-- Incremental findings generation suitable for internal notes and handoff
-- Resume/reuse of prior scan data to avoid unnecessary repeat network activity
-- Credentialed AD workflow support for authorized environments, with loot separated from summary reporting
+Practical Python orchestration around common pentest tools without hiding raw evidence ·
+scope-aware follow-up logic for crawled URLs, vhosts, SSL SANs, and resolved hostnames ·
+incremental findings generation suitable for handoff · resume/reuse of prior scan data to
+avoid repeat network activity · credentialed AD workflow with loot separated from reporting.
 
 ---
 
-## Requirements
+## 🧩 Part of the AI-offsec stack
 
-- **Python 3.10+**
-- **Root** (required for nmap SYN scans and `/etc/hosts` writes)
-- Kali Linux recommended — most tools already present
+p0rtix is the **recon/enum layer** of a three-repo stack that drives a full authorized
+engagement under operator control:
 
-Core tools (required; if missing, p0rtix prompts before attempting installation):
+```text
+p0rtix      facts / recon / enum / offline-crack + the green->yellow->red noise floor   (you are here)
+sliver-mcp  C2 — listeners, implant/beacon generation, sessions/beacons, execution
+dagar-red   ATT&CK adversary-emulation skills — the judgment about which call to make next
+```
 
-| Tool | Purpose |
-|------|---------|
-| `nmap` | Port discovery and service scripts |
-| `curl` | HTTP probing |
-| `ffuf` | Directory and vhost busting |
+`export_handoff` emits a structured inventory (hosts, domain, open ports, versioned services,
+web tech, **exploit candidates** with CVE + msf module, valid/admin creds, hashes, relay
+targets) that the exploitation/C2 agents ingest. See
+[dagar-red](https://github.com/v0idravl/dagar-red) for the orchestration.
 
-Optional tools (used when present, skipped gracefully otherwise; p0rtix prompts before attempting installation):
+---
 
-**Web/general:** `whatweb` · `gospider` · `testssl.sh` · `wpscan` · `joomscan` · `droopescan` · `cewl` · `git-dumper` · `searchsploit` · `openssl`
+## 🛠 Install
 
-**SMB:** `nxc` · `smbclient` · `smbmap` · `enum4linux-ng`
+- **Python 3.10+**, **root** (nmap SYN scans + `/etc/hosts` writes), Kali Linux recommended.
 
-**Active Directory / Kerberos:** `ldapsearch` · `ldapdomaindump` · `bloodhound-python` · `certipy-ad` · `kerbrute` · `impacket-GetNPUsers` · `impacket-GetUserSPNs` · `impacket-secretsdump` · `impacket-rpcdump` · `ntpdate`
+```bash
+python3 -m venv venv
+./venv/bin/pip install -e '.[mcp]'      # '.[mcp]' adds the MCP SDK; omit for CLI-only
+```
 
-**Other services:** `onesixtyone` · `snmpwalk` · `snmp-check` · `dig` · `dnsrecon` · `mysql` · `psql` · `redis-cli` · `rsync` · `showmount` · `rpcinfo` · `smtp-user-enum` · `ipmitool`
+Core tools (required; p0rtix prompts before installing): `nmap` · `curl` · `ffuf`.
+
+Optional tools (used when present, skipped gracefully otherwise):
+
+- **Web/general:** `whatweb` · `gospider` · `testssl.sh` · `wpscan` · `joomscan` · `droopescan` · `cewl` · `git-dumper` · `searchsploit` · `openssl`
+- **SMB:** `nxc` · `smbclient` · `smbmap` · `enum4linux-ng`
+- **AD / Kerberos:** `ldapsearch` · `ldapdomaindump` · `bloodhound-python` · `certipy-ad` · `kerbrute` · `impacket-GetNPUsers` · `impacket-GetUserSPNs` · `impacket-secretsdump` · `impacket-rpcdump` · `ntpdate`
+- **Other services:** `onesixtyone` · `snmpwalk` · `snmp-check` · `dig` · `dnsrecon` · `mysql` · `psql` · `redis-cli` · `rsync` · `showmount` · `rpcinfo` · `smtp-user-enum` · `ipmitool`
 
 ---
 
@@ -123,9 +171,10 @@ sudo -E python3 p0rtix.py 10.10.11.34 --domain test.htb --mode scan,creds -u '<U
 
 ## Creds Mode
 
-`--mode creds` runs authenticated AD enumeration against an existing scan workspace. `--mode scan,creds` does both in one invocation — preferred when you have credentials from the start.
-
-Requires `-u/-p` (single credential) or `--creds <file>` (one `user:pass` per line). `--domain` is strongly recommended.
+`--mode creds` runs authenticated AD enumeration against an existing scan workspace.
+`--mode scan,creds` does both in one invocation — preferred when you have credentials from the
+start. Requires `-u/-p` (single credential) or `--creds <file>` (one `user:pass` per line);
+`--domain` is strongly recommended.
 
 ### What it does
 
@@ -151,15 +200,18 @@ certipy-ad auth               →   authenticate with PFX → NT hash
                               →   hash saved to loot/ntlm.hash + fed into cred-reuse
 ```
 
-**ESC4** additionally patches the template first (`certipy-ad template -save-old`) and restores it after.
-
-If `-vulnerable` returns nothing despite enabled templates existing, a fallback scan runs with `-enabled` and saves the full JSON to `loot/certipy_full.json` for manual review.
+**ESC4** additionally patches the template first (`certipy-ad template -save-old`) and restores
+it after. If `-vulnerable` returns nothing despite enabled templates existing, a fallback scan
+runs with `-enabled` and saves the full JSON to `loot/certipy_full.json` for manual review.
 
 ---
 
-## MCP Mode (AI agent)
+## 🤖 MCP Mode (AI agent)
 
-p0rtix can run as a [Model Context Protocol](https://modelcontextprotocol.io) server so an AI agent (Claude) drives a complete, fact-driven recon process. The server registers **statically** (no target at launch); the agent calls `open_target(ip)` to begin, so one registration serves box after box.
+p0rtix can run as a [Model Context Protocol](https://modelcontextprotocol.io) server so an AI
+agent (Claude) drives a complete, fact-driven recon process. The server registers **statically**
+(no target at launch); the agent calls `open_target(ip)` to begin, so one registration serves
+box after box.
 
 ```bash
 pip install -e '.[mcp]'          # adds the `mcp` SDK
@@ -168,11 +220,16 @@ p0rtix-mcp --workspace ~/engagements
 # (an optional trailing IP pre-opens one target: `p0rtix-mcp 10.10.11.34 --domain test.htb`)
 ```
 
-It speaks stdio; point your agent's MCP client config at the `p0rtix-mcp` command. The agent's first call is `open_target(ip, domain?)`.
+It speaks stdio; point your agent's MCP client config at the `p0rtix-mcp` command. The agent's
+first call is `open_target(ip, domain?)`.
 
-**Doctrine — recon, not C2.** p0rtix owns reconnaissance and credentialed enumeration and stops there: it tests access (`creds.test`) and runs a single command non-interactively (`access.exec`), but never opens an interactive shell. Discovered facts leave via `export_handoff` for a separate exploitation agent (e.g. metasploitmcp).
+**Doctrine — recon, not C2.** p0rtix owns reconnaissance and credentialed enumeration and stops
+there: it tests access (`creds.test`) and runs a single command non-interactively (`access.exec`),
+but never opens an interactive shell. Discovered facts leave via `export_handoff` for a separate
+exploitation/C2 agent (Metasploit MCP / [sliver-mcp](https://github.com/v0idravl/sliver-mcp)).
 
-**Tool surface (generic, mirrors the engine).** Every recon capability is an *action*; new actions are callable with no new tool code:
+**Tool surface (generic, mirrors the engine).** Every recon capability is an *action*; new
+actions are callable with no new tool code:
 
 | Tool | Purpose |
 |------|---------|
@@ -180,7 +237,7 @@ It speaks stdio; point your agent's MCP client config at the `p0rtix-mcp` comman
 | `get_state` | discovered facts (ports, versioned services, **web tech**, **exploit candidates**, users, creds, hashes, signing) + progress + background-task state |
 | `list_actions` | the catalogue with tier, group, footprint, and a `why` for planning |
 | `run_action(name, port?, args?)` | run one action; returns `{summary, facts_delta, findings_md}` |
-| `run_group(group)` / `run_all(noise?)` | run a branch / everything at/below the noise ceiling — returns `{facts_delta, actions, findings_md}` aggregated across every sub-action |
+| `run_group(group)` / `run_all(noise?)` | run a branch / everything at/below the noise ceiling — aggregated across every sub-action |
 | `start_full_scan` / `background_status` | kick a full TCP (`-p-`) sweep in the **background** while recon proceeds; poll for new ports |
 | `set_noise(level)` | noise ceiling: `passive` → `green` → `yellow` → `red` (quiet by default) |
 | `set_breadth(level)` | effort knob `concise` → `standard` → `broad` (wordlists/crack rules), orthogonal to noise |
@@ -188,7 +245,21 @@ It speaks stdio; point your agent's MCP client config at the `p0rtix-mcp` comman
 | `add_fact(kind, value)` · `reload` · `recheck` | seed/refresh facts |
 | `export_handoff` | structured inventory (hosts, domain, open ports, versioned services, **web tech**, **exploit candidates** (CVE + msf module), valid/admin creds, hashes, relay target) |
 
-The action catalogue spans discovery, **web** and **service** enumeration (databases, DNS, SNMP, mail, RDP, …), anonymous SMB/LDAP, Kerberos, offline cracking, credentialed AD (domaindump, Kerberoast, BloodHound, ADCS templates, writable objects), SMB-signing/coercion **relay-target recon**, and non-interactive `access.exec`.
+The action catalogue spans discovery, **web** and **service** enumeration (databases, DNS, SNMP,
+mail, RDP, …), **IKE/IPsec** (`ike.enum` — ISAKMP fingerprint + IKEv1 aggressive-mode probe that
+leaks the responder's ID payload as a user/domain fact and a crackable PSK hash), anonymous
+SMB/LDAP, Kerberos, offline cracking (hashcat for AS-REP/Kerberoast/NTLM, **psk-crack** for IKE
+PSKs), credentialed AD (domaindump, Kerberoast, BloodHound, ADCS templates, writable objects),
+SMB-signing/coercion **relay-target recon**, and non-interactive `access.exec`.
+
+**Cross-protocol reuse** is built in: the moment a secret lands — a cracked hash, an IKE PSK, a
+credential literal scraped from a downloadable artifact (`web.artifact_secrets` walks
+`.jar/.zip/.war/.config/.sql`) — it re-arms `creds.spray`/`creds.test`, which fan it across
+**every open auth surface** (SMB/WinRM/SSH/RDP/MSSQL), not just SMB. A `:80` redirect to a vhost
+is promoted to a domain fact and followed with a transparent `Host:` header when it has no DNS
+entry; linked JS endpoints (`fetch`/`$.get`/relative `.php`) are followed; WordPress authors
+become user facts. This is what carries a box like Expressway end-to-end (IKE aggressive-mode →
+PSK crack → SSH reuse) without operator hand-holding.
 
 ---
 
@@ -200,10 +271,7 @@ The action catalogue spans discovery, **web** and **service** enumeration (datab
 ├── raw/               ← full tool output, each file headed by the exact command
 │   ├── 01_full_tcp.{nmap,gnmap,xml}
 │   ├── 02_udp_top100.{nmap,gnmap,xml}
-│   ├── 03_udp_confirmed.{nmap,gnmap,xml}
 │   ├── 04_tcp_services.{nmap,gnmap,xml}
-│   ├── 05_smb_445_nmap_enum.txt
-│   ├── 06_web_http_10_10_11_34_headers.txt
 │   └── ...
 ├── report/
 │   └── report.md      ← writeup template (pre-populated)
@@ -223,34 +291,43 @@ Each service gets its own section with the generating command noted above its ou
 
 - **MS17-010 (EternalBlue): VULNERABLE**
 - Shares: IPC$ (READ), Data (READ), ADMIN$ (NO ACCESS)
-
-#### Vhost Bust
-> `ffuf -u http://10.10.11.34 -H "Host: FUZZ.test.htb" -w subdomains-top1million-5000.txt -fs 892`
-
-- **admin.test.htb** — status 200, size 4823
 ```
 
 ---
 
 ## Scope Enforcement
 
-p0rtix applies scope checks before crawler/follow-up enumeration and will not intentionally launch follow-up tools against any host that is not:
+p0rtix applies scope checks before crawler/follow-up enumeration and will not intentionally
+launch follow-up tools against any host that is not:
+
 - The target IP, **or**
 - The explicitly provided domain / any subdomain of it (`*.domain`), **or**
 - A hostname that resolves to the target IP
 
-Crawled external URLs are surfaced in `findings.md` under *External Links* but are never touched by any tool.
-
-Scope checks are a guardrail, not a replacement for an authorization letter or rules of engagement. Confirm targets, domains, rate expectations, and credential-use permissions before running scans.
+Crawled external URLs are surfaced in `findings.md` under *External Links* but are never touched
+by any tool. Scope checks are a guardrail, not a replacement for an authorization letter or
+rules of engagement.
 
 ---
 
-## Sample Output
+## 🩹 Troubleshooting
 
-See [`docs/sample-findings.md`](docs/sample-findings.md) for a small sanitized example of the generated `findings.md` format.
+| Symptom | Fix |
+|---|---|
+| `Operation not permitted` / no SYN results | Run with `sudo` — SYN scans and `/etc/hosts` writes need root. |
+| `--analyze` does nothing / auth error | Export `ANTHROPIC_API_KEY` and run with `sudo -E` so the env survives the sudo boundary. |
+| A tool is "missing" mid-scan | p0rtix prompts before installing; accept, or pre-install it. Use `--no-install` to skip optional tools entirely. |
+| Kerberos `KRB_AP_ERR_SKEW` in creds mode | Clock skew vs the DC — p0rtix runs `ntpdate`, but ensure it is installed and reachable. |
+| MCP server not found by the agent | Point the MCP client at the `p0rtix-mcp` entry point from `pip install -e '.[mcp]'`; it speaks stdio. |
+| Re-running re-scans everything | Use `--continue` to skip completed phases; `--rescan` forces fresh nmap. |
+
+See [`docs/sample-findings.md`](docs/sample-findings.md) for a sanitized example of the generated
+`findings.md`, and [`docs/operator-console.md`](docs/operator-console.md) for the interactive
+console.
 
 ---
 
 ## License
 
-For educational and authorized testing purposes only. Use responsibly, preserve evidence, and operate only within written scope.
+For **educational and authorized testing purposes only** — see [`LICENSE`](LICENSE). Use
+responsibly, preserve evidence, and operate only within written scope.
