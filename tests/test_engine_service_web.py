@@ -50,6 +50,31 @@ def test_web_enum_fans_out_per_web_service(tmp_path, monkeypatch):
     assert "dc.htb" in fs.snapshot()["hostnames"]
 
 
+def test_whatweb_tech_parsing_is_whitelisted():
+    clean = ("http://10/ [200 OK] Country[RESERVED][ZZ], "
+             "HTTPServer[HttpFileServer 2.3], JQuery[1.4.4], "
+             "Cookies[HFS_SID], IP[10.10.10.8]")
+    techs = web._whatweb_tech(clean)
+    assert "HTTPServer HttpFileServer 2.3" in techs
+    assert "JQuery 1.4.4" in techs
+    # cosmetic plugins (Country, Cookies, IP) are not recorded as tech
+    assert not any(t.startswith(("Country", "Cookies", "IP")) for t in techs)
+
+
+def test_record_web_tech_emits_into_factstore(tmp_path):
+    fs, *_ = _wire(tmp_path)
+    web._record_web_tech(_FakeRunner(fs), 80, ["HFS 2.3", "", "JQuery 1.4.4"])
+    techs = {(x["port"], x["tech"]) for x in fs.snapshot()["web_tech"]}
+    assert (80, "HFS 2.3") in techs and (80, "JQuery 1.4.4") in techs
+
+
+def test_record_web_tech_noop_without_factstore():
+    # legacy/headless path: a plain object with no add_web_tech must not raise
+    class _Bare:
+        ws = object()
+    web._record_web_tech(_Bare(), 80, ["whatever"])   # no exception
+
+
 def test_service_enum_covers_non_ad_and_skips_ad_ports(tmp_path, monkeypatch):
     seen = []
     monkeypatch.setattr(services, "enumerate_service",

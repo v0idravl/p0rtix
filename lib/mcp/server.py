@@ -95,6 +95,20 @@ def build_server(manager: SessionManager):
         return await _scall("run_all", noise_ceiling)
 
     @server.tool()
+    async def start_full_scan() -> dict:
+        """Kick a full TCP (-p-) sweep in the BACKGROUND so recon keeps moving on
+        the quick-scan ports while the slow sweep runs. Newly-found ports flow into
+        the fact store automatically — poll background_status (or watch get_state's
+        open_ports / background block). Safe to call once near the start of a box."""
+        return await _scall("start_full_scan")
+
+    @server.tool()
+    async def background_status() -> dict:
+        """Report the background full-TCP sweep: {running, new_ports, done/error}.
+        New ports also surface in get_state's open_ports as they are found."""
+        return await _scall("background_status")
+
+    @server.tool()
     async def set_noise(level: str) -> dict:
         """Set the noise ceiling: passive (no packets), green (discovery + safe
         reads), yellow (writes auth events), red (locked unless armed). Actions

@@ -18,7 +18,7 @@ archived separately so nothing is lost.
 - **Web:** headers, WhatWeb fingerprint, redirect detection, SSL cert SAN extraction, directory bust, vhost bust, crawl (scope-filtered)
 - **Services:** FTP, SSH, SMTP, DNS, RPC/NFS, MSRPC, SMB, SNMP, LDAP, Rsync, MSSQL, Oracle, MySQL, RDP, PostgreSQL, WinRM, Redis, MongoDB
 - **Creds mode** (`--mode creds` or `--mode scan,creds`) — authenticated AD enumeration in authorized environments: SMB validation, ldapdomaindump, Kerberoasting, AS-REP roasting, BloodHound collection, ADCS template review, and evidence capture
-- **MCP server** (`--mode mcp` / `p0rtix-mcp`) — drives the recon engine from an AI agent (Claude) over the Model Context Protocol. A small generic tool surface (`list_actions`, `run_action`, `run_all`, `get_state`, `set_noise`, `set_breadth`, `export_handoff`) exposes the full fact-driven action catalogue; quiet/surgical by default via the noise ladder, with `export_handoff` emitting a structured inventory (creds, hosts, services, hashes, relay targets) for an exploitation agent (e.g. metasploitmcp). Recon only — it tests access and runs single commands non-interactively, never an interactive shell
+- **MCP server** (`--mode mcp` / `p0rtix-mcp`) — drives the recon engine from an AI agent (Claude) over the Model Context Protocol. A small generic tool surface (`list_actions`, `run_action`, `run_all`, `get_state`, `set_noise`, `set_breadth`, `export_handoff`) exposes the full fact-driven action catalogue; quiet/surgical by default via the noise ladder, with `export_handoff` emitting a structured inventory (creds, hosts, versioned services, web tech, known-RCE exploit candidates, hashes, relay targets) for an exploitation agent (e.g. metasploitmcp). Recon only — it tests access and runs single commands non-interactively, never an interactive shell
 - Reactive follow-up — discovered vhosts and SSL SANs prompt for `/etc/hosts` addition, then get fully enumerated
 - Scope enforcement — crawl and follow-up scans never touch out-of-scope hosts
 - Single `findings.md` updated in real time (key findings only)
@@ -177,15 +177,16 @@ It speaks stdio; point your agent's MCP client config at the `p0rtix-mcp` comman
 | Tool | Purpose |
 |------|---------|
 | `open_target(ip, domain?, name?)` | start/resume a recon session — call first |
-| `get_state` | discovered facts (ports, versioned services, users, creds, hashes, signing) + progress |
+| `get_state` | discovered facts (ports, versioned services, **web tech**, **exploit candidates**, users, creds, hashes, signing) + progress + background-task state |
 | `list_actions` | the catalogue with tier, group, footprint, and a `why` for planning |
 | `run_action(name, port?, args?)` | run one action; returns `{summary, facts_delta, findings_md}` |
-| `run_group(group)` / `run_all(noise?)` | run a branch / everything at/below the noise ceiling |
+| `run_group(group)` / `run_all(noise?)` | run a branch / everything at/below the noise ceiling — returns `{facts_delta, actions, findings_md}` aggregated across every sub-action |
+| `start_full_scan` / `background_status` | kick a full TCP (`-p-`) sweep in the **background** while recon proceeds; poll for new ports |
 | `set_noise(level)` | noise ceiling: `passive` → `green` → `yellow` → `red` (quiet by default) |
 | `set_breadth(level)` | effort knob `concise` → `standard` → `broad` (wordlists/crack rules), orthogonal to noise |
 | `arm_dangerous` | unlock RED-tier actions |
 | `add_fact(kind, value)` · `reload` · `recheck` | seed/refresh facts |
-| `export_handoff` | structured inventory (hosts, domain, open ports, valid/admin creds, hashes, relay target) |
+| `export_handoff` | structured inventory (hosts, domain, open ports, versioned services, **web tech**, **exploit candidates** (CVE + msf module), valid/admin creds, hashes, relay target) |
 
 The action catalogue spans discovery, **web** and **service** enumeration (databases, DNS, SNMP, mail, RDP, …), anonymous SMB/LDAP, Kerberos, offline cracking, credentialed AD (domaindump, Kerberoast, BloodHound, ADCS templates, writable objects), SMB-signing/coercion **relay-target recon**, and non-interactive `access.exec`.
 

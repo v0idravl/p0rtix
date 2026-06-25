@@ -157,12 +157,16 @@ def discover_tcp_common(ip: str, runner: Runner, ws: Workspace) -> list[int]:
 
 
 def discover_tcp_open(ip: str, runner: Runner, ws: Workspace,
-                      exclude: set[int] | None = None) -> list[int]:
+                      exclude: set[int] | None = None, *, live: bool = True) -> list[int]:
     """Open-only full TCP SYN sweep — NO version detection. Returns open ports.
 
     The quiet green discovery floor: what is listening, nothing more. `exclude`
     ports (already swept by an earlier tier) are skipped via --exclude-ports so a
-    follow-up full sweep doesn't redo coverage."""
+    follow-up full sweep doesn't redo coverage.
+
+    `live=True` streams progress to the terminal (console use). `live=False`
+    captures silently — required when run from a background thread or under the
+    MCP stdio server, where printing would corrupt the JSON-RPC stream."""
     tcp_prefix = str(ws.raw_dir / "01_full_tcp")
     cmd = [
         "nmap", "-n", "--reason", "-sS", "-Pn", "-p-", "--open",
@@ -171,7 +175,12 @@ def discover_tcp_open(ip: str, runner: Runner, ws: Workspace,
     if exclude:
         cmd += ["--exclude-ports", ",".join(str(p) for p in sorted(exclude))]
     cmd += ["-oA", tcp_prefix, ip]
-    runner.run_live(cmd, label="01_full_tcp")
+    if live:
+        runner.run_live(cmd, label="01_full_tcp")
+    else:
+        # generous ceiling for a -p- sweep on a slow lab network; nmap writes the
+        # XML via -oA regardless, so partial-on-timeout still yields what finished.
+        runner.run(cmd, "01_full_tcp", timeout=1800)
     return _parse_xml_ports(Path(tcp_prefix + ".xml"), "tcp", include_filtered=False)
 
 

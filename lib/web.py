@@ -16,6 +16,24 @@ _FFUF_THREADS  = 20       # lower than before to avoid tripping rate limits / cr
 _FFUF_TIMEOUT  = "180"    # seconds total per ffuf run (3 min is enough for common.txt at 20 threads)
 _REQ_TIMEOUT   = "10"     # per-request timeout
 
+# Crawl (gospider) wall-clock ceiling. Kept short: on a single-page box gospider
+# can otherwise sit idle to its full timeout and bottleneck the action. The crawl
+# runs LAST, so this cap never delays the dir/vhost busting above it.
+_CRAWL_TIMEOUT = 45
+
+# whatweb plugins worth recording as structured web-tech facts (name+version).
+# Kept to a high-signal whitelist so the fact store gets "JQuery 1.4.4" /
+# "HTTPServer HttpFileServer 2.3", not every cosmetic plugin whatweb prints.
+_WHATWEB_TECH = {
+    "httpserver", "jquery", "x-powered-by", "php", "apache", "nginx",
+    "microsoft-iis", "iis", "openssl", "bootstrap", "wordpress", "joomla",
+    "drupal", "tomcat", "coyote", "jenkins", "asp.net", "frontpage", "java",
+    "nodejs", "express", "laravel", "django", "phpmyadmin", "modsecurity",
+}
+
+# whatweb token: Name[value]  →  capture name + bracketed value
+_WHATWEB_RE = re.compile(r"([A-Za-z][\w.\-]*)\[([^\]]+)\]")
+
 # ANSI escape sequence pattern
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[mKGHFABCDJsu]")
 
@@ -142,7 +160,7 @@ def enumerate_web(
 
     # ── 1. Headers + tech fingerprint ─────────────────────────────────────────
     print(f"    → fingerprint")
-    fp = _fingerprint(base_url, runner, findings, available)
+    fp = _fingerprint(base_url, port, runner, findings, available)
 
     # ── 2. NTLM info disclosure — only probe IIS/Windows endpoints (saves ~10s/port on Linux) ──
     _check_ntlm_info(ip, port, runner, findings, server_hint=fp.get("server", ""))
@@ -263,7 +281,31 @@ def enumerate_web(
 
 # ── Fingerprint ───────────────────────────────────────────────────────────────
 
-def _fingerprint(url: str, runner: Runner, findings: Findings, available: set[str]) -> dict:
+def _record_web_tech(runner: Runner, port: int, techs) -> None:
+    """Push detected web tech/version strings into the fact store when the runner
+    is engine-wired (runner.ws is a FactStore). A no-op in legacy/headless paths
+    whose workspace has no add_web_tech, so web.py stays UI-independent."""
+    ws = getattr(runner, "ws", None)
+    add = getattr(ws, "add_web_tech", None)
+    if add is None:
+        return
+    for t in techs:
+        if t and t.strip():
+            add(port, t.strip())
+
+
+def _whatweb_tech(clean: str) -> list[str]:
+    """Pull high-signal Name[value] tokens out of cleaned whatweb output, e.g.
+    'JQuery[1.4.4]' → 'JQuery 1.4.4'. Whitelisted by plugin name to stay signal."""
+    out: list[str] = []
+    for name, val in _WHATWEB_RE.findall(clean):
+        if name.lower() in _WHATWEB_TECH:
+            out.append(f"{name} {val.strip()}")
+    return list(dict.fromkeys(out))
+
+
+def _fingerprint(url: str, port: int, runner: Runner, findings: Findings,
+                 available: set[str]) -> dict:
     findings.h4("Fingerprint")
 
     cmd = ["curl", "-sS", "-k", "-I", "-L", "--max-time", "15", url]
@@ -273,6 +315,9 @@ def _fingerprint(url: str, runner: Runner, findings: Findings, available: set[st
 
     meta = _parse_headers_meta(out)
 
+    # Structured fingerprint: Server / X-Powered-By headers → web-tech facts.
+    _record_web_tech(runner, port, [meta.get("server"), meta.get("powered_by")])
+
     # Skip whatweb on HTTPAPI — it always times out on WinRM/RPC endpoints
     if "whatweb" in available and "microsoft-httpapi" not in meta["server"].lower():
         cmd2 = ["whatweb", "--no-errors", "-a", "3", url]
@@ -281,6 +326,10 @@ def _fingerprint(url: str, runner: Runner, findings: Findings, available: set[st
         clean = _ANSI_RE.sub("", out2).strip()
         if clean:
             findings.code_block(clean)
+            techs = _whatweb_tech(clean)
+            if techs:
+                findings.bullet(f"**Tech:** {', '.join(f'`{t}`' for t in techs)}")
+                _record_web_tech(runner, port, techs)
 
     return meta
 
@@ -905,7 +954,7 @@ def _dir_bust(base_url: str, runner: Runner, findings: Findings, fp: dict,
               breadth: Breadth = Breadth.STANDARD):
     wl = web_wordlist("dirs", breadth)
     if not wl:
-        findings.note("No dir-bust wordlist found — skipping")
+        findings.bullet("⚠ no dir-bust wordlist found (install seclists) — dir busting skipped")
         return
 
     findings.h4(f"Directory Bust ({breadth.label})")
@@ -1024,7 +1073,7 @@ def _vhost_bust(ip: str, port: int, scheme: str, domain: str,
                 breadth: Breadth = Breadth.STANDARD) -> list[str]:
     wl = web_wordlist("vhost", breadth)
     if not wl:
-        findings.note("Vhost wordlist missing — skipping vhost bust")
+        findings.bullet("⚠ no vhost wordlist found (install seclists) — vhost busting skipped")
         return []
 
     baseline = _vhost_baseline(ip, port, scheme)
@@ -1074,10 +1123,13 @@ def _vhost_baseline(ip: str, port: int, scheme: str) -> int:
 
 def _crawl(base_url: str, scope: Scope, runner: Runner, findings: Findings):
     findings.h4("Crawl")
-    cmd = ["gospider", "-s", base_url, "-c", "5", "-d", "2",
+    cmd = ["gospider", "-s", base_url, "-c", "5", "-d", "2", "-t", "10",
            "--include-subs", "--no-redirect", "-q"]
     findings.cmd(" ".join(cmd))
-    out = runner.run(cmd, f"web_{_label(base_url)}_gospider", timeout=120)
+    out = runner.run(cmd, f"web_{_label(base_url)}_gospider", timeout=_CRAWL_TIMEOUT)
+    if "[TIMEOUT after" in out:
+        findings.bullet(f"⏱ crawl (gospider) timed out after {_CRAWL_TIMEOUT}s — "
+                        "partial/no crawl results; dir & vhost busting above are unaffected")
 
     in_scope, out_of_scope = _parse_gospider(out, scope)
 
@@ -1161,7 +1213,7 @@ def _param_fuzz(base_url: str, runner: Runner, findings: Findings):
 
 def _print_ffuf(output: str, findings: Findings) -> list[tuple[str, str, str]]:
     if "[TIMEOUT after" in output:
-        findings.note("ffuf timed out before completion — partial results only")
+        findings.bullet("⏱ ffuf timed out before completion — partial results only")
     cleaned = _ANSI_RE.sub("", output)
     results = _FFUF_RE.findall(cleaned)
     for path, status, size in results:

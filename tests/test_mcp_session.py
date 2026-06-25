@@ -137,6 +137,82 @@ def test_versioned_services_surface_in_state_delta_and_handoff(tmp_path):
             "version": "HttpFileServer httpd 2.3"} in h["services"]
 
 
+def test_web_tech_surfaces_in_state_delta_and_handoff(tmp_path):
+    """Web fingerprint tech (Server header, whatweb) must be structured, not only
+    in findings_md — so the driving agent sees it via facts_delta/get_state and it
+    rides along in the handoff. Regression for the Optimum web-blindness delta."""
+    s = _session(tmp_path)
+    before = s.facts.snapshot()
+    s.facts.add_web_tech(80, "HFS 2.3")
+    s.facts.add_web_tech(80, "JQuery 1.4.4")
+    after = s.facts.snapshot()
+
+    delta = snapshot_diff(before, after)
+    techs = {(x["port"], x["tech"]) for x in delta["web_tech"]}
+    assert (80, "HFS 2.3") in techs and (80, "JQuery 1.4.4") in techs
+    assert {"port": 80, "tech": "HFS 2.3"} in s.get_state()["web_tech"]
+    assert {"port": 80, "tech": "HFS 2.3"} in s.export_handoff()["web_tech"]
+
+
+def test_exploit_candidates_in_state_and_handoff(tmp_path):
+    """A known-RCE service (HFS 2.3 → CVE-2014-6287) yields a structured exploit
+    candidate with an msf module in both get_state and export_handoff."""
+    from lib.models import Service
+    s = _session(tmp_path)
+    s.facts.add_services([Service(80, "tcp", "http", "HttpFileServer httpd 2.3",
+                                  is_web=True, scheme="http")])
+    cand = s.export_handoff()["exploit_candidates"]
+    assert any(c["cve"] == "CVE-2014-6287"
+               and c["msf_module"] == "exploit/windows/http/rejetto_hfs_exec"
+               and c["port"] == 80 for c in cand)
+    assert s.get_state()["exploit_candidates"] == cand
+
+
+def test_run_group_aggregates_findings_md_and_actions(tmp_path, monkeypatch):
+    """run_group must surface every sub-action's rendered findings + summaries —
+    not return an empty body — so a bulk web/smb run is not blind over MCP."""
+    def fake_users(ip, port, runner, buf, available):
+        buf.bullet("user roster: alice, bob")
+
+    def fake_shares(ip, port, runner, buf, available):
+        buf.bullet("readable share: NETLOGON")
+
+    monkeypatch.setattr(services, "_smb_users", fake_users)
+    monkeypatch.setattr(services, "_smb_shares", fake_shares)
+    for fn in ("_smb_spider_shares", "_smb_policy"):
+        monkeypatch.setattr(services, fn, lambda *a, **k: None)
+    monkeypatch.setattr("lib.runner.Runner.run", lambda self, *a, **k: "")
+
+    s = _session(tmp_path)
+    s.set_noise("green")
+    s.facts.add_open_port("tcp", 445)
+    res = s.run_group("smb")
+    assert res["dispatched"] >= 2
+    assert "user roster: alice, bob" in res["findings_md"]
+    assert "readable share: NETLOGON" in res["findings_md"]
+    assert {a["action"] for a in res["actions"]} >= {"smb.users", "smb.shares"}
+
+
+def test_background_full_scan_merges_ports(tmp_path, monkeypatch):
+    """The background full-TCP sweep runs off the dispatch lock and lands new
+    ports in the fact store; background_status reports completion."""
+    import time
+    from lib import nmap
+    monkeypatch.setattr(nmap, "discover_tcp_open",
+                        lambda ip, r, ws, exclude=None, live=True: [445, 3389])
+    s = _session(tmp_path)
+    assert s.background_status()["running"] is False
+    assert s.start_full_scan()["status"] == "started"
+    for _ in range(50):                       # let the daemon thread finish
+        if not s.background_status()["running"]:
+            break
+        time.sleep(0.02)
+    st = s.background_status()
+    assert st["running"] is False and st.get("done") is True
+    assert sorted(st["new_ports"]) == [445, 3389]
+    assert ["tcp", 3389] in [list(p) for p in s.facts.snapshot()["open_ports"]]
+
+
 def test_list_actions_exposes_web_and_service_groups(tmp_path):
     s = _session(tmp_path)
     groups = {r["group"] for r in s.list_actions()}

@@ -73,6 +73,13 @@ def snapshot_diff(before: dict, after: dict) -> dict:
     if new_s:
         delta["services"] = new_s
 
+    # web_tech: list of dicts keyed by (port, tech)
+    seen_w = {(x["port"], x["tech"]) for x in before.get("web_tech", [])}
+    new_w = [x for x in after.get("web_tech", [])
+             if (x["port"], x["tech"]) not in seen_w]
+    if new_w:
+        delta["web_tech"] = new_w
+
     # proto_status: report keys whose status changed
     bs, as_ = before.get("proto_status", {}), after.get("proto_status", {})
     changed = {k: v for k, v in as_.items() if bs.get(k) != v}
@@ -96,6 +103,14 @@ class McpSession:
         self._lock = threading.Lock()
         # per-action capture: name → {"summary", "rendered"}
         self._last: dict[str, dict] = {}
+        # ordered capture log of every action that completed, so a bulk run
+        # (run_group / run_all) can aggregate the rendered findings + summaries
+        # of *all* its sub-actions — not just the last. This is what makes web
+        # enum (and any branch) visible through the MCP response, per doctrine.
+        self._captures: list[dict] = []
+        # background full-TCP sweep bookkeeping (see start_full_scan)
+        self._bg_thread: threading.Thread | None = None
+        self._bg_state: dict | None = None
         self.bundle = build_engine(ip, domain, name, args, available,
                                    on_output=self._capture)
         self.ip = ip
@@ -104,7 +119,17 @@ class McpSession:
 
     # ── capture hook (wired into the scheduler) ───────────────────────────────
     def _capture(self, action_name: str, summary: str, rendered_md: str) -> None:
-        self._last[action_name] = {"summary": summary or "", "rendered": rendered_md or ""}
+        entry = {"action": action_name, "summary": summary or "", "rendered": rendered_md or ""}
+        self._last[action_name] = entry
+        self._captures.append(entry)
+
+    def _collect(self, start: int) -> dict:
+        """Aggregate everything captured since index `start`: concatenated
+        findings markdown and a per-action [{action, summary}] list."""
+        caps = self._captures[start:]
+        md = "\n\n".join(c["rendered"] for c in caps if c["rendered"].strip())
+        actions = [{"action": c["action"], "summary": c["summary"]} for c in caps]
+        return {"findings_md": md, "actions": actions}
 
     # convenience accessors
     @property
@@ -126,6 +151,7 @@ class McpSession:
     # ── inspection ────────────────────────────────────────────────────────────
     def get_state(self) -> dict:
         """Authoritative engine state: facts snapshot + scheduler status."""
+        from lib.engine.exploit_hints import candidates
         snap = self.facts.snapshot()
         return {
             "target": snap["ip"],
@@ -135,6 +161,9 @@ class McpSession:
             "breadth": self.facts.breadth.label,
             "open_ports": [list(p) for p in snap["open_ports"]],
             "services": snap["services"],
+            "web_tech": snap["web_tech"],
+            "exploit_candidates": candidates(snap["services"]),
+            "background": self._bg_snapshot(),
             "scanned_tcp": snap["scanned_tcp"],
             "users": snap["users"],
             "users_complete": snap["users_complete"],
@@ -186,32 +215,45 @@ class McpSession:
             if self.registry.get(name) is None:
                 return {"ok": False, "error": f"no such action: {name}"}
             before = self.facts.snapshot()
+            start = len(self._captures)
             n = self.scheduler.run_action(name, port=port, extra_args=args)
             after = self.facts.snapshot()
-        cap = self._last.get(name, {})
+            collected = self._collect(start)
         if not n:
             return {
                 "ok": False, "dispatched": 0,
                 "why": self.registry.why(name, self.facts, self.posture,
                                          self.scheduler.tried, self.available),
             }
+        cap = self._last.get(name, {})
         return {
             "ok": True,
             "dispatched": n,
             "summary": cap.get("summary", ""),
             "facts_delta": snapshot_diff(before, after),
-            "findings_md": cap.get("rendered", ""),
+            # aggregated across every dispatched instance (e.g. web.enum per port)
+            "findings_md": collected["findings_md"],
         }
 
     def run_group(self, group: str) -> dict:
-        """Dispatch the whole branch (e.g. all SMB sub-actions)."""
+        """Dispatch the whole branch (e.g. all SMB sub-actions). Returns the
+        aggregated findings markdown and per-action summaries of every sub-action
+        dispatched, so a bulk run is never blind through the MCP response."""
         with self._lock:
             if group not in self.registry.group_names():
                 return {"ok": False, "error": f"no such group: {group}"}
             before = self.facts.snapshot()
+            start = len(self._captures)
             n = self.scheduler.run_group(group)
             after = self.facts.snapshot()
-        return {"ok": True, "dispatched": n, "facts_delta": snapshot_diff(before, after)}
+            collected = self._collect(start)
+        return {
+            "ok": True,
+            "dispatched": n,
+            "facts_delta": snapshot_diff(before, after),
+            "actions": collected["actions"],
+            "findings_md": collected["findings_md"],
+        }
 
     def run_all(self, noise_ceiling: str | None = None) -> dict:
         """Run everything available at/below the noise ceiling, cascading on new
@@ -224,13 +266,17 @@ class McpSession:
                 if tier > self.posture.level and not self.posture.raise_to(tier):
                     return {"ok": False, "error": "RED is locked — call arm_dangerous first"}
             before = self.facts.snapshot()
+            start = len(self._captures)
             n = self.scheduler.run_all_at_or_below(self.posture)
             after = self.facts.snapshot()
+            collected = self._collect(start)
         return {
             "ok": True,
             "dispatched": n,
             "noise": self.posture.level.label,
             "facts_delta": snapshot_diff(before, after),
+            "actions": collected["actions"],
+            "findings_md": collected["findings_md"],
         }
 
     # ── posture ───────────────────────────────────────────────────────────────
@@ -292,10 +338,59 @@ class McpSession:
             n = self.scheduler.recheck(proto.lower())
         return {"ok": True, "rechecked": proto.lower(), "rearmed": n}
 
+    # ── background full-TCP sweep (delta 4: don't block recon on -p-) ──────────
+    def _bg_snapshot(self) -> dict:
+        """Current background-task state for get_state, with liveness refreshed."""
+        alive = bool(self._bg_thread is not None and self._bg_thread.is_alive())
+        state = dict(self._bg_state or {})
+        if state:
+            state["running"] = alive
+        return state
+
+    def start_full_scan(self) -> dict:
+        """Kick a full TCP (-p-) sweep in the background so recon proceeds on the
+        quick-scan ports meanwhile. Newly-found ports flow into the fact store
+        (poll get_state / background_status). Safe: runs on its own Runner over
+        the thread-safe fact store and never holds the session dispatch lock."""
+        with self._lock:
+            if self._bg_thread is not None and self._bg_thread.is_alive():
+                return {"ok": True, "status": "running",
+                        "note": "a full TCP sweep is already in progress"}
+            self._bg_state = {"kind": "full_tcp_sweep", "running": True, "new_ports": []}
+            self._bg_thread = threading.Thread(target=self._full_scan_worker, daemon=True)
+            self._bg_thread.start()
+        return {"ok": True, "status": "started",
+                "note": "full TCP sweep running in background — poll background_status / get_state"}
+
+    def _full_scan_worker(self) -> None:
+        from lib import nmap
+        from lib.runner import Runner
+        try:
+            runner = Runner(self.facts)
+            exclude = self.facts.scanned_tcp()
+            before = {p for (pr, p) in self.facts.snapshot()["open_ports"] if pr == "tcp"}
+            ports = nmap.discover_tcp_open(self.ip, runner, self.facts,
+                                           exclude=exclude, live=False)
+            self.facts.add_scanned_tcp(range(1, 65536))
+            for p in ports:
+                self.facts.add_open_port("tcp", p)
+            self._bg_state = {"kind": "full_tcp_sweep", "running": False, "done": True,
+                              "new_ports": sorted(set(ports) - before)}
+        except Exception as exc:   # a background failure must never crash the session
+            self._bg_state = {"kind": "full_tcp_sweep", "running": False, "done": True,
+                              "error": str(exc)}
+
+    def background_status(self) -> dict:
+        """Report the background full-TCP sweep: running flag, new_ports found,
+        done/error. New ports also appear in get_state's open_ports as they land."""
+        return {"ok": True, **self._bg_snapshot()} if self._bg_state \
+            else {"ok": True, "running": False, "note": "no background task started"}
+
     # ── the lab-pwn / metasploit handoff ──────────────────────────────────────
     def export_handoff(self) -> dict:
         """Structured recon inventory for an exploitation agent (metasploitmcp).
         Pure read of the fact store — no exploitation, no shells."""
+        from lib.engine.exploit_hints import candidates
         snap = self.facts.snapshot()
         return {
             "hosts": [snap["ip"]],
@@ -308,6 +403,10 @@ class McpSession:
             "services": [{"port": s["port"], "proto": s["proto"],
                           "name": s["name"], "version": s["version"]}
                          for s in snap["services"]],
+            # detected web tech/versions (Server header, whatweb) — extra fingerprint
+            "web_tech": snap["web_tech"],
+            # known-RCE pointers (CVE + suggested msf module) for matched services
+            "exploit_candidates": candidates(snap["services"]),
             "valid_creds": [{"user": u, "password": p} for u, p in snap["valid_creds"]],
             "admin_creds": [{"user": u, "password": p} for u, p in snap["admin_pairs"]],
             "cred_pairs": [{"user": u, "password": p} for u, p in snap["cred_pairs"]],

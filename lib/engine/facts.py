@@ -66,6 +66,10 @@ class FactStore(Workspace):
         # SMB signing posture: True=required, False=not required (relay target),
         # None=unknown. Surfaced in the handoff so an agent can pick relay targets.
         self._smb_signing_required: bool | None = None
+        # detected web technologies/versions, as (port, "tech") — e.g.
+        # (80, "HFS 2.3"), (80, "JQuery 1.4.4"). Web enum populates this so the
+        # fingerprint is structured (snapshot/handoff), not only in findings_md.
+        self._web_tech: set[tuple[int, str]] = set()
 
     # ── event plumbing ────────────────────────────────────────────────────────
     def subscribe(self, fn: Listener) -> None:
@@ -255,6 +259,20 @@ class FactStore(Workspace):
         if changed:
             self._emit(FactEvent("smb_signing", required))
 
+    def add_web_tech(self, port: int, tech: str) -> None:
+        """Record a detected web technology/version for a port (e.g.
+        (80, "HFS 2.3")). Deduped; emits so the fingerprint rides along in the
+        snapshot / handoff as structured fact, not only in findings_md."""
+        tech = (tech or "").strip()
+        if not tech:
+            return
+        key = (int(port), tech)
+        with self._engine_lock:
+            is_new = key not in self._web_tech
+            self._web_tech.add(key)
+        if is_new:
+            self._emit(FactEvent("web_tech", key))
+
     def set_proto_status(self, proto: str, status: ProtoStatus) -> None:
         with self._engine_lock:
             changed = self._proto_status.get(proto) is not status
@@ -329,6 +347,7 @@ class FactStore(Workspace):
             ]
             scanned_tcp = len(self._scanned_tcp)
             smb_signing = self._smb_signing_required
+            web_tech = sorted(self._web_tech)
             services = [
                 {"port": s.port, "proto": s.proto, "name": s.name,
                  "version": s.version, "is_web": s.is_web, "scheme": s.scheme}
@@ -351,6 +370,7 @@ class FactStore(Workspace):
             "cred_pairs": cred_pairs,
             "scanned_tcp": scanned_tcp,
             "smb_signing_required": smb_signing,
+            "web_tech": [{"port": p, "tech": t} for (p, t) in web_tech],
             "services": services,
         }
 
