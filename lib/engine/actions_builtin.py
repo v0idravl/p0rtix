@@ -6,9 +6,11 @@ push facts through `ctx.facts` (a FactStore passed as `runner.ws`, so the legacy
 handler bodies emit unlock events with zero changes). Adding a new tool to the
 engine is one `register(...)` call here.
 
-Phase 1 registers the passive actions + the first green vertical slice
-(discovery, on-demand version detect, anonymous SMB, anonymous LDAP). Yellow/red
-and the session/shell/CVE actions land in later phases.
+The catalogue spans passive parsing, green discovery/anonymous enumeration
+(SMB/LDAP), yellow credentialed AD enumeration (domaindump, Kerberoast,
+BloodHound, writable objects), and non-interactive access (`access.exec` — one
+command, captured stdout). p0rtix stops at recon + enumeration; interactive
+shells and exploitation are the exploitation agent's job (see export_handoff).
 """
 from __future__ import annotations
 
@@ -105,6 +107,72 @@ def _h_version_detect(ctx) -> ActionResult:
     return ActionResult(ok=True, summary=f"version-detected {port}")
 
 
+# ── web + non-AD service enumeration (wraps the existing dispatchers) ──────────
+# AD/creds ports are handled by the dedicated smb.*/ldap.*/kerberos.*/creds.*
+# branches, so service.enum skips them and only covers the rest.
+_AD_PORTS = {88, 139, 445, 389, 636, 3268, 3269, 5985, 5986}
+
+
+def _find_service(ctx, port):
+    for s in ctx.facts.get_services():
+        if s.port == port:
+            return s
+    return None
+
+
+def _web_instances(f) -> list[dict]:
+    return [{"port": s.port} for s in f.get_services() if s.is_web]
+
+
+def _service_instances(f) -> list[dict]:
+    from lib import services
+    out = []
+    for s in f.get_services():
+        if s.is_web or s.port in _AD_PORTS:
+            continue
+        if services.service_handler(s) is not None:
+            out.append({"port": s.port})
+    return out
+
+
+def _h_web_enum(ctx) -> ActionResult:
+    from lib.hosts import HostsManager
+    from lib.scope import Scope
+    from lib.web import enumerate_web
+    from lib.wordlists import Breadth, parse_breadth
+    svc = _find_service(ctx, ctx.target_port)
+    if svc is None:
+        return ActionResult(ok=False, summary=f"no web service on port {ctx.target_port}")
+    breadth = parse_breadth((ctx.args or {}).get("breadth"),
+                            getattr(ctx.facts, "breadth", Breadth.STANDARD))
+    # BROAD subsumes --deep: run the extra cewl/arjun/API passes too.
+    deep = getattr(ctx.facts, "deep", False) or breadth is Breadth.BROAD
+    scope = Scope(ctx.ip, ctx.domain)
+    discoveries = enumerate_web(
+        ctx.ip, svc, ctx.domain, ctx.runner, ctx.findings, scope, HostsManager(),
+        ctx.available, is_followup=False, deep=deep, breadth=breadth,
+    ) or []
+    for d in discoveries:
+        if getattr(d, "hostname", ""):
+            ctx.facts.add_hostname(d.hostname)
+    return ActionResult(ok=True,
+                        summary=f"web enum {svc.scheme}://{ctx.ip}:{svc.port} "
+                                f"({len(discoveries)} discovery)")
+
+
+def _h_service_enum(ctx) -> ActionResult:
+    from lib import services
+    svc = _find_service(ctx, ctx.target_port)
+    if svc is None:
+        return ActionResult(ok=False, summary=f"no service on port {ctx.target_port}")
+    discoveries = services.enumerate_service(
+        ctx.ip, svc, ctx.runner, ctx.findings, ctx.available) or []
+    for d in discoveries:
+        if getattr(d, "hostname", ""):
+            ctx.facts.add_hostname(d.hostname)
+    return ActionResult(ok=True, summary=f"{svc.name} enum on {svc.proto}/{svc.port}")
+
+
 # ── green: anonymous SMB / LDAP (wrap existing handler bodies) ─────────────────
 def _h_smb_users(ctx) -> ActionResult:
     from lib import services
@@ -181,6 +249,11 @@ def _ensure_users_file(facts: FactStore) -> Path:
     return path
 
 
+def _ulabel(user: str) -> str:
+    """A filesystem-safe short slug for a username (for raw-output filenames)."""
+    return re.sub(r"[^a-z0-9]", "_", user.lower())[:24]
+
+
 def _register_hashes(facts, kind: str, lines) -> int:
     """Record each captured hash line under its principal (so the UI can show
     uncracked→crack / cracked→plaintext, keyed by account)."""
@@ -238,7 +311,10 @@ def _h_asrep_roast(ctx) -> ActionResult:
 # ── passive: offline crack (local hashcat; zero packets to target) ────────────
 def _h_crack(ctx) -> ActionResult:
     from lib import crack
-    cracked = crack.crack_hashes(ctx.facts, ctx.runner, ctx.findings, ctx.available)
+    from lib.wordlists import parse_breadth
+    breadth = parse_breadth((ctx.args or {}).get("breadth"),
+                            getattr(ctx.facts, "breadth", None))
+    cracked = crack.crack_hashes(ctx.facts, ctx.runner, ctx.findings, ctx.available, breadth)
     # Record each cracked (user, password) as a targeted pair so creds.test can
     # verify it as itself instead of spraying it, and flip the hash to cracked.
     for user, password in cracked:
@@ -337,6 +413,108 @@ def _h_writable_objects(ctx) -> ActionResult:
     return ActionResult(ok=True, summary=f"{len(targets or [])} writable object(s)")
 
 
+# ── recon-completeness: relay/coercion surface, ADCS + MSSQL enumeration ──────
+def _h_smb_signing(ctx) -> ActionResult:
+    """Check SMB signing posture. signing:False → an NTLM-relay target, recorded
+    as a fact so it rides along in export_handoff for the exploitation agent."""
+    if "nxc" not in ctx.available:
+        return ActionResult(ok=False, summary="nxc not available")
+    out = ctx.runner.run(["nxc", "smb", ctx.ip], "smb_signing", timeout=60)
+    ctx.findings.h4("SMB Signing")
+    ctx.findings.code_block(out)
+    m = re.search(r"[sS]igning:(True|False)", out)
+    if m and m.group(1) == "False":
+        ctx.facts.set_smb_signing(False)
+        ctx.findings.bullet("**SMB signing NOT required — NTLM relay (ntlmrelayx) "
+                            "viable; flagged as a relay target for the handoff**")
+        ctx.findings.add_summary("SMB signing NOT required — relay target")
+        return ActionResult(ok=True, summary="signing NOT required — relay target")
+    if m and m.group(1) == "True":
+        ctx.facts.set_smb_signing(True)
+        ctx.findings.bullet("SMB signing required — relay not viable")
+        return ActionResult(ok=True, summary="signing required")
+    return ActionResult(ok=True, summary="signing status unknown")
+
+
+# Known NTLM-coercion RPC interface UUIDs, by technique.
+_COERCE_MARKERS = {
+    "MS-RPRN (PrinterBug)":   ("12345678-1234-abcd-ef00-0123456789ab",),
+    "MS-EFSR (PetitPotam)":   ("c681d488-d850-11d0-8c52-00c04fd90f7e",
+                               "df1941c5-fe89-4e79-bf10-463657acf44d"),
+    "MS-DFSNM (DFSCoerce)":   ("4fc742e0-4a10-11cf-8273-00aa004ae673",),
+    "MS-FSRVP (ShadowCoerce)": ("a8e0653c-2744-4389-a61d-7373df8b2292",),
+}
+
+
+def _h_coerce_surface(ctx) -> ActionResult:
+    """Enumerate exposed NTLM-coercion RPC endpoints (PrinterBug/PetitPotam/
+    DFSCoerce/ShadowCoerce) via rpcdump. Recon only — relaying is the agent's job."""
+    if "impacket-rpcdump" not in ctx.available:
+        return ActionResult(ok=False, summary="impacket-rpcdump not available")
+    out = ctx.runner.run(["impacket-rpcdump", ctx.ip], "coerce_rpcdump", timeout=120).lower()
+    surface = [name for name, uuids in _COERCE_MARKERS.items()
+               if any(u in out for u in uuids)]
+    ctx.findings.h4("NTLM Coercion Surface (impacket-rpcdump)")
+    if surface:
+        for s in surface:
+            ctx.findings.bullet(f"**Coercion endpoint exposed: {s}**")
+            ctx.findings.add_summary(f"Coercion surface: {s}")
+        ctx.findings.note("Relay to a signing-disabled host (ntlmrelayx/metasploit) "
+                          "— coercion + relay is the exploitation agent's job")
+    else:
+        ctx.findings.bullet("No known coercion endpoints detected")
+    return ActionResult(ok=True, summary=f"{len(surface)} coercion endpoint(s)")
+
+
+def _h_adcs_enum(ctx) -> ActionResult:
+    """Enumerate vulnerable ADCS certificate templates (certipy-ad find). Recon
+    only — the ESC request/auth exploitation chains stay with the agent."""
+    from lib import credsmode
+    ready = _enum_cred_or_none(ctx)
+    if ready is None:
+        return ActionResult(ok=False, summary="need a domain and a valid credential")
+    if "certipy-ad" not in ctx.available:
+        return ActionResult(ok=False, summary="certipy-ad not available")
+    domain, user, pw = ready
+    cmd = ["certipy-ad", "find", "-u", f"{user}@{domain}", "-p", pw,
+           "-dc-ip", ctx.ip, "-stdout", "-vulnerable"]
+    ctx.findings.h4("ADCS Templates (certipy-ad find)")
+    ctx.findings.cmd(" ".join(cmd))
+    out = ctx.runner.run(cmd, f"adcs_find_{_ulabel(user)}", timeout=180)
+    ctx.findings.code_block(credsmode._trim(out))
+    vuln = credsmode._parse_adcs_find(out)
+    for ca, tmpl, esc in vuln:
+        ctx.findings.bullet(f"**ADCS {esc}: `{tmpl}` via `{ca}`**")
+        ctx.findings.add_summary(f"ADCS {esc}: {tmpl} via {ca}")
+    return ActionResult(ok=True, summary=f"{len(vuln)} vulnerable ADCS template(s)")
+
+
+def _h_mssql_enum(ctx) -> ActionResult:
+    """Authenticated MSSQL enumeration — databases + linked servers (lateral-move
+    surface). Recon only: no xp_cmdshell (that's access.exec / the agent)."""
+    if "nxc" not in ctx.available:
+        return ActionResult(ok=False, summary="nxc not available")
+    cred = _pick_enum_cred(ctx.facts)
+    if cred is None:
+        return ActionResult(ok=False, summary="need a valid credential")
+    user, pw = cred
+    domain = ctx.facts.discovered_domain or ctx.domain
+    base = ["nxc", "mssql", ctx.ip, "-u", user, "-p", pw]
+    if domain:
+        base += ["-d", domain]
+    ctx.findings.h4("MSSQL Enumeration (authenticated)")
+    queries = {
+        "databases": "SELECT name FROM sys.databases",
+        "linked servers": "EXEC sp_linkedservers",
+    }
+    for label, q in queries.items():
+        cmd = base + ["-q", q]
+        ctx.findings.cmd(" ".join(cmd))
+        out = ctx.runner.run(cmd, f"mssql_{label.split()[0]}_{_ulabel(user)}", timeout=90)
+        ctx.findings.code_block(out)
+    return ActionResult(ok=True, summary=f"MSSQL enum as {user}")
+
+
 # ── yellow: credential access test (verify pairs as-is — no spray) ────────────
 def _h_creds_test(ctx) -> ActionResult:
     """Test each known credential pair (cracked pairs + confirmed valid creds)
@@ -384,21 +562,32 @@ def _h_creds_test(ctx) -> ActionResult:
                         summary=f"tested {len(pairs)} pair(s) — {confirmed} access hit(s)")
 
 
-# ── red: opt-in interactive shell handoff (armed only) ────────────────────────
-def _h_shell(ctx) -> ActionResult:
+# ── access: run ONE command non-interactively (no shell, no C2) ───────────────
+def _h_exec(ctx) -> ActionResult:
+    """Run a single command non-interactively via the best available credential
+    and capture stdout. The command comes from ``ctx.args["command"]``. This is a
+    recon-grade access check / quick command — NOT an interactive shell. Anything
+    beyond a one-shot command is the exploitation agent's job (see export_handoff)."""
     from lib.engine import access
-    cmd = access.shell_command(ctx.facts, ctx.ip)
+    command = (ctx.args or {}).get("command", "").strip()
+    if not command:
+        return ActionResult(ok=False, summary="no command given (pass args.command)")
+    if "nxc" not in ctx.available and "sshpass" not in ctx.available:
+        return ActionResult(ok=False, summary="need nxc or sshpass to exec")
+    cmd = access.exec_command(ctx.facts, ctx.ip, command)
     if cmd is None:
         return ActionResult(ok=False,
-                            summary="no admin-SMB / WinRM credential for a shell")
-    ctx.findings.bullet(f"**Interactive shell handoff:** `{' '.join(cmd)}`")
-    ctx.findings.add_summary(f"Operator shell: `{' '.join(cmd)}`")
-    access.launch_shell(cmd)        # blocks until the operator exits (tty handoff)
-    return ActionResult(ok=True, summary=f"shell session via {cmd[0]}")
+                            summary="no admin-SMB / WinRM / SSH credential to exec")
+    out = ctx.runner.run(cmd, "access_exec", timeout=120)
+    ctx.findings.h4(f"access.exec — `{command}`")
+    ctx.findings.cmd(" ".join(cmd))
+    ctx.findings.code_block(out)
+    ctx.findings.add_summary(f"exec `{command}` via {cmd[0]} {cmd[1] if len(cmd) > 1 else ''}".strip())
+    return ActionResult(ok=True, summary=f"exec `{command}` via {cmd[0]}")
 
 
-def _can_shell(f) -> bool:
-    # only advertise when a shell is actually buildable: admin over SMB, or a
+def _can_exec(f) -> bool:
+    # only advertise when a command is actually runnable: admin over SMB, or a
     # valid cred over WinRM (5985/5986) / SSH.
     admin_smb = f.has("admin_cred") and f.has("tcp/445")
     winrm = f.has("valid_cred") and (f.has("tcp/5985") or f.has("tcp/5986"))
@@ -461,6 +650,36 @@ def build_registry() -> ActionRegistry:
         deps=("nmap",),
     ))
 
+    # Web enumeration — one instance per detected HTTP(S) service. Wraps the full
+    # web.py pipeline (fingerprint, sensitive files, app probes, SSL SANs, dir/
+    # vhost busting). Needs svc.version_detect to have classified the service.
+    reg.register(Action(
+        "web.enum", Tier.GREEN, _h_web_enum,
+        group="web", order=1,
+        footprint=Footprint(
+            summary="HTTP(S) enumeration — fingerprint, headers, sensitive files, "
+                    "app probes, SSL SANs, dir/vhost busting (ffuf)",
+            network="dir/vhost busting issues many requests — visible in web logs"),
+        gate=lambda f: any(s.is_web for s in f.get_services()),
+        instances=_web_instances,
+        requires=(Requirement("service", "a detected web service (run svc.version_detect)"),),
+        deps=("curl",),
+    ))
+
+    # Non-AD service enumeration — one instance per detected service the legacy
+    # dispatcher knows (databases, DNS, SNMP, mail, RDP, NFS, Docker, Redis, …).
+    # AD/creds ports are covered by their own branches and skipped here.
+    reg.register(Action(
+        "service.enum", Tier.GREEN, _h_service_enum,
+        group="service", order=1,
+        footprint=Footprint(
+            summary="protocol-specific enumeration for non-AD services "
+                    "(databases, DNS, SNMP, mail, RDP, NFS, Docker, Redis, …)"),
+        gate=lambda f: bool(_service_instances(f)),
+        instances=_service_instances,
+        requires=(Requirement("service", "a detected non-AD service (run svc.version_detect)"),),
+    ))
+
     # Anonymous SMB, decomposed into cohesive sub-actions. `run smb` runs the
     # whole branch; each is also individually runnable.
     _smb_gate = lambda f: f.has("tcp/445")          # noqa: E731
@@ -486,6 +705,12 @@ def build_registry() -> ActionRegistry:
     reg.register(Action(
         "smb.policy", Tier.GREEN, _h_smb_policy, group="smb", order=4,
         footprint=Footprint(summary="domain password / lockout policy (safe-to-spray signal)"),
+        gate=_smb_gate, requires=_smb_req, deps=("nxc",),
+    ))
+    reg.register(Action(
+        "smb.signing", Tier.GREEN, _h_smb_signing, group="smb", order=5,
+        footprint=Footprint(
+            summary="SMB signing posture — identifies NTLM-relay targets (recon, not relay)"),
         gate=_smb_gate, requires=_smb_req, deps=("nxc",),
     ))
 
@@ -609,17 +834,43 @@ def build_registry() -> ActionRegistry:
             summary="enumerate writable users/groups/computers (privesc targets)"),
         gate=_authed, requires=_authed_reqs, deps=("bloodyAD",),
     ))
+    reg.register(Action(
+        "ad.adcs_enum", Tier.YELLOW, _h_adcs_enum,
+        group="ad", order=3,
+        footprint=Footprint(
+            summary="enumerate vulnerable ADCS certificate templates (recon, not ESC abuse)"),
+        gate=_authed, requires=_authed_reqs, deps=("certipy-ad",),
+    ))
+    reg.register(Action(
+        "ad.coerce_surface", Tier.GREEN, _h_coerce_surface,
+        group="ad", order=4,
+        footprint=Footprint(
+            summary="detect NTLM-coercion RPC endpoints (PrinterBug/PetitPotam/DFSCoerce) "
+                    "— relay-target recon, not coercion"),
+        gate=lambda f: f.has("tcp/135"),
+        requires=(Requirement("tcp/135", "MSRPC (tcp/135) open"),),
+        deps=("impacket-rpcdump",),
+    ))
+    reg.register(Action(
+        "mssql.enum", Tier.YELLOW, _h_mssql_enum,
+        group="service", order=2,
+        footprint=Footprint(
+            summary="authenticated MSSQL enum — databases + linked servers (lateral surface)"),
+        gate=lambda f: f.has("tcp/1433") and f.has("valid_cred"),
+        requires=(Requirement("tcp/1433", "MSSQL (tcp/1433) open"),
+                  Requirement("valid_cred", "a valid credential")),
+        deps=("nxc",),
+    ))
 
     reg.register(Action(
-        "access.shell", Tier.YELLOW, _h_shell,
+        "access.exec", Tier.YELLOW, _h_exec,
         group="access", order=1,
-        manual_only=True,          # only ever via an explicit `run access.shell`
+        manual_only=True,          # only ever via an explicit run (needs a command)
         footprint=Footprint(
-            summary="hand the terminal off to an interactive evil-winrm/psexec/"
-                    "ssh session (operator-driven; not C2)",
-            windows_events=("4624/4672 (interactive/admin logon)",
-                            "7045 (psexec service install)")),
-        gate=_can_shell,
+            summary="run ONE command non-interactively via a known credential "
+                    "(nxc -x / sshpass); captures stdout — not a shell, not C2",
+            windows_events=("4624/4672 (logon)", "7045 (service exec)")),
+        gate=_can_exec,
         requires=(Requirement("valid_cred", "a valid credential"),
                   Requirement("tcp/5985", "WinRM (5985/5986) / admin SMB (445) / SSH (22)")),
     ))

@@ -21,18 +21,10 @@ def enumerate_service(
     findings: Findings,
     available: set[str],
 ) -> list[Discovery]:
-    port = service.port
-    name = service.name.lower()
-
-    handler = _PORT_MAP.get(port)
-    if handler is None:
-        for pattern, fn in _NAME_MAP.items():
-            if pattern in name:
-                handler = fn
-                break
+    handler = service_handler(service)
 
     findings.h3(
-        f"{'TCP' if service.proto == 'tcp' else 'UDP'} {port} — {service.name.upper()}"
+        f"{'TCP' if service.proto == 'tcp' else 'UDP'} {service.port} — {service.name.upper()}"
         + (f" ({service.version})" if service.version else "")
     )
 
@@ -1659,6 +1651,19 @@ _NAME_MAP: dict[str, object] = {
     "ajp":           _ajp,
     "apache-jserv":  _ajp,
 }
+
+
+def service_handler(service: Service):
+    """The enumeration handler for a service (by port, then name pattern), or None
+    if no specific handler exists. Public so the engine can tell which services
+    are enumerable before dispatching a `service.enum` instance."""
+    handler = _PORT_MAP.get(service.port)
+    if handler is None:
+        name = service.name.lower()
+        for pattern, fn in _NAME_MAP.items():
+            if pattern in name:
+                return fn
+    return handler
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

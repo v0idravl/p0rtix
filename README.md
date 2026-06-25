@@ -18,6 +18,7 @@ archived separately so nothing is lost.
 - **Web:** headers, WhatWeb fingerprint, redirect detection, SSL cert SAN extraction, directory bust, vhost bust, crawl (scope-filtered)
 - **Services:** FTP, SSH, SMTP, DNS, RPC/NFS, MSRPC, SMB, SNMP, LDAP, Rsync, MSSQL, Oracle, MySQL, RDP, PostgreSQL, WinRM, Redis, MongoDB
 - **Creds mode** (`--mode creds` or `--mode scan,creds`) — authenticated AD enumeration in authorized environments: SMB validation, ldapdomaindump, Kerberoasting, AS-REP roasting, BloodHound collection, ADCS template review, and evidence capture
+- **MCP server** (`--mode mcp` / `p0rtix-mcp`) — drives the recon engine from an AI agent (Claude) over the Model Context Protocol. A small generic tool surface (`list_actions`, `run_action`, `run_all`, `get_state`, `set_noise`, `set_breadth`, `export_handoff`) exposes the full fact-driven action catalogue; quiet/surgical by default via the noise ladder, with `export_handoff` emitting a structured inventory (creds, hosts, services, hashes, relay targets) for an exploitation agent (e.g. metasploitmcp). Recon only — it tests access and runs single commands non-interactively, never an interactive shell
 - Reactive follow-up — discovered vhosts and SSL SANs prompt for `/etc/hosts` addition, then get fully enumerated
 - Scope enforcement — crawl and follow-up scans never touch out-of-scope hosts
 - Single `findings.md` updated in real time (key findings only)
@@ -106,7 +107,7 @@ sudo -E python3 p0rtix.py 10.10.11.34 --domain test.htb --mode scan,creds -u '<U
 | `--name` | domain or IP | Output directory name |
 | `--workspace` | `.` | Root directory for all output |
 | `--workers` | `6` | Parallel enumeration threads |
-| `--mode` | `scan` | `scan` · `creds` · `scan,creds` |
+| `--mode` | `console` (or `scan,creds` with creds) | `scan` · `creds` · `scan,creds` · `console` · `mcp` |
 | `-u / --username` | — | Username for creds mode |
 | `-p / --password` | — | Password for creds mode |
 | `--creds` | — | File of `user:pass` pairs for creds mode |
@@ -153,6 +154,38 @@ certipy-ad auth               →   authenticate with PFX → NT hash
 **ESC4** additionally patches the template first (`certipy-ad template -save-old`) and restores it after.
 
 If `-vulnerable` returns nothing despite enabled templates existing, a fallback scan runs with `-enabled` and saves the full JSON to `loot/certipy_full.json` for manual review.
+
+---
+
+## MCP Mode (AI agent)
+
+p0rtix can run as a [Model Context Protocol](https://modelcontextprotocol.io) server so an AI agent (Claude) drives a complete, fact-driven recon process. Install the optional dependency and launch against a target:
+
+```bash
+pip install -e '.[mcp]'          # adds the `mcp` SDK
+p0rtix-mcp 10.10.11.34 --domain test.htb --workspace ~/engagements
+# or: python3 p0rtix.py 10.10.11.34 --domain test.htb --mode mcp
+```
+
+It speaks stdio; point your agent's MCP client config at the `p0rtix-mcp` command.
+
+**Doctrine — recon, not C2.** p0rtix owns reconnaissance and credentialed enumeration and stops there: it tests access (`creds.test`) and runs a single command non-interactively (`access.exec`), but never opens an interactive shell. Discovered facts leave via `export_handoff` for a separate exploitation agent (e.g. metasploitmcp).
+
+**Tool surface (generic, mirrors the engine).** Every recon capability is an *action*; new actions are callable with no new tool code:
+
+| Tool | Purpose |
+|------|---------|
+| `get_state` | discovered facts (ports, users, creds, hashes, signing) + scheduler status |
+| `list_actions` | the catalogue with tier, group, footprint, and a `why` for planning |
+| `run_action(name, port?, args?)` | run one action; returns `{summary, facts_delta, findings_md}` |
+| `run_group(group)` / `run_all(noise?)` | run a branch / everything at/below the noise ceiling |
+| `set_noise(level)` | noise ceiling: `passive` → `green` → `yellow` → `red` (quiet by default) |
+| `set_breadth(level)` | effort knob `concise` → `standard` → `broad` (wordlists/crack rules), orthogonal to noise |
+| `arm_dangerous` | unlock RED-tier actions |
+| `add_fact(kind, value)` · `reload` · `recheck` | seed/refresh facts |
+| `export_handoff` | structured inventory (hosts, domain, open ports, valid/admin creds, hashes, relay target) |
+
+The action catalogue spans discovery, **web** and **service** enumeration (databases, DNS, SNMP, mail, RDP, …), anonymous SMB/LDAP, Kerberos, offline cracking, credentialed AD (domaindump, Kerberoast, BloodHound, ADCS templates, writable objects), SMB-signing/coercion **relay-target recon**, and non-interactive `access.exec`.
 
 ---
 

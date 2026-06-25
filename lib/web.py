@@ -9,12 +9,7 @@ from lib.hosts import HostsManager
 from lib.models import Discovery, Service
 from lib.runner import Runner
 from lib.scope import Scope
-
-# SecLists paths
-_WORDLIST_DIRS       = "/usr/share/seclists/Discovery/Web-Content/common.txt"
-_WORDLIST_DIRS_SMALL = "/usr/share/seclists/Discovery/Web-Content/raft-small-directories.txt"
-_WORDLIST_VHOST      = "/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt"
-_WORDLIST_API        = "/usr/share/seclists/Discovery/Web-Content/api/objects.txt"
+from lib.wordlists import Breadth, web_wordlist
 
 # ffuf tuning — conservative for CTF targets
 _FFUF_THREADS  = 20       # lower than before to avoid tripping rate limits / crashing services
@@ -118,6 +113,7 @@ def enumerate_web(
     available: set[str],
     is_followup: bool = False,
     deep: bool = False,
+    breadth: Breadth = Breadth.STANDARD,
 ) -> list[Discovery]:
     """
     Web enumeration for one port/hostname.
@@ -127,6 +123,9 @@ def enumerate_web(
 
     Deep mode (--deep): additionally runs cewl+dir bust, arjun param discovery,
     and the full API endpoint scanner.
+
+    `breadth` scales the dir/vhost/API wordlists (concise→broad); BROAD wordlists
+    take far longer but leave no stone unturned.
     """
     port = service.port
     scheme = service.scheme
@@ -225,12 +224,12 @@ def enumerate_web(
     # ── 19. Directory bust ────────────────────────────────────────────────────
     if "ffuf" in available:
         print(f"    → dir bust")
-        _dir_bust(base_url, runner, findings, fp)
+        _dir_bust(base_url, runner, findings, fp, breadth)
 
     # ── 20. API endpoint discovery (deep only) ────────────────────────────────
     if deep and "ffuf" in available:
         print(f"    → API bust (deep)")
-        _api_bust(base_url, runner, findings)
+        _api_bust(base_url, runner, findings, breadth)
 
     # ── 21. cewl + targeted dir bust (deep only) ──────────────────────────────
     if deep and "cewl" in available and "ffuf" in available:
@@ -246,7 +245,7 @@ def enumerate_web(
     # ── 23. Vhost bust ────────────────────────────────────────────────────────
     if not is_followup and domain and "ffuf" in available:
         print(f"    → vhost bust")
-        vhosts = _vhost_bust(ip, port, scheme, domain, runner, findings)
+        vhosts = _vhost_bust(ip, port, scheme, domain, runner, findings, breadth)
         for vh in vhosts:
             if scope.check(vh):
                 discoveries.append(Discovery(
@@ -902,15 +901,14 @@ def _ffuf_extensions(fp: dict) -> list[str]:
     return ["-e", ".php,.html,.txt,.xml,.json"]
 
 
-def _dir_bust(base_url: str, runner: Runner, findings: Findings, fp: dict):
-    wl = _WORDLIST_DIRS if _exists(_WORDLIST_DIRS) else (
-        _WORDLIST_DIRS_SMALL if _exists(_WORDLIST_DIRS_SMALL) else None
-    )
+def _dir_bust(base_url: str, runner: Runner, findings: Findings, fp: dict,
+              breadth: Breadth = Breadth.STANDARD):
+    wl = web_wordlist("dirs", breadth)
     if not wl:
         findings.note("No dir-bust wordlist found — skipping")
         return
 
-    findings.h4("Directory Bust")
+    findings.h4(f"Directory Bust ({breadth.label})")
     cmd = [
         "ffuf", "-u", f"{base_url}/FUZZ",
         "-w", wl,
@@ -975,8 +973,11 @@ def _dir_bust_cewl(base_url: str, wordlist: str, runner: Runner, findings: Findi
 
 # ── API endpoint discovery ────────────────────────────────────────────────────
 
-def _api_bust(base_url: str, runner: Runner, findings: Findings):
-    wl = _WORDLIST_API if _exists(_WORDLIST_API) else _WORDLIST_DIRS
+def _api_bust(base_url: str, runner: Runner, findings: Findings,
+              breadth: Breadth = Breadth.STANDARD):
+    wl = web_wordlist("api", breadth) or web_wordlist("dirs", breadth)
+    if not wl:
+        return
     api_prefixes = ["/api", "/v1", "/v2", "/api/v1", "/api/v2", "/rest", "/graphql"]
 
     active_prefixes: list[str] = []
@@ -1019,19 +1020,21 @@ def _api_bust(base_url: str, runner: Runner, findings: Findings):
 # ── Vhost bust ────────────────────────────────────────────────────────────────
 
 def _vhost_bust(ip: str, port: int, scheme: str, domain: str,
-                runner: Runner, findings: Findings) -> list[str]:
-    if not _exists(_WORDLIST_VHOST):
-        findings.note(f"Wordlist missing: `{_WORDLIST_VHOST}` — skipping vhost bust")
+                runner: Runner, findings: Findings,
+                breadth: Breadth = Breadth.STANDARD) -> list[str]:
+    wl = web_wordlist("vhost", breadth)
+    if not wl:
+        findings.note("Vhost wordlist missing — skipping vhost bust")
         return []
 
     baseline = _vhost_baseline(ip, port, scheme)
     url = _build_url(scheme, ip, port)
 
-    findings.h4("Vhost Bust")
+    findings.h4(f"Vhost Bust ({breadth.label})")
     cmd = [
         "ffuf", "-u", url,
         "-H", f"Host: FUZZ.{domain}",
-        "-w", _WORDLIST_VHOST,
+        "-w", wl,
         "-fc", "404",
         "-t", str(_FFUF_THREADS),
         "-timeout", _REQ_TIMEOUT,
@@ -1176,7 +1179,3 @@ def _build_url(scheme: str, hostname: str, port: int) -> str:
 
 def _label(url: str) -> str:
     return re.sub(r"[^a-z0-9]", "_", url.lower()).strip("_")[:40]
-
-
-def _exists(path: str) -> bool:
-    return Path(path).exists()

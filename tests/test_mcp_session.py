@@ -1,0 +1,252 @@
+"""MCP session tests — the generic engine-mirror surface.
+
+No external tools run: nmap/service calls are monkeypatched, exactly like the
+console smoke tests. These cover the snapshot-diff (`facts_delta`), the handoff
+shape, posture gating, fact seeding, and that a blocked/dormant action returns a
+`why` instead of dispatching."""
+from types import SimpleNamespace
+
+import pytest
+
+from lib import nmap, services
+from lib.mcp.session import McpSession, SessionManager, snapshot_diff
+
+
+def _args(tmp_path, **over):
+    base = dict(workspace=str(tmp_path), deep=False, users=None, level=0, headless=True)
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def _session(tmp_path, **over):
+    return McpSession("192.0.2.10", over.pop("domain", "contoso.local"),
+                      "mcp", _args(tmp_path, **over),
+                      available={"nmap", "nxc", "ldapsearch"})
+
+
+# ── SessionManager (static registration → open_target) ────────────────────────
+def test_manager_has_no_current_until_open(tmp_path):
+    mgr = SessionManager(_args(tmp_path), available={"nmap"})
+    assert mgr.current is None
+    s = mgr.open("10.0.0.5", "corp.local", "boxA")
+    assert mgr.current is s
+    assert s.get_state()["target"] == "10.0.0.5"
+    assert s.get_state()["domain"] == "corp.local"
+
+
+def test_manager_reopen_resumes_same_session(tmp_path):
+    mgr = SessionManager(_args(tmp_path), available={"nmap"})
+    s1 = mgr.open("10.0.0.5", None, "boxA")
+    s1.facts.add_user("alice")
+    s2 = mgr.open("10.0.0.5", None, "boxA")          # same key → same session
+    assert s2 is s1
+    assert "alice" in s2.get_state()["users"]
+
+
+def test_manager_switches_between_targets(tmp_path):
+    mgr = SessionManager(_args(tmp_path), available={"nmap"})
+    mgr.open("10.0.0.5", None, "boxA")
+    mgr.open("10.0.0.6", None, "boxB")
+    assert mgr.current.get_state()["target"] == "10.0.0.6"
+    assert set(mgr.targets()) == {"10.0.0.5/boxA", "10.0.0.6/boxB"}
+
+
+# ── snapshot diff ─────────────────────────────────────────────────────────────
+def test_snapshot_diff_reports_new_facts(tmp_path):
+    s = _session(tmp_path)
+    before = s.facts.snapshot()
+    s.facts.add_user("administrator")
+    s.facts.add_open_port("tcp", 445)
+    s.facts.add_valid_cred("svc", "Pass1", "manual")
+    after = s.facts.snapshot()
+
+    delta = snapshot_diff(before, after)
+    assert "administrator" in delta["users"]
+    assert ["tcp", 445] in delta["open_ports"]
+    assert ["svc", "Pass1"] in delta["valid_creds"]
+
+
+def test_snapshot_diff_empty_when_nothing_changes(tmp_path):
+    s = _session(tmp_path)
+    snap = s.facts.snapshot()
+    assert snapshot_diff(snap, snap) == {}
+
+
+# ── inspection ────────────────────────────────────────────────────────────────
+def test_get_state_reports_posture_and_seeded_domain(tmp_path):
+    s = _session(tmp_path)
+    st = s.get_state()
+    assert st["target"] == "192.0.2.10"
+    assert st["domain"] == "contoso.local"
+    assert st["posture"] == "passive"
+    assert st["open_ports"] == []
+
+
+def test_list_actions_classifies_state_and_is_json_safe(tmp_path):
+    s = _session(tmp_path)
+    rows = s.list_actions()
+    by_name = {r["name"]: r for r in rows}
+    # discovery is gate-open but PASSIVE posture blocks green-tier actions
+    assert by_name["discovery.tcp_quick"]["state"] == "blocked"
+    assert by_name["discovery.tcp_quick"]["tier"] == "green"
+    # every row carries a one-line reason
+    assert all(r["why"] for r in rows)
+
+
+# ── posture ───────────────────────────────────────────────────────────────────
+def test_set_noise_raises_and_unblocks(tmp_path):
+    s = _session(tmp_path)
+    assert s.set_noise("green") == {"ok": True, "noise": "green"}
+    s.facts.add_open_port("tcp", 445)
+    smb = [r for r in s.list_actions() if r["name"] == "smb.users"][0]
+    assert smb["state"] == "available"
+
+
+def test_red_is_locked_until_armed(tmp_path):
+    s = _session(tmp_path)
+    assert s.set_noise("red")["ok"] is False
+    assert s.arm_dangerous() == {"ok": True, "red_unlocked": True}
+    assert s.set_noise("red") == {"ok": True, "noise": "red"}
+
+
+def test_set_breadth_is_orthogonal_to_noise(tmp_path):
+    s = _session(tmp_path)
+    assert s.get_state()["breadth"] == "standard"        # sensible default
+    assert s.set_breadth("broad") == {"ok": True, "breadth": "broad"}
+    assert s.get_state()["breadth"] == "broad"
+    assert s.get_state()["posture"] == "passive"         # noise unchanged
+    assert s.set_breadth("bogus")["ok"] is False
+
+
+def test_versioned_services_surface_in_state_delta_and_handoff(tmp_path):
+    """The service product/version (e.g. 'HttpFileServer httpd 2.3') must be
+    structured, not just in findings_md — it's the exploit-selection signal for
+    the metasploit handoff. Regression for the Optimum/HFS live test."""
+    from lib.models import Service
+    s = _session(tmp_path)
+    before = s.facts.snapshot()
+    s.facts.add_services([Service(80, "tcp", "http", "HttpFileServer httpd 2.3",
+                                  is_web=True, scheme="http")])
+    after = s.facts.snapshot()
+
+    delta = snapshot_diff(before, after)
+    assert delta["services"][0]["version"] == "HttpFileServer httpd 2.3"
+    assert s.get_state()["services"][0]["name"] == "http"
+    h = s.export_handoff()
+    assert {"port": 80, "proto": "tcp", "name": "http",
+            "version": "HttpFileServer httpd 2.3"} in h["services"]
+
+
+def test_list_actions_exposes_web_and_service_groups(tmp_path):
+    s = _session(tmp_path)
+    groups = {r["group"] for r in s.list_actions()}
+    assert {"web", "service"} <= groups                  # broadened beyond AD
+    names = {r["name"] for r in s.list_actions()}
+    assert "web.enum" in names and "service.enum" in names
+
+
+# ── fact population ───────────────────────────────────────────────────────────
+def test_add_fact_creds_seeds_user_and_cred(tmp_path):
+    s = _session(tmp_path)
+    assert s.add_fact("creds", "svc-web:Summer2024")["ok"] is True
+    st = s.get_state()
+    assert ["svc-web", "Summer2024"] in st["valid_creds"]
+    assert "svc-web" in st["users"]
+
+
+def test_add_fact_rejects_bad_creds_and_unknown_kind(tmp_path):
+    s = _session(tmp_path)
+    assert s.add_fact("creds", "no-colon")["ok"] is False
+    assert s.add_fact("bogus", "x")["ok"] is False
+
+
+# ── execution ─────────────────────────────────────────────────────────────────
+def test_run_action_dormant_returns_why_not_dispatch(tmp_path):
+    s = _session(tmp_path)
+    s.set_noise("green")
+    res = s.run_action("ldap.users")  # no LDAP port open → dormant
+    assert res["ok"] is False
+    assert res["dispatched"] == 0
+    assert "needs" in res["why"].lower()
+
+
+def test_run_action_dispatches_and_returns_facts_delta(tmp_path, monkeypatch):
+    def fake_users(ip, port, runner, buf, available):
+        runner.ws.add_user("alice", authoritative=True)
+        buf.bullet("found alice")
+
+    monkeypatch.setattr(services, "_smb_users", fake_users)
+    s = _session(tmp_path)
+    s.set_noise("green")
+    s.facts.add_open_port("tcp", 445)
+
+    res = s.run_action("smb.users")
+    assert res["ok"] is True
+    assert res["dispatched"] == 1
+    assert "alice" in res["facts_delta"]["users"]
+    assert "alice" in res["findings_md"]
+
+
+def test_run_group_runs_branch(tmp_path, monkeypatch):
+    for fn in ("_smb_users", "_smb_shares", "_smb_spider_shares", "_smb_policy"):
+        monkeypatch.setattr(services, fn, lambda *a, **k: None)
+    s = _session(tmp_path)
+    s.set_noise("green")
+    s.facts.add_open_port("tcp", 445)
+    res = s.run_group("smb")
+    assert res["ok"] is True
+    assert res["dispatched"] >= 1
+
+
+def test_run_all_cascades_from_discovery(tmp_path, monkeypatch):
+    monkeypatch.setattr(nmap, "discover_tcp_quick", lambda ip, r, ws: [445])
+    monkeypatch.setattr(nmap, "discover_tcp_common", lambda ip, r, ws, exclude=None: [])
+    monkeypatch.setattr(nmap, "discover_tcp_open", lambda ip, r, ws, exclude=None: [445])
+    monkeypatch.setattr(nmap, "discover_udp", lambda ip, r, ws: [])
+    monkeypatch.setattr(nmap, "version_detect", lambda ip, ports, r, ws: [])
+    for fn in ("_smb_users", "_smb_shares", "_smb_spider_shares", "_smb_policy"):
+        monkeypatch.setattr(services, fn, lambda *a, **k: None)
+
+    s = _session(tmp_path)
+    res = s.run_all("green")
+    assert res["ok"] is True
+    assert res["dispatched"] >= 1
+    assert ["tcp", 445] in res["facts_delta"].get("open_ports", [])
+
+
+# ── access.exec via the generic run_action args passthrough ───────────────────
+def test_run_action_threads_command_arg_to_access_exec(tmp_path, monkeypatch):
+    from lib.engine import access
+    seen = {}
+
+    def fake_run(self, cmd, label, timeout=None):
+        seen["cmd"] = cmd
+        return "nt authority\\system"
+
+    monkeypatch.setattr("lib.runner.Runner.run", fake_run)
+    s = _session(tmp_path)
+    s.arm_dangerous()
+    s.set_noise("yellow")
+    s.facts.add_open_port("tcp", 5985)
+    s.facts.add_valid_cred("svc-alfresco", "s3rvice", "WINRM")
+
+    res = s.run_action("access.exec", args={"command": "whoami"})
+    assert res["ok"] is True
+    assert seen["cmd"][-2:] == ["-x", "whoami"]
+    assert "system" in res["findings_md"].lower()
+
+
+# ── handoff ───────────────────────────────────────────────────────────────────
+def test_export_handoff_shape(tmp_path):
+    s = _session(tmp_path)
+    s.facts.add_open_port("tcp", 445)
+    s.facts.add_admin_cred("administrator", "P@ss")
+    s.facts.add_hash("kerberoast", "svc-sql", cracked=False)
+
+    h = s.export_handoff()
+    assert h["hosts"] == ["192.0.2.10"]
+    assert h["domain"] == "contoso.local"
+    assert {"proto": "tcp", "port": 445} in h["open_ports"]
+    assert {"user": "administrator", "password": "P@ss"} in h["admin_creds"]
+    assert {"user": "administrator", "password": "P@ss"} in h["valid_creds"]
+    assert h["hashes"][0]["kind"] == "kerberoast"

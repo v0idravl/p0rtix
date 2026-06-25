@@ -19,10 +19,14 @@ classifiers = [
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
+mcp = ["mcp>=1.2"]
+
+[project.scripts]
+p0rtix-mcp = "lib.mcp.server:main"
 
 [tool.setuptools]
 py-modules = ["p0rtix"]
-packages = ["lib"]
+packages = ["lib", "lib.engine", "lib.mcp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

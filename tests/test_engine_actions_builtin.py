@@ -229,7 +229,7 @@ def test_crack_records_cred_pair_for_targeted_test(tmp_path, monkeypatch):
     from lib.engine.action import Tier
     from lib import crack
     monkeypatch.setattr(crack, "crack_hashes",
-                        lambda ws, r, f, a: [("svc-alfresco", "s3rvice")])
+                        lambda ws, r, f, a, breadth=None: [("svc-alfresco", "s3rvice")])
     fs, posture, reg, sched = _setup(tmp_path, Tier.PASSIVE, tools=_ALL_TOOLS)
     fs.add_hash("asrep")
 
@@ -310,7 +310,7 @@ def test_crack_marks_hash_cracked_and_closes_action(tmp_path, monkeypatch):
     from lib.engine.action import Tier
     from lib import crack
     monkeypatch.setattr(crack, "crack_hashes",
-                        lambda ws, r, f, a: [("svc-alfresco", "s3rvice")])
+                        lambda ws, r, f, a, breadth=None: [("svc-alfresco", "s3rvice")])
     fs, posture, reg, sched = _setup(tmp_path, Tier.PASSIVE, tools=_ALL_TOOLS)
     fs.add_hash("asrep", "svc-alfresco")
     assert "crack.hashes" in {a.name for a, _ in reg.available(fs, posture, sched.tried)}
@@ -359,7 +359,7 @@ def test_ldap_branch_decomposed_into_cohesive_actions(tmp_path, monkeypatch):
                           "_ldap_groups", "_ldap_delegation"}
 
 
-def test_smb_branch_group_runs_all_four(tmp_path, monkeypatch):
+def test_smb_branch_group_runs_all_subactions(tmp_path, monkeypatch):
     from lib import services
     from lib.engine.action import Tier
     calls = []
@@ -369,8 +369,9 @@ def test_smb_branch_group_runs_all_four(tmp_path, monkeypatch):
     fs, posture, reg, sched = _setup(tmp_path, Tier.GREEN, tools=_ALL_TOOLS)
     fs.add_open_port("tcp", 445)
 
+    # users + shares + spider + policy + signing (signing runs via the runner)
     n = sched.run_group("smb")
-    assert n == 4
+    assert n == 5
     assert set(calls) == {"_smb_users", "_smb_shares", "_smb_spider_shares", "_smb_policy"}
 
 

@@ -170,9 +170,11 @@ class Scheduler:
         return bool(cleared)
 
     def run_action(self, name: str, posture: Posture | None = None,
-                   *, port: int | None = None) -> int:
+                   *, port: int | None = None, extra_args: dict | None = None) -> int:
         """Dispatch available instances of one named action. With `port`, dispatch
         only the instance for that port (e.g. version-detect a single service).
+        `extra_args` is merged into each dispatched instance's args (e.g. a free-text
+        `command` for access.exec) — it does not affect the instance identity/key.
 
         An explicit run repeats a previously-run action (manual override) — the
         tried-state is re-armed first, and the runner re-executes (no cached
@@ -191,6 +193,8 @@ class Scheduler:
                     continue
                 if port is not None and args.get("port") != port:
                     continue
+                if extra_args:
+                    args = {**args, **extra_args}
                 self.dispatch(a, args)
                 n += 1
         finally:

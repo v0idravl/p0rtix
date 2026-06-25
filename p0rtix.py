@@ -574,9 +574,9 @@ def main():
         else:
             args.mode = "console"
 
-    _VALID_MODES = {"init", "scan", "creds", "scan,creds", "followup", "console"}
+    _VALID_MODES = {"init", "scan", "creds", "scan,creds", "followup", "console", "mcp"}
     if args.mode not in _VALID_MODES:
-        sys.exit(f"[!] Invalid --mode '{args.mode}'. Choose: init | scan | creds | scan,creds | followup | console")
+        sys.exit(f"[!] Invalid --mode '{args.mode}'. Choose: init | scan | creds | scan,creds | followup | console | mcp")
 
     if not (0 <= args.level <= 9):
         sys.exit("[!] --level must be between 0 and 9")
@@ -598,6 +598,23 @@ def main():
         available = check_deps(install_missing=not args.no_install)
         from lib.engine.runmode import run_console_mode
         run_console_mode(args.ip, args.domain, args.name, args, available)
+        return
+
+    # mcp: serve the engine as an MCP (stdio) server for an AI agent to drive.
+    # Registers statically — the agent calls open_target(ip) to begin (an optional
+    # IP here pre-opens one). Opens at PASSIVE; the agent steers noise itself.
+    # Requires the [mcp] extra (`pip install p0rtix[mcp]`). No install prompts.
+    if args.mode == "mcp":
+        try:
+            from lib.mcp.server import build_server
+        except ImportError as exc:
+            sys.exit(f"[!] MCP mode needs the 'mcp' SDK — pip install p0rtix[mcp] ({exc})")
+        from lib.mcp.session import SessionManager
+        available = check_deps(install_missing=not args.no_install)
+        manager = SessionManager(args, available)
+        if args.ip:
+            manager.open(args.ip, args.domain, args.name)
+        build_server(manager).run()
         return
 
     if not _has_scan_privs():

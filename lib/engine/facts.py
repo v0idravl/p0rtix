@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from lib.models import Service
+from lib.wordlists import Breadth
 from lib.workspace import Workspace
 
 
@@ -59,6 +60,12 @@ class FactStore(Workspace):
         # captured hashes keyed by (kind, principal) → {cracked: bool, plaintext}
         self._hashes: dict[tuple[str, str], dict] = {}
         self._engine_lock = threading.Lock()             # guards the new fields above
+        # concise→broad effort knob (orthogonal to the noise ladder); drives crack
+        # rule depth today, web wordlist breadth next. Default: a sensible middle.
+        self.breadth: Breadth = Breadth.STANDARD
+        # SMB signing posture: True=required, False=not required (relay target),
+        # None=unknown. Surfaced in the handoff so an agent can pick relay targets.
+        self._smb_signing_required: bool | None = None
 
     # ── event plumbing ────────────────────────────────────────────────────────
     def subscribe(self, fn: Listener) -> None:
@@ -239,6 +246,15 @@ class FactStore(Workspace):
         if changed:
             self._emit(FactEvent("hash", ("cracked", principal)))
 
+    def set_smb_signing(self, required: bool) -> None:
+        """Record whether SMB signing is required. `required=False` marks this host
+        as an NTLM-relay target. Emits so a planner can react."""
+        with self._engine_lock:
+            changed = self._smb_signing_required is not required
+            self._smb_signing_required = required
+        if changed:
+            self._emit(FactEvent("smb_signing", required))
+
     def set_proto_status(self, proto: str, status: ProtoStatus) -> None:
         with self._engine_lock:
             changed = self._proto_status.get(proto) is not status
@@ -312,6 +328,12 @@ class FactStore(Workspace):
                 for (kind, prin), rec in sorted(self._hashes.items())
             ]
             scanned_tcp = len(self._scanned_tcp)
+            smb_signing = self._smb_signing_required
+            services = [
+                {"port": s.port, "proto": s.proto, "name": s.name,
+                 "version": s.version, "is_web": s.is_web, "scheme": s.scheme}
+                for s in sorted(self._services, key=lambda s: (s.proto, s.port))
+            ]
         return {
             "ip": self.ip,
             "domain": self.discovered_domain or self.domain or "",
@@ -328,6 +350,8 @@ class FactStore(Workspace):
             "hashes": hashes,
             "cred_pairs": cred_pairs,
             "scanned_tcp": scanned_tcp,
+            "smb_signing_required": smb_signing,
+            "services": services,
         }
 
     # ── reload from disk (pick up external edits to loot/*.txt) ────────────────

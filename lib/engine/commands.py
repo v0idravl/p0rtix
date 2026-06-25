@@ -30,11 +30,11 @@ commands:
   run <action> [port]          dispatch one action (re-runs it fresh if already done)
   run <group> | run-all|auto   dispatch a whole branch / everything at/below posture
   noise <green|yellow|red>     raise/lower the noise ceiling
+  breadth <concise|standard|broad>   set crack/wordlist effort (orthogonal to noise)
   add user <u> | add creds <u:p> | add domain <d>   populate facts by hand
   set dangerous on             arm RED-tier actions
   reload | recheck users       refresh loot from disk / re-arm user-list actions
   recheck <proto>              re-arm a dormant branch (e.g. recheck ldap)
-  shell                        drop to a local shell in the workspace dir
   help | exit"""
 
 
@@ -181,6 +181,16 @@ class CommandRouter:
         self._posture.lower_to(tier)
         return f"noise lowered to {tier.label}"
 
+    def _cmd_breadth(self, args) -> str:
+        from lib.wordlists import parse_breadth
+        if not args:
+            return f"breadth: {self._facts.breadth.label}"
+        b = parse_breadth(args[0], None)
+        if b is None:
+            return "usage: breadth <concise|standard|broad>"
+        self._facts.breadth = b
+        return f"breadth set to {b.label}"
+
     # ── manual fact population ────────────────────────────────────────────────
     def _cmd_set(self, args) -> str:
         if len(args) >= 2 and args[0].lower() == "domain":
@@ -227,13 +237,6 @@ class CommandRouter:
             return f"{proto} branch re-armed ({n} action(s))"
         return "usage: recheck users | recheck <proto>"
 
-    def _cmd_shell(self, args) -> str:
-        # Local shell in the workspace dir (line-mode path; the dashboard wraps
-        # this in App.suspend()).
-        from lib.engine import access
-        access.local_shell(self._facts.machine_dir)
-        return "(returned from shell)"
-
     def _cmd_help(self, args) -> str:
         return _HELP
 
@@ -250,11 +253,11 @@ class CommandRouter:
         "run-all": _cmd_run_all,
         "auto": _cmd_run_all,
         "noise": _cmd_noise,
+        "breadth": _cmd_breadth,
         "set": _cmd_set,
         "add": _cmd_add,
         "creds": _cmd_creds,
         "reload": _cmd_reload,
         "recheck": _cmd_recheck,
-        "shell": _cmd_shell,
         "help": _cmd_help,
     }

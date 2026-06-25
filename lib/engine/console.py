@@ -365,48 +365,10 @@ def _build_dashboard(router, scheduler, registry, facts, posture):
                                          scheduler.tried))
 
         def _run_action(self, name, port=None) -> None:
-            # access.shell hands the terminal to an interactive child — it must run
-            # on the UI thread inside App.suspend(), not a worker, so Textual yields
-            # the tty and restores itself on exit.
-            if name == "access.shell":
-                self._launch_shell()
-                return
             where = f" port {port}" if port is not None else ""
             self._log(f"[b]› running [cyan]{name}[/]{where}…[/]")
             self.run_worker(lambda: self._dispatch(name, port), thread=True,
                             group="actions", exit_on_error=False)
-
-        def _launch_local_shell(self) -> None:
-            from lib.engine import access
-            if access.in_tmux():
-                access.local_shell(facts.machine_dir)     # new tmux window, non-blocking
-                self._log("[b]› opened a shell in a new tmux window[/] "
-                          "[dim](prefix+n to switch back)[/]")
-                return
-            self._log("[b]› dropping to a shell in the workspace — `exit` to "
-                      "return to the console[/]")
-            with self.suspend():
-                access.local_shell(facts.machine_dir)
-            self._refresh()
-
-        def _launch_shell(self) -> None:
-            avail = {a.name for a, _ in registry.available(facts, posture,
-                                                           scheduler.tried)}
-            if "access.shell" not in avail:
-                self._log("[yellow]access.shell: " + registry.why(
-                    "access.shell", facts, posture, scheduler.tried) + "[/]")
-                return
-            from lib.engine import access
-            if access.in_tmux():
-                scheduler.run_action("access.shell")      # new tmux window, non-blocking
-                self._log("[b]› opened the shell in a new tmux window[/] "
-                          "[dim](prefix+n to switch back)[/]")
-                self._refresh()
-                return
-            self._log("[b]› handing off to interactive shell — exit it to return[/]")
-            with self.suspend():
-                scheduler.run_action("access.shell")
-            self._refresh()
 
         def _dispatch(self, name, port=None) -> None:          # worker thread
             if registry.get(name) is None and name in registry.group_names():
@@ -432,9 +394,7 @@ def _build_dashboard(router, scheduler, registry, facts, posture):
             # run/run-all/auto go through the worker so the UI stays responsive;
             # everything else is cheap and runs inline.
             low = line.lower()
-            if low == "shell":
-                self._launch_local_shell()
-            elif low in ("run-all", "auto"):
+            if low in ("run-all", "auto"):
                 self.action_run_all()
             elif low.startswith("run "):
                 parts = line.split()
