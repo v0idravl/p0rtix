@@ -173,6 +173,17 @@ def enumerate_web(
     print(f"    → fingerprint")
     fp = _fingerprint(base_url, port, runner, findings, available, host_header)
 
+    # Detect catch-all redirect routing (vhost-only servers 30x every path to their
+    # vhost name). When present, signature probes and the dir bust filter the blanket
+    # redirect so they don't report a false hit on every path.
+    catchall = _catchall_redirect(base_url, host_header)
+    if catchall:
+        findings.note(
+            f"Catch-all redirect detected — every path returns HTTP {catchall[0]} → "
+            f"`{catchall[1]}`. Signature probes and the dir bust filter it; the real "
+            f"content surface is the vhost, not this host."
+        )
+
     # ── 2. NTLM info disclosure — only probe IIS/Windows endpoints (saves ~10s/port on Linux) ──
     _check_ntlm_info(ip, port, runner, findings, server_hint=fp.get("server", ""))
 
@@ -196,6 +207,10 @@ def enumerate_web(
     # ── 5. Redirect detection (IP → domain) ───────────────────────────────────
     if not is_followup:
         redirect_host = _detect_redirect(ip, port, scheme)
+        if redirect_host and redirect_host != ip and not scope.check(redirect_host):
+            # The redirect is served BY the in-scope IP, so the vhost name is the
+            # same host — adopt it into scope (tight: only the IP's own target).
+            scope.adopt(redirect_host)
         if redirect_host and redirect_host != ip and scope.check(redirect_host):
             findings.bullet(f"**Redirect:** `{_build_url(scheme, ip, port)}` → `{redirect_host}`")
             discoveries.append(Discovery(
@@ -240,7 +255,7 @@ def enumerate_web(
         _run_testssl(ip, port, runner, findings)
 
     # ── 10. ADCS probe ────────────────────────────────────────────────────────
-    _check_adcs(base_url, ip, runner, findings)
+    _check_adcs(base_url, ip, runner, findings, host_header, catchall)
 
     # ── 11. Next.js ───────────────────────────────────────────────────────────
     if fp.get("is_nextjs"):
@@ -252,19 +267,19 @@ def enumerate_web(
         _wpscan(base_url, runner, findings)
 
     # ── 13. CMS detection — Joomla + Drupal ───────────────────────────────────
-    _check_cms(base_url, runner, findings, available)
+    _check_cms(base_url, runner, findings, available, host_header, catchall)
 
     # ── 14. Jenkins ───────────────────────────────────────────────────────────
     _check_jenkins(base_url, runner, findings)
 
     # ── 15. Tomcat manager ────────────────────────────────────────────────────
-    _check_tomcat(base_url, ip, runner, findings)
+    _check_tomcat(base_url, ip, runner, findings, host_header, catchall)
 
     # ── 16. phpMyAdmin ────────────────────────────────────────────────────────
-    _check_phpmyadmin(base_url, runner, findings)
+    _check_phpmyadmin(base_url, runner, findings, host_header, catchall)
 
     # ── 17. Splunk ────────────────────────────────────────────────────────────
-    _check_splunk(base_url, runner, findings)
+    _check_splunk(base_url, runner, findings, host_header, catchall)
 
     # ── 18. GraphQL ───────────────────────────────────────────────────────────
     _check_graphql(base_url, runner, findings)
@@ -272,7 +287,7 @@ def enumerate_web(
     # ── 19. Directory bust ────────────────────────────────────────────────────
     if "ffuf" in available:
         print(f"    → dir bust")
-        _dir_bust(base_url, runner, findings, fp, breadth, host_header)
+        _dir_bust(base_url, runner, findings, fp, breadth, host_header, catchall)
 
     # ── 20. API endpoint discovery (deep only) ────────────────────────────────
     if deep and "ffuf" in available:
@@ -621,6 +636,44 @@ def _check_http_methods(url: str, runner: Runner, findings: Findings,
 
 # ── Redirect detection ────────────────────────────────────────────────────────
 
+def _catchall_redirect(base_url: str, host_header: str | None = None) -> tuple[str, str] | None:
+    """Detect catch-all redirect routing: probe a path that cannot exist and see if
+    the server still answers with a redirect. Vhost-only servers (e.g. nginx that
+    302s the bare IP to its vhost name) redirect *every* path, so every signature
+    probe and dir-bust line would otherwise be a false hit. Returns
+    (status, redirect_url) of the blanket redirect, else None."""
+    r = subprocess.run(
+        ["curl", "-sk", "--max-time", "8", "-o", "/dev/null",
+         "-w", "%{http_code} %{redirect_url}"] + _hh(host_header)
+        + [f"{base_url}/p0rtix-noexist-7f3a2c"],
+        capture_output=True, text=True,
+    )
+    parts = r.stdout.strip().split()
+    if len(parts) >= 2 and parts[0] in ("301", "302", "303", "307", "308") and parts[1]:
+        return parts[0], parts[1]
+    return None
+
+
+def _probe_code(url: str, host_header: str | None = None,
+                catchall: tuple[str, str] | None = None) -> str | None:
+    """HTTP status for one signature probe. Returns None when the response is just
+    the host's catch-all redirect (matched against `catchall` from
+    _catchall_redirect), so detectors don't fire on vhost-only routing."""
+    r = subprocess.run(
+        ["curl", "-sk", "--max-time", "8", "-o", "/dev/null",
+         "-w", "%{http_code} %{redirect_url}"] + _hh(host_header) + [url],
+        capture_output=True, text=True,
+    )
+    parts = r.stdout.strip().split()
+    if not parts:
+        return None
+    code = parts[0]
+    loc = parts[1] if len(parts) > 1 else ""
+    if catchall and code in ("301", "302", "303", "307", "308") and loc == catchall[1]:
+        return None
+    return code
+
+
 def _detect_redirect(ip: str, port: int, scheme: str) -> str | None:
     url = _build_url(scheme, ip, port)
     result = subprocess.run(
@@ -783,16 +836,13 @@ def _check_cors(base_url: str, runner: Runner, findings: Findings):
 
 # ── Tomcat manager probe ──────────────────────────────────────────────────────
 
-def _check_tomcat(base_url: str, ip: str, runner: Runner, findings: Findings):
+def _check_tomcat(base_url: str, ip: str, runner: Runner, findings: Findings,
+                  host_header: str | None = None,
+                  catchall: tuple[str, str] | None = None):
     """Detect Tomcat manager — 401 = exists, 200 = no auth."""
     found: list[tuple[str, str, str]] = []
     for path, label in _TOMCAT_PATHS:
-        r = subprocess.run(
-            ["curl", "-sk", "--max-time", "8", "-o", "/dev/null",
-             "-w", "%{http_code}", f"{base_url}{path}"],
-            capture_output=True, text=True,
-        )
-        code = r.stdout.strip()
+        code = _probe_code(f"{base_url}{path}", host_header, catchall)
         if code in ("200", "401", "403", "302"):
             found.append((path, label, code))
 
@@ -821,15 +871,12 @@ def _check_tomcat(base_url: str, ip: str, runner: Runner, findings: Findings):
 
 # ── phpMyAdmin probe ──────────────────────────────────────────────────────────
 
-def _check_phpmyadmin(base_url: str, runner: Runner, findings: Findings):
+def _check_phpmyadmin(base_url: str, runner: Runner, findings: Findings,
+                      host_header: str | None = None,
+                      catchall: tuple[str, str] | None = None):
     """Detect phpMyAdmin installation."""
     for path in _PMA_PATHS:
-        r = subprocess.run(
-            ["curl", "-sk", "--max-time", "8", "-o", "/dev/null",
-             "-w", "%{http_code}", f"{base_url}{path}"],
-            capture_output=True, text=True,
-        )
-        code = r.stdout.strip()
+        code = _probe_code(f"{base_url}{path}", host_header, catchall)
         if code in ("200", "302"):
             findings.h4("phpMyAdmin")
             findings.bullet(f"**phpMyAdmin detected:** `{base_url}{path}`")
@@ -843,15 +890,12 @@ def _check_phpmyadmin(base_url: str, runner: Runner, findings: Findings):
 
 # ── Splunk probe ──────────────────────────────────────────────────────────────
 
-def _check_splunk(base_url: str, runner: Runner, findings: Findings):
+def _check_splunk(base_url: str, runner: Runner, findings: Findings,
+                  host_header: str | None = None,
+                  catchall: tuple[str, str] | None = None):
     """Detect Splunk Web — default creds: admin/changeme."""
     for path in _SPLUNK_PATHS:
-        r = subprocess.run(
-            ["curl", "-sk", "--max-time", "8", "-o", "/dev/null",
-             "-w", "%{http_code}", f"{base_url}{path}"],
-            capture_output=True, text=True,
-        )
-        if r.stdout.strip() in ("200", "302", "301"):
+        if _probe_code(f"{base_url}{path}", host_header, catchall) in ("200", "302", "301"):
             findings.h4("Splunk")
             findings.bullet(f"**Splunk Web detected:** `{base_url}{path}`")
             findings.add_summary(f"Splunk at `{base_url}` — default: admin/changeme. UF on 8089 = RCE via app")
@@ -916,15 +960,12 @@ def _check_graphql(base_url: str, runner: Runner, findings: Findings):
 
 # ── ADCS probe ────────────────────────────────────────────────────────────────
 
-def _check_adcs(base_url: str, ip: str, runner: Runner, findings: Findings):
+def _check_adcs(base_url: str, ip: str, runner: Runner, findings: Findings,
+                host_header: str | None = None,
+                catchall: tuple[str, str] | None = None):
     found: list[tuple[str, str]] = []
     for path in _ADCS_PATHS:
-        result = subprocess.run(
-            ["curl", "-sk", "--max-time", "8", "-o", "/dev/null",
-             "-w", "%{http_code}", f"{base_url}{path}"],
-            capture_output=True, text=True,
-        )
-        code = result.stdout.strip()
+        code = _probe_code(f"{base_url}{path}", host_header, catchall)
         if code in ("200", "301", "302", "401", "403"):
             found.append((path, code))
 
@@ -1023,14 +1064,11 @@ def _wpscan(base_url: str, runner: Runner, findings: Findings):
 
 # ── CMS detection — Joomla + Drupal ─────────────────────────────────────────
 
-def _check_cms(base_url: str, runner: Runner, findings: Findings, available: set[str]):
+def _check_cms(base_url: str, runner: Runner, findings: Findings, available: set[str],
+               host_header: str | None = None,
+               catchall: tuple[str, str] | None = None):
     # Joomla — admin panel at /administrator/
-    r = subprocess.run(
-        ["curl", "-sk", "--max-time", "10", "-o", "/dev/null",
-         "-w", "%{http_code}", f"{base_url}/administrator/"],
-        capture_output=True, text=True,
-    )
-    if r.stdout.strip() in ("200", "302", "301"):
+    if _probe_code(f"{base_url}/administrator/", host_header, catchall) in ("200", "302", "301"):
         findings.h4("CMS: Joomla")
         findings.bullet(f"**Joomla admin panel:** `{base_url}/administrator/`")
         if "joomscan" in available:
@@ -1193,17 +1231,24 @@ def _ffuf_extensions(fp: dict) -> list[str]:
 
 
 def _dir_bust(base_url: str, runner: Runner, findings: Findings, fp: dict,
-              breadth: Breadth = Breadth.STANDARD, host_header: str | None = None):
+              breadth: Breadth = Breadth.STANDARD, host_header: str | None = None,
+              catchall: tuple[str, str] | None = None):
     wl = web_wordlist("dirs", breadth)
     if not wl:
         findings.bullet("⚠ no dir-bust wordlist found (install seclists) — dir busting skipped")
         return
 
+    # On a catch-all-redirect host every path returns the same 30x; filter that
+    # status too so the bust isn't thousands of identical redirect lines.
+    fc = "404"
+    if catchall and catchall[0] not in ("404",):
+        fc = f"404,{catchall[0]}"
+
     findings.h4(f"Directory Bust ({breadth.label})")
     cmd = [
         "ffuf", "-u", f"{base_url}/FUZZ",
         "-w", wl,
-        "-fc", "404",
+        "-fc", fc,
         "-t", str(_FFUF_THREADS),
         "-timeout", _REQ_TIMEOUT,
         "-ic",

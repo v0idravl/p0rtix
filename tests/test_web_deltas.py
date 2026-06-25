@@ -186,6 +186,54 @@ def test_wp_author_enum_parses_rest_and_author_redirect(monkeypatch, tmp_path):
     assert {"admin", "editor", "john"} <= set(fact_users)
 
 
+# ── 3b. Catch-all redirect detection + signature-probe filtering ─────────────────
+
+def test_catchall_redirect_detects_blanket_30x(monkeypatch):
+    # A bogus path that still 302s → vhost-only routing (the Analytics case).
+    def fake_run(cmd, *args, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0,
+            stdout="302 http://analytical.htb/", stderr="")
+    monkeypatch.setattr(web.subprocess, "run", fake_run)
+
+    assert web._catchall_redirect("http://10.129.229.224") == ("302", "http://analytical.htb/")
+
+
+def test_catchall_redirect_none_when_bogus_path_404s(monkeypatch):
+    def fake_run(cmd, *args, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, stdout="404 ", stderr="")
+    monkeypatch.setattr(web.subprocess, "run", fake_run)
+
+    assert web._catchall_redirect("http://10.129.229.224") is None
+
+
+def test_probe_code_filters_catchall_but_keeps_real_hits(monkeypatch):
+    catchall = ("302", "http://analytical.htb/")
+
+    def fake_run(cmd, *args, **kwargs):
+        url = cmd[-1]
+        # The blanket vhost redirect — same Location as the catch-all baseline.
+        if url.endswith("/certsrv"):
+            stdout = "302 http://analytical.htb/"
+        # A real endpoint that 302s somewhere ELSE (e.g. app login).
+        elif url.endswith("/manager/html"):
+            stdout = "401 "
+        elif url.endswith("/app"):
+            stdout = "302 http://10.129.229.224/app/login"
+        else:
+            stdout = "404 "
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+    monkeypatch.setattr(web.subprocess, "run", fake_run)
+
+    # Catch-all redirect → filtered to None (no false ADCS hit).
+    assert web._probe_code("http://10.129.229.224/certsrv", None, catchall) is None
+    # Real 401 → kept.
+    assert web._probe_code("http://10.129.229.224/manager/html", None, catchall) == "401"
+    # Real 302 to a different location → kept (not the catch-all).
+    assert web._probe_code("http://10.129.229.224/app", None, catchall) == "302"
+    # Without a catch-all baseline, the old behavior holds (30x reported).
+    assert web._probe_code("http://10.129.229.224/certsrv", None, None) == "302"
+
+
 # ── 4. Host header + vhost promotion ────────────────────────────────────────────
 
 def test_hh_builds_host_header_args():
