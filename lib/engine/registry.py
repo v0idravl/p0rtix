@@ -20,7 +20,7 @@ from lib.engine.posture import Posture
 
 # Top-level ordering of path groups in the console. Groups not listed here are
 # appended alphabetically, so a new group still shows up without a code change.
-GROUP_ORDER = ["discovery", "web", "service", "smb", "ldap", "kerberos", "creds", "ad", "access"]
+GROUP_ORDER = ["discovery", "web", "service", "ike", "smb", "ldap", "kerberos", "creds", "ad", "access"]
 
 
 def instance_key(name: str, args: dict) -> str:
@@ -47,6 +47,11 @@ class ActionRegistry:
 
     def group_names(self) -> set[str]:
         return {a.group for a in self._actions.values()}
+
+    def actions_rearmed_by(self, kind: str) -> set[str]:
+        """Names of actions that declare `rearm_on` containing this fact kind —
+        i.e. that should re-run when a fact of this kind newly appears."""
+        return {a.name for a in self._actions.values() if kind in a.rearm_on}
 
     # ── instance expansion ────────────────────────────────────────────────────
     def _expand(self, action: Action, facts: FactStore) -> list[dict]:

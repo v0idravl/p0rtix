@@ -196,6 +196,23 @@ def _h_web_enum(ctx) -> ActionResult:
                                 f"({len(discoveries)} discovery)")
 
 
+def _h_artifact_secrets(ctx) -> ActionResult:
+    """Download artifacts (.jar/.zip/.war/.config/.sql/…) from a web service and
+    scan them for credential literals, emitting hits as cred candidates for the
+    cross-protocol reuse spray (Blocky: foothold cred lived inside a .jar)."""
+    from lib.web import scan_web_artifacts
+    from lib.wordlists import Breadth, parse_breadth
+    svc = _find_service(ctx, ctx.target_port)
+    if svc is None:
+        return ActionResult(ok=False, summary=f"no web service on port {ctx.target_port}")
+    from lib.web import _build_url
+    base_url = _build_url(svc.scheme, svc.hostname or ctx.ip, svc.port)
+    breadth = parse_breadth((ctx.args or {}).get("breadth"),
+                            getattr(ctx.facts, "breadth", Breadth.STANDARD))
+    n = scan_web_artifacts(base_url, ctx.runner, ctx.findings, ctx.available, breadth)
+    return ActionResult(ok=True, summary=f"artifact scan {base_url} — {n} credential literal(s)")
+
+
 def _h_service_enum(ctx) -> ActionResult:
     from lib import services
     svc = _find_service(ctx, ctx.target_port)
@@ -207,6 +224,24 @@ def _h_service_enum(ctx) -> ActionResult:
         if getattr(d, "hostname", ""):
             ctx.facts.add_hostname(d.hostname)
     return ActionResult(ok=True, summary=f"{svc.name} enum on {svc.proto}/{svc.port}")
+
+
+def _h_ike_enum(ctx) -> ActionResult:
+    """IKE/IPsec (ISAKMP udp/500): main-mode fingerprint + aggressive-mode probe.
+    Mines the disclosed ID payload into user/domain facts and captures the PSK
+    hash for offline crack.hashes (psk-crack)."""
+    from lib import ike
+    res = ike.enumerate_ike(ctx.ip, ctx.runner, ctx.findings, ctx.available)
+    if res.get("aggressive"):
+        bits = []
+        if res.get("id"):
+            bits.append(f"ID {res['id'].get('value', '')}")
+        if res.get("psk_captured"):
+            bits.append("PSK captured")
+        return ActionResult(ok=True, summary="IKE aggressive mode — " + ", ".join(bits or ["leak"]))
+    if res.get("main_mode"):
+        return ActionResult(ok=True, summary="IKE main mode only (no aggressive-mode leak)")
+    return ActionResult(ok=True, summary="no ISAKMP response")
 
 
 # ── green: anonymous SMB / LDAP (wrap existing handler bodies) ─────────────────
@@ -449,6 +484,17 @@ def _h_writable_objects(ctx) -> ActionResult:
     return ActionResult(ok=True, summary=f"{len(targets or [])} writable object(s)")
 
 
+def _h_secretsdump(ctx) -> ActionResult:
+    from lib import credsmode
+    ready = _enum_cred_or_none(ctx)
+    if ready is None:
+        return ActionResult(ok=False, summary="need a domain and a valid credential")
+    domain, user, pw = ready
+    n = credsmode._ad_secretsdump(ctx.ip, domain, user, pw, ctx.runner,
+                                  ctx.findings, ctx.facts, ctx.available)
+    return ActionResult(ok=True, summary=f"{n} NTLM hash(es) via secretsdump")
+
+
 # ── recon-completeness: relay/coercion surface, ADCS + MSSQL enumeration ──────
 def _h_smb_signing(ctx) -> ActionResult:
     """Check SMB signing posture. signing:False → an NTLM-relay target, recorded
@@ -622,6 +668,18 @@ def _h_exec(ctx) -> ActionResult:
     return ActionResult(ok=True, summary=f"exec `{command}` via {cmd[0]}")
 
 
+# Auth surfaces a candidate password / pair can be tested against. SMB/WinRM are
+# the Windows surfaces; SSH (22) is the one the cross-protocol reuse spray needs
+# for Linux boxes (Blocky/Expressway reused a recovered secret as the SSH password);
+# RDP/MSSQL round out the common login services.
+_AUTH_SURFACE_PORTS = (445, 5985, 5986, 22, 3389, 1433)
+
+
+def _auth_surface(f) -> bool:
+    """True if any login service the spray/test can reach is open."""
+    return any(f.has(f"tcp/{p}") for p in _AUTH_SURFACE_PORTS)
+
+
 def _can_exec(f) -> bool:
     # only advertise when a command is actually runnable: admin over SMB, or a
     # valid cred over WinRM (5985/5986) / SSH.
@@ -703,6 +761,22 @@ def build_registry() -> ActionRegistry:
         deps=("curl",),
     ))
 
+    # Downloadable-artifact secret scan — one instance per web service. Fetches
+    # .jar/.zip/.war/.config/.sql artifacts and scrapes credential literals into
+    # cred candidates for the reuse spray.
+    reg.register(Action(
+        "web.artifact_secrets", Tier.GREEN, _h_artifact_secrets,
+        group="web", order=2,
+        footprint=Footprint(
+            summary="download .jar/.zip/.war/.config/.sql artifacts and scan for "
+                    "hardcoded credential literals (→ reuse-spray candidates)",
+            network="artifact-name probes + a focused ffuf bust — visible in web logs"),
+        gate=lambda f: any(s.is_web for s in f.get_services()),
+        instances=_web_instances,
+        requires=(Requirement("service", "a detected web service (run svc.version_detect)"),),
+        deps=("curl",),
+    ))
+
     # Non-AD service enumeration — one instance per detected service the legacy
     # dispatcher knows (databases, DNS, SNMP, mail, RDP, NFS, Docker, Redis, …).
     # AD/creds ports are covered by their own branches and skipped here.
@@ -715,6 +789,21 @@ def build_registry() -> ActionRegistry:
         gate=lambda f: bool(_service_instances(f)),
         instances=_service_instances,
         requires=(Requirement("service", "a detected non-AD service (run svc.version_detect)"),),
+    ))
+
+    # IKE/IPsec — when ISAKMP (udp/500) is up, fingerprint + probe aggressive mode.
+    # The whole foothold can live here (Expressway): the aggressive-mode reply
+    # leaks an ID (→ user/domain) and a PSK hash (→ crack.hashes → reuse spray).
+    reg.register(Action(
+        "ike.enum", Tier.GREEN, _h_ike_enum,
+        group="ike", order=1,
+        footprint=Footprint(
+            summary="ISAKMP fingerprint + IKEv1 aggressive-mode probe — leaks ID "
+                    "payload (user/domain) and a crackable PSK hash",
+            network="ISAKMP probes + an aggressive-mode handshake request to udp/500"),
+        gate=lambda f: f.has("udp/500"),
+        requires=(Requirement("udp/500", "ISAKMP (udp/500) open"),),
+        deps=("ike-scan",),
     ))
 
     # Anonymous SMB, decomposed into cohesive sub-actions. `run smb` runs the
@@ -802,22 +891,26 @@ def build_registry() -> ActionRegistry:
         "crack.hashes", Tier.PASSIVE, _h_crack,
         group="creds", order=1,
         footprint=Footprint(
-            summary="offline hashcat + rockyou on uncracked hashes (local only)"),
+            summary="offline crack of uncracked hashes — hashcat+rockyou "
+                    "(AS-REP/Kerberoast/NTLM) or psk-crack (IKE PSK); local only"),
         gate=lambda f: f.has("hash:uncracked"),
         requires=(Requirement("hash:uncracked", "an uncracked hash"),),
-        deps=("hashcat",),
+        # No hard tool dep: the handler picks hashcat or psk-crack per hash type,
+        # so an IKE-PSK-only box still cracks without hashcat installed.
     ))
 
     reg.register(Action(
         "creds.test", Tier.YELLOW, _h_creds_test,
         group="creds", order=2,
         footprint=Footprint(
-            summary="verify known credential pair(s) for access — not a spray",
+            summary="verify known credential pair(s) for access across every open "
+                    "auth surface (SMB/WinRM/SSH/RDP/MSSQL) — not a spray",
             windows_events=("4624 (logon) on a hit", "4625 (failed logon)"),
         ),
-        gate=lambda f: (f.has("cred_pair") or f.has("valid_cred")) and f.has("tcp/445"),
+        gate=lambda f: (f.has("cred_pair") or f.has("valid_cred")) and _auth_surface(f),
         requires=(Requirement("cred_pair", "a credential pair (cracked/known)"),
-                  Requirement("tcp/445", "SMB (tcp/445) open")),
+                  Requirement("auth_surface", "an open auth service (SMB/WinRM/SSH/RDP/MSSQL)")),
+        rearm_on=("cred_pair", "valid_cred"),
         deps=("nxc",),
     ))
 
@@ -825,12 +918,15 @@ def build_registry() -> ActionRegistry:
         "creds.spray", Tier.YELLOW, _h_creds_spray,
         group="creds", order=3,
         footprint=Footprint(
-            summary="spray candidate password(s) across the whole user list (SMB/WinRM)",
+            summary="spray candidate password(s) across the whole user list on every "
+                    "discovered auth surface (SMB/WinRM/SSH)",
             windows_events=("4625 (failed logon)", "4624 (logon) on a hit"),
         ),
-        gate=lambda f: f.has("cred") and f.has("tcp/445"),
+        gate=lambda f: f.has("cred") and _auth_surface(f),
         requires=(Requirement("cred", "a candidate password (cracked/leaked)"),
-                  Requirement("tcp/445", "SMB (tcp/445) open")),
+                  Requirement("auth_surface", "an open auth service (SMB/WinRM/SSH)")),
+        # A newly-landed secret re-arms the spray so it genuinely re-triggers.
+        rearm_on=("cred",),
         deps=("nxc",),
     ))
 
@@ -897,6 +993,16 @@ def build_registry() -> ActionRegistry:
         requires=(Requirement("tcp/1433", "MSSQL (tcp/1433) open"),
                   Requirement("valid_cred", "a valid credential")),
         deps=("nxc",),
+    ))
+    reg.register(Action(
+        "creds.secretsdump", Tier.YELLOW, _h_secretsdump,
+        group="creds", order=4,
+        manual_only=True,          # DCSync is never automatic — explicit run_action only
+        footprint=Footprint(
+            summary="DCSync NTLM hashes via secretsdump (-just-dc-ntlm) — admin or "
+                    "replication rights; captures hashes for crack/PtH, not a shell",
+            windows_events=("4662 (DRSUAPI replication)",)),
+        gate=_authed, requires=_authed_reqs, deps=("impacket-secretsdump",),
     ))
 
     reg.register(Action(

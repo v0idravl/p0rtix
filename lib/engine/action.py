@@ -117,6 +117,13 @@ class Action:
     # operator-initiated steps (e.g. dropping a shell) that shouldn't fire as a
     # side effect of a bulk run.
     manual_only: bool = False
+    # Fact kinds that should re-arm this action when they newly appear — its
+    # tried-state is cleared so the next run-all/run-group sweep re-dispatches it.
+    # This is how a newly-landed secret genuinely *re-triggers* the cross-protocol
+    # reuse spray/test (FactEvent.kind values, e.g. "cred", "cred_pair"). The
+    # scheduler only clears tried-state on these events (never dispatches from the
+    # listener), so the re-entrancy rule holds.
+    rearm_on: tuple[str, ...] = ()
     # Red pre-flight: (ok, message). False aborts before the action runs.
     precondition: Optional[Callable[["ActionContext"], tuple[bool, str]]] = None
 

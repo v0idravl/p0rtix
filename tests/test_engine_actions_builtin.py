@@ -206,6 +206,32 @@ def test_granular_ad_actions_gated_on_valid_cred_and_domain(tmp_path):
     assert _GRANULAR_AD <= avail
 
 
+_FAKE_SECRETSDUMP = (
+    "[*] Dumping Domain Credentials (domain\\uid:rid:lmhash:nthash)\n"
+    "Administrator:500:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::\n"
+    "krbtgt:502:aad3b435b51404eeaad3b435b51404ee:5e3ab1c4d3f2e1a0b9c8d7e6f5a4b3c2:::\n"
+)
+
+
+def test_secretsdump_captures_ntlm_and_unlocks_crack(tmp_path):
+    """creds.secretsdump (manual-only DCSync) captures NTLM hashes into facts/loot
+    and unlocks offline crack.hashes."""
+    fs, posture, reg, sched = _setup(
+        tmp_path, Tier.YELLOW, output=_FAKE_SECRETSDUMP,
+        tools=_ALL_TOOLS | {"impacket-secretsdump"})
+    fs.set_discovered_domain("htb.local")
+    fs.add_valid_cred("admin", "Pass123!", "SMB")
+
+    assert not fs.has("hash")
+    sched.run_action("creds.secretsdump")
+
+    assert fs.has("hash") and fs.has("hash:ntlm")
+    saved = (fs.loot_dir / "ntlm.hash").read_text()
+    assert ":::" in saved
+    # offline crack is now available on the captured NTLM hashes
+    assert "crack.hashes" in {a.name for a, _ in reg.available(fs, posture, sched.tried)}
+
+
 def test_creds_test_verifies_pair_without_spray(tmp_path):
     from lib.engine.action import Tier
     # nxc reports a WinRM hit for the exact pair

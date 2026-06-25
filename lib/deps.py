@@ -58,6 +58,10 @@ TOOLS: dict[str, dict] = {
     # Cracking
     "hashcat":               {"apt": "hashcat",                         "required": False},
 
+    # IKE / IPsec (ike-scan ships psk-crack in the same package)
+    "ike-scan":              {"apt": "ike-scan",                        "required": False},
+    "psk-crack":             {"apt": "ike-scan",                        "required": False},
+
     # DNS
     "dig":                   {"apt": "dnsutils",                        "required": False},
     "dnsrecon":              {"apt": "dnsrecon",                        "required": False},

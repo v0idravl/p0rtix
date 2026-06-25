@@ -68,8 +68,22 @@ class Scheduler:
         facts.subscribe(self._on_fact)
 
     # ── fact subscription (cheap; never dispatches) ───────────────────────────
-    def _on_fact(self, _ev) -> None:
+    def _on_fact(self, ev) -> None:
         self._dirty = True
+        # Reaction: a newly-landed fact can re-arm actions that declared it in
+        # `rearm_on` (e.g. a fresh `cred`/`cred_pair` re-triggers the cross-protocol
+        # reuse spray/test). We only clear their tried-state here — the next
+        # run-all/run-group sweep re-dispatches them. Never dispatch from a fact
+        # handler (re-entrancy rule); clearing a set under the lock is cheap.
+        kind = getattr(ev, "kind", None)
+        if not kind:
+            return
+        rearm = self._registry.actions_rearmed_by(kind)
+        if not rearm:
+            return
+        with self._lock:
+            cleared = {k for k in self._tried if k.split("#", 1)[0] in rearm}
+            self._tried -= cleared
 
     # ── enqueue / step (manual, queue-driven) ─────────────────────────────────
     def enqueue(self, action: Action, args: dict) -> bool:

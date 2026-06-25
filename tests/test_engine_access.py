@@ -117,7 +117,10 @@ def test_access_exec_not_swept_by_run_all_or_group(tmp_path):
 
     sched.run_all_at_or_below()        # bulk run must NOT exec
     sched.run_group("access")          # nor a group run
-    assert runner.calls == []
+    # The manual_only access.exec must never be swept by a bulk run. (creds.test
+    # legitimately verifies the WinRM cred during run_all — that's on-doctrine —
+    # so assert specifically that no access.exec one-shot ran, not that nothing did.)
+    assert not any(label == "access_exec" for _, label in runner.calls)
 
     # explicit run with a command does execute
     sched.run_action("access.exec", extra_args={"command": "whoami"})

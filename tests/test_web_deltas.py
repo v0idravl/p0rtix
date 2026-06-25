@@ -1,0 +1,280 @@
+"""Coverage for the newer pure-parsing/logic deltas in lib/web.py — the artifact
+secret scanner, broadened JS-endpoint extraction, WordPress author enum parsing,
+and the Host-header / vhost-promotion helpers. All fakes; no real network.
+
+These exercise the parsing/recording seams directly: the network-bound functions
+(`_scrape_js`, `_follow_js_endpoints`, `_wp_author_enum`) shell out via
+subprocess/curl, so we test their REGEX/parse logic and route `subprocess.run`
+through a monkeypatched fake where the function itself is driven."""
+import base64
+import io
+import subprocess
+import zipfile
+
+from lib import web
+from lib.engine.facts import FactStore
+
+
+# ── fakes ──────────────────────────────────────────────────────────────────────
+
+class _FakeFindings:
+    """Accepts any findings call (h2/h3/h4/bullet/cmd/note/add_summary/code_block/…)
+    and records (method, args) so a test can assert on them if it wants."""
+    def __init__(self):
+        self.calls = []
+
+    def __getattr__(self, name):
+        def _rec(*args, **kwargs):
+            self.calls.append((name, args, kwargs))
+            return None
+        return _rec
+
+
+class _RecorderWS:
+    """A minimal workspace recorder exposing the fact-mutator seams web.py uses."""
+    def __init__(self):
+        self.creds = []
+        self.users = []
+        self.hostnames = []
+        self.domains = []
+
+    def add_cred(self, text):
+        self.creds.append(text)
+
+    def add_user(self, username):
+        self.users.append(username)
+
+    def add_hostname(self, fqdn):
+        self.hostnames.append(fqdn)
+
+    def set_discovered_domain(self, domain):
+        self.domains.append(domain)
+
+
+class _FakeRunner:
+    """A runner with a .ws (recorder or real FactStore) and a no-network .run()."""
+    def __init__(self, ws):
+        self.ws = ws
+
+    def run(self, cmd, label, timeout=None):
+        return ""
+
+
+def _real_runner(tmp_path):
+    fs = FactStore("10.10.10.10", None, "webdeltas", str(tmp_path))
+    return _FakeRunner(fs), fs
+
+
+# ── 1. artifact secret scan ─────────────────────────────────────────────────────
+
+def test_scan_artifact_bytes_zip_finds_props_and_class_strings(tmp_path):
+    runner, fs = _real_runner(tmp_path)
+    findings = _FakeFindings()
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("config.properties", "db.password=Sup3rS3cret!\nuser=admin\n")
+        # a compiled .class member: the cred survives as an ASCII run inside binary
+        zf.writestr("Core.class",
+                    b"\xca\xfe\xba\xbe\x00\x00password=H4rdcoded\x00\x01\x02")
+    zipbytes = buf.getvalue()
+
+    n = web._scan_artifact_bytes("http://x/app.jar", zipbytes, runner, findings)
+    assert n >= 2
+    creds = fs.snapshot()["creds"]
+    assert "Sup3rS3cret!" in creds
+    assert "H4rdcoded" in creds
+
+
+def test_ascii_strings_pulls_printable_runs():
+    s = web._ascii_strings(b"AB\x00password=hunter2\x01CD")
+    assert "password=hunter2" in s
+
+
+def test_scan_artifact_bytes_plain_blob_records_creds(tmp_path):
+    runner, fs = _real_runner(tmp_path)
+    findings = _FakeFindings()
+    blob = b"username=root\npassword=toor\n"
+
+    n = web._scan_artifact_bytes("http://x/db.bak", blob, runner, findings)
+    assert n >= 1
+    creds = fs.snapshot()["creds"]
+    assert "toor" in creds
+    assert "root" in creds
+
+
+def test_scan_artifact_bytes_captures_jdbc(tmp_path):
+    runner, fs = _real_runner(tmp_path)
+    findings = _FakeFindings()
+    blob = b"jdbc:mysql://app:Passw0rd@db/foo\n"
+
+    n = web._scan_artifact_bytes("http://x/conf.txt", blob, runner, findings)
+    assert n >= 1
+    # the whole JDBC URL is itself the secret — assert the JDBC branch fired
+    summaries = [a[0] for (m, a, _k) in findings.calls if m == "add_summary" and a]
+    assert any("JDBC" in str(s) for s in summaries)
+
+
+# ── 2. JS endpoint following — regex extraction ─────────────────────────────────
+
+def _js_endpoints(body):
+    out = []
+    for rx in web._JS_ENDPOINT_RES:
+        for m in rx.findall(body):
+            m = m.strip()
+            if m and m not in out:
+                out.append(m)
+    return out
+
+
+def test_js_endpoint_regexes_capture_ajax_and_absolute_refs():
+    body = (
+        "$.get('scan.php');\n"
+        'fetch("/api/data");\n'
+        "axios.post('upload.php', payload);\n"
+        'var u = "/admin/secret";\n'
+    )
+    eps = _js_endpoints(body)
+    assert "scan.php" in eps
+    assert "/api/data" in eps
+    assert "upload.php" in eps
+    assert "/admin/secret" in eps
+
+
+def test_js_endpoint_relative_ref_is_captured_now():
+    # the OLD regex only matched leading-slash absolute paths; a bare relative
+    # `scan.php` (no slash) must now be captured too.
+    eps = _js_endpoints("$.get('scan.php');")
+    assert "scan.php" in eps
+
+
+def test_follow_js_endpoints_empty_is_noop(tmp_path):
+    runner, _fs = _real_runner(tmp_path)
+    findings = _FakeFindings()
+    # empty input returns without error (no curl, no findings)
+    assert web._follow_js_endpoints(set(), runner, findings) is None
+
+
+# ── 3. WordPress author enum — parsing via monkeypatched subprocess.run ──────────
+
+def test_wp_author_enum_parses_rest_and_author_redirect(monkeypatch, tmp_path):
+    runner, fs = _real_runner(tmp_path)
+    findings = _FakeFindings()
+
+    def fake_run(cmd, *args, **kwargs):
+        joined = " ".join(cmd)
+        # REST users endpoint GET
+        if "wp-json/wp/v2/users" in joined:
+            stdout = '[{"slug":"admin","name":"Administrator"},{"slug":"editor"}]'
+        # ?author=N HEAD probes — emit a Location for author=3 only
+        elif "?author=3" in joined:
+            stdout = "HTTP/1.1 301 Moved\r\nLocation: http://x/author/john/\r\n"
+        elif "?author=" in joined:
+            stdout = "HTTP/1.1 200 OK\r\n"
+        else:
+            stdout = ""
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(web.subprocess, "run", fake_run)
+
+    users = web._wp_author_enum("http://x", runner, findings)
+    assert "admin" in users
+    assert "editor" in users
+    assert "john" in users
+    # _record_user pushed each into the fact store
+    fact_users = fs.snapshot()["users"]
+    assert {"admin", "editor", "john"} <= set(fact_users)
+
+
+# ── 4. Host header + vhost promotion ────────────────────────────────────────────
+
+def test_hh_builds_host_header_args():
+    assert web._hh("blocky.htb") == ["-H", "Host: blocky.htb"]
+    assert web._hh(None) == []
+
+
+def test_promote_vhost_fqdn_sets_domain_and_hostname():
+    ws = _RecorderWS()
+    web._promote_vhost(_FakeRunner(ws), "blocky.htb")
+    assert "blocky.htb" in ws.hostnames
+    assert "blocky.htb" in ws.domains
+
+
+def test_promote_vhost_bare_label_only_hostname():
+    ws = _RecorderWS()
+    web._promote_vhost(_FakeRunner(ws), "bare")
+    assert "bare" in ws.hostnames
+    # no dot → not promoted to the domain fact
+    assert ws.domains == []
+
+
+def test_promote_vhost_real_factstore(tmp_path):
+    runner, fs = _real_runner(tmp_path)
+    web._promote_vhost(runner, "blocky.htb")
+    snap = fs.snapshot()
+    assert "blocky.htb" in snap["hostnames"]
+    assert snap["domain"] == "blocky.htb"
+
+
+# ── 5. XSS-to-privilege recon tells (cookies + forms) ────────────────────────────
+
+def test_cookie_role_tell_base64_role_value():
+    # Headless: a non-HttpOnly is_admin cookie whose value base64-decodes to "user"
+    b64 = base64.b64encode(b"user").decode()
+    tell = web._cookie_role_tell(f"Set-Cookie: is_admin={b64}")
+    assert tell and "decodes to `user`" in tell
+
+
+def test_cookie_role_tell_plain_role_value():
+    tell = web._cookie_role_tell("Set-Cookie: role=admin; Path=/")
+    assert tell and "role value" in tell
+
+
+def test_cookie_role_tell_name_hint_only():
+    # name looks like a privilege flag even if the value isn't a known role token
+    tell = web._cookie_role_tell("Set-Cookie: usertype=2; Path=/")
+    assert tell and "role/privilege flag" in tell
+
+
+def test_cookie_role_tell_ignores_session_blob():
+    # an ordinary long session id is not a role tell (avoids false positives)
+    blob = "PHPSESSID=" + "a1b2c3d4" * 6
+    assert web._cookie_role_tell(f"Set-Cookie: {blob}; HttpOnly") is None
+
+
+def test_parse_headers_emits_privilege_tell_for_jsreadable_role_cookie():
+    findings = _FakeFindings()
+    raw = ("HTTP/1.1 200 OK\r\n"
+           "Set-Cookie: is_admin=" + base64.b64encode(b"user").decode() + "; Path=/\r\n")
+    web._parse_interesting_headers(raw, findings)
+    notes = [a[0] for nm, a, _ in findings.calls if nm == "note"]
+    assert any("Privilege tell" in n and "no HttpOnly" in n for n in notes)
+
+
+class _HtmlRunner:
+    """Runner whose .run returns canned HTML (for the landing-page form check)."""
+    def __init__(self, html):
+        self.html = html
+        self.ws = None
+
+    def run(self, cmd, label, timeout=None):
+        return self.html
+
+
+def test_check_forms_flags_freetext_contact_form():
+    findings = _FakeFindings()
+    html = ('<html><body><form method="post" action="/support">'
+            '<input type="text" name="email">'
+            '<textarea name="message"></textarea>'
+            '</form></body></html>')
+    web._check_forms("http://10.10.10.10", _HtmlRunner(html), findings)
+    bullets = [a[0] for nm, a, _ in findings.calls if nm == "bullet"]
+    notes = [a[0] for nm, a, _ in findings.calls if nm == "note"]
+    assert any("/support" in b for b in bullets)
+    assert any("stored/blind-XSS" in n for n in notes)
+
+
+def test_check_forms_noop_when_no_form():
+    findings = _FakeFindings()
+    web._check_forms("http://10.10.10.10", _HtmlRunner("<html>no forms</html>"), findings)
+    assert findings.calls == []
