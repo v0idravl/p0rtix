@@ -180,3 +180,105 @@ def test_machine_account_cred_not_added_as_user(tmp_path):
     fs = FactStore("10.0.0.1", None, "mach", str(tmp_path))
     fs.add_valid_cred("DC01$", "machinehash", "SMB")
     assert "DC01$" not in fs.snapshot()["users"]         # machine acct excluded
+
+
+# ── Baby deltas: empty-username guard, cred_must_change, stale-scan ───────────
+
+def test_empty_username_valid_cred_stored_as_candidate_only(tmp_path):
+    """A valid_cred with an empty username must NOT be stored as a valid credential.
+    Running AD actions with an empty user silently fails (Baby regression).
+    The password should be retained as a spray candidate."""
+    fs = FactStore("10.0.0.1", None, "empty-user", str(tmp_path))
+    events = []
+    fs.subscribe(events.append)
+
+    fs.add_valid_cred("", "BabyStart123!", "SMB")
+
+    # Not stored as a valid_cred
+    assert not fs.has("valid_cred")
+    assert ("", "BabyStart123!") not in fs.snapshot()["valid_creds"]
+    # No valid_cred event emitted
+    assert not any(e.kind == "valid_cred" for e in events)
+    # Password IS stored as a spray candidate
+    assert "BabyStart123!" in fs.snapshot()["creds"]
+    assert any(e.kind == "cred" for e in events)
+
+
+def test_workspace_setup_filters_empty_username_on_disk(tmp_path):
+    """If a prior session wrote an empty-username entry to valid_creds.txt,
+    the Workspace constructor must not load it into _known_valid."""
+    from lib.workspace import Workspace
+    ws = Workspace("10.0.0.1", None, "ws-empty-user", str(tmp_path))
+    # Simulate a prior bad run that wrote an empty-username entry
+    (ws.loot_dir / "valid_creds.txt").write_text(":BabyStart123!  [SMB]\n")
+    ws2 = Workspace("10.0.0.1", None, "ws-empty-user", str(tmp_path))
+    assert ("", "BabyStart123!") not in ws2._known_valid
+
+
+def test_add_cred_must_change_stores_and_emits(tmp_path):
+    """STATUS_PASSWORD_MUST_CHANGE: credential is valid but expired.
+    Should be stored as must-change, NOT as valid_cred. User and password
+    are added as recon facts (real account confirmed, password is a candidate)."""
+    fs = FactStore("10.0.0.1", None, "must-change", str(tmp_path))
+    events = []
+    fs.subscribe(events.append)
+
+    fs.add_cred_must_change("Caroline.Robinson", "BabyStart123!")
+
+    snap = fs.snapshot()
+    # Stored in the dedicated must-change set
+    assert ("Caroline.Robinson", "BabyStart123!") in snap["cred_must_change"]
+    assert fs.has("cred_must_change")
+    # The account IS a confirmed real user and password IS a spray candidate
+    assert "Caroline.Robinson" in snap["users"]
+    assert "BabyStart123!" in snap["creds"]
+    # NOT stored as a valid_cred (can't be used as-is)
+    assert not fs.has("valid_cred")
+    # Event emitted exactly once
+    must_change_events = [e for e in events if e.kind == "cred_must_change"]
+    assert len(must_change_events) == 1
+    assert must_change_events[0].value == ("Caroline.Robinson", "BabyStart123!")
+
+
+def test_add_cred_must_change_dedup(tmp_path):
+    """Adding the same must-change pair twice emits only one event."""
+    fs = FactStore("10.0.0.1", None, "must-change-dup", str(tmp_path))
+    events = []
+    fs.subscribe(events.append)
+    fs.add_cred_must_change("user1", "pass1")
+    fs.add_cred_must_change("user1", "pass1")
+    assert len([e for e in events if e.kind == "cred_must_change"]) == 1
+    assert len(fs.snapshot()["cred_must_change"]) == 1
+
+
+def test_reload_re_ingests_port_facts_from_xml(tmp_path):
+    """reload() must restore port/service facts from saved nmap XML so a warm
+    session resume does not require a full network rescan (Baby delta)."""
+    import xml.etree.ElementTree as ET
+    from lib.engine.facts import FactStore
+
+    fs = FactStore("10.0.0.1", None, "reload-ports", str(tmp_path))
+    # Write a minimal nmap XML into raw/ simulating a prior tcp services scan
+    xml_content = """<?xml version="1.0"?>
+<nmaprun>
+  <host>
+    <ports>
+      <port protocol="tcp" portid="445">
+        <state state="open"/>
+        <service name="microsoft-ds" product="Windows SMB" version=""/>
+      </port>
+      <port protocol="tcp" portid="389">
+        <state state="open"/>
+        <service name="ldap" product="" version=""/>
+      </port>
+    </ports>
+  </host>
+</nmaprun>"""
+    xml_path = fs.raw_dir / "01_tcp_services.xml"
+    xml_path.write_text(xml_content)
+
+    assert not fs.has("tcp/445")   # nothing loaded yet
+    n = fs.reload()
+    # After reload, ports should be populated from the XML
+    assert fs.has("tcp/445"), "tcp/445 should be re-ingested from nmap XML"
+    assert n >= 2  # at least the 2 ports counted as new facts

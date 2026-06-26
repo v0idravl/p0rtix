@@ -613,6 +613,7 @@ def _h_creds_test(ctx) -> ActionResult:
     services = [("smb", 445), ("winrm", 5985), ("ssh", 22),
                 ("rdp", 3389), ("mssql", 1433)]
     confirmed = 0
+    must_change = 0
     for user, pw in pairs:
         for svc, port in services:
             if port not in open_tcp:
@@ -623,6 +624,21 @@ def _h_creds_test(ctx) -> ActionResult:
             label = re.sub(r"[^a-z0-9]", "_", f"{svc}_{user}".lower())[:24]
             out = ctx.runner.run(cmd, f"credtest_{label}", timeout=60)
             for line in out.splitlines():
+                # STATUS_PASSWORD_MUST_CHANGE: credential IS valid but the domain
+                # requires a password change before it can be used. Treated as a
+                # distinct outcome — not a failure, not a ready valid_cred.
+                if "STATUS_PASSWORD_MUST_CHANGE" in line:
+                    ctx.facts.add_cred_must_change(user, pw)
+                    ctx.findings.bullet(
+                        f"**Password must change ({svc}):** `{user}` — credential valid "
+                        "but expired. Next: "
+                        f"`impacket-changepasswd {ctx.facts.discovered_domain or ''}\\{user}:"
+                        f"{pw}@{ctx.ip} -newpass <newpassword> -protocol rpc-samr`")
+                    ctx.findings.add_summary(
+                        f"Credential valid but expired: `{user}` — "
+                        "change via impacket-changepasswd -protocol rpc-samr")
+                    must_change += 1
+                    break
                 if "[+]" not in line:
                     continue
                 confirmed += 1
@@ -640,8 +656,10 @@ def _h_creds_test(ctx) -> ActionResult:
                     ctx.findings.add_summary(
                         f"SSH shell handoff: `sshpass -p '{pw}' ssh {user}@{ctx.ip}`")
                 break
-    return ActionResult(ok=True,
-                        summary=f"tested {len(pairs)} pair(s) — {confirmed} access hit(s)")
+    summary = f"tested {len(pairs)} pair(s) — {confirmed} access hit(s)"
+    if must_change:
+        summary += f", {must_change} expired (must-change)"
+    return ActionResult(ok=True, summary=summary)
 
 
 # ── access: run ONE command non-interactively (no shell, no C2) ───────────────

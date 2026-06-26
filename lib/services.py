@@ -333,11 +333,21 @@ def _smb_shares_enum(ip: str, port: int, runner: Runner, available: set):
 
 # ── cohesive anonymous-SMB sub-actions ────────────────────────────────────────
 def _smb_users(ip: str, port: int, runner: Runner, buf: Findings, available: set) -> None:
-    """RID cycling + nxc --users (the domain roster)."""
+    """RID cycling + nxc --users (the domain roster).
+
+    RID cycling via a null session is intentionally run ALONGSIDE any LDAP results:
+    some accounts have ACL-restricted LDAP visibility and only appear via RID-cycle
+    (e.g. accounts in Backup Operators whose LDAP read access is restricted). The
+    RID list is cross-referenced against the existing user set so newly-added names
+    (missed by anonymous LDAP) are explicitly surfaced in findings."""
     out_null = _smb_probe(ip, port, runner, available)
     m_domain = re.search(r"\(domain:([^)]+)\)", out_null)
     null_auth_ok = "(Null Auth:True)" in out_null or bool(re.search(r"\[\+\].*\\:", out_null))
     if null_auth_ok and m_domain and "impacket-lookupsid" in available:
+        # Capture the user set before RID cycling so we can cross-reference
+        # against LDAP results and call out ACL-hidden accounts explicitly.
+        users_before_rid = set(runner.ws._known_users)
+
         target = f"{m_domain.group(1).strip().lower()}/@{ip}"
         cmd_rid = ["impacket-lookupsid", "-no-pass", target]
         buf.cmd(" ".join(cmd_rid))
@@ -356,6 +366,23 @@ def _smb_users(ip: str, port: int, runner: Runner, buf: Findings, available: set
                 " …" if len(rid_users) > 15 else ""))
             buf.add_summary("RID cycling: {}{}".format(
                 ", ".join(rid_users[:5]), " …" if len(rid_users) > 5 else ""))
+            # Cross-reference: flag users found via RID that were not in the LDAP
+            # list. These are ACL-hidden accounts that anonymous LDAP misses.
+            rid_only = [u for u in rid_users
+                        if u not in users_before_rid
+                        and not u.upper().startswith("KRBTGT")]
+            if rid_only:
+                buf.bullet(
+                    "**RID cycle found {} user(s) NOT in LDAP list (ACL-restricted "
+                    "visibility): {}{}** — these accounts may have restricted LDAP "
+                    "read access; verify credentials / group memberships manually.".format(
+                        len(rid_only),
+                        ", ".join(f"`{u}`" for u in rid_only[:10]),
+                        " …" if len(rid_only) > 10 else ""))
+                buf.add_summary(
+                    "RID-only users (LDAP-hidden): {}{}".format(
+                        ", ".join(rid_only[:5]),
+                        " …" if len(rid_only) > 5 else ""))
         else:
             buf.note("RID cycling: no users returned (null session may lack RPC read access)")
 

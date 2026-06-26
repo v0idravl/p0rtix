@@ -892,6 +892,18 @@ def _run_cred_reuse(
             out = runner.run(cmd, f"cred_smb_{re.sub(r'[^a-z0-9]', '_', password.lower())[:16]}", timeout=120)
             findings.cmd(f"nxc smb {ip} -u [users:{len(targets)}] -p *** --continue-on-success")
             for line in out.splitlines():
+                if "STATUS_PASSWORD_MUST_CHANGE" in line:
+                    m = re.search(r"\\([^\s\\:]+)", line)
+                    hit_user = m.group(1) if m else None
+                    if hit_user:
+                        ws.add_user(hit_user, authoritative=True)
+                        ws.add_cred(password)
+                        findings.bullet(
+                            f"**Password must change (SMB):** `{hit_user}` — credential valid "
+                            "but expired. Change via `impacket-changepasswd`.")
+                        findings.add_summary(
+                            f"Credential valid but expired (SMB): {hit_user} — change required")
+                    continue
                 if "[+]" in line:
                     m = re.search(r"\\([^\s\\:]+)", line)
                     hit = f"{m.group(1)}:{password}" if m else password

@@ -70,6 +70,10 @@ class FactStore(Workspace):
         # (80, "HFS 2.3"), (80, "JQuery 1.4.4"). Web enum populates this so the
         # fingerprint is structured (snapshot/handoff), not only in findings_md.
         self._web_tech: set[tuple[int, str]] = set()
+        # credentials that are valid but require a password change before use
+        # (STATUS_PASSWORD_MUST_CHANGE). Distinct from valid_cred (usable) and
+        # cred_candidate (unverified). Next step: impacket-changepasswd -protocol rpc-samr.
+        self._cred_must_change: set[tuple[str, str]] = set()
 
     # ── event plumbing ────────────────────────────────────────────────────────
     def subscribe(self, fn: Listener) -> None:
@@ -103,13 +107,22 @@ class FactStore(Workspace):
             self._emit(FactEvent("cred", candidate))
 
     def add_valid_cred(self, user: str, password: str, service: str) -> None:
+        user = user.strip()
+        if not user:
+            # Empty username is NOT a valid credential. Running AD actions with
+            # an empty username silently fails (e.g. "domain\:password"). Store
+            # the password as a spray candidate only — it may be correct once a
+            # real username is confirmed via ldap.users / smb.users / smb.rid_brute.
+            if password:
+                self.add_cred(password)
+            return
         key = (user, password)
         is_new = key not in self._known_valid
         super().add_valid_cred(user, password, service)
         # A confirmed credential teaches two more facts: its account is a real
         # user (→ the user list, for roasting/enum) and its password is a spray
         # candidate (→ against every other user). Both are deduped.
-        if user and not user.endswith("$"):
+        if not user.endswith("$"):
             self.add_user(user, authoritative=True)
         if password:
             self.add_cred(password)
@@ -250,6 +263,28 @@ class FactStore(Workspace):
         if changed:
             self._emit(FactEvent("hash", ("cracked", principal)))
 
+    def add_cred_must_change(self, user: str, password: str) -> None:
+        """Record a credential that is valid but requires a password change before
+        use (STATUS_PASSWORD_MUST_CHANGE). Distinct from a valid_cred (which can
+        be used directly) — the account exists and the password is correct, but
+        the domain forces a change before it will accept logins. Stores the
+        username as a confirmed real account and the password as a spray candidate,
+        but NOT as a valid_cred. Next step: impacket-changepasswd -protocol rpc-samr."""
+        user = user.strip()
+        if not user or not password:
+            return
+        key = (user, password)
+        with self._engine_lock:
+            is_new = key not in self._cred_must_change
+            if is_new:
+                self._cred_must_change.add(key)
+        # The account is a confirmed real user; the password is a spray candidate.
+        # Importantly: do NOT add as a valid_cred (it cannot be used as-is).
+        self.add_user(user, authoritative=True)
+        self.add_cred(password)
+        if is_new:
+            self._emit(FactEvent("cred_must_change", key))
+
     def set_smb_signing(self, required: bool) -> None:
         """Record whether SMB signing is required. `required=False` marks this host
         as an NTLM-relay target. Emits so a planner can react."""
@@ -309,6 +344,9 @@ class FactStore(Workspace):
                 return bool(self._cred_pairs)
         if key == "valid_cred":
             return bool(self._known_valid)
+        if key == "cred_must_change":
+            with self._engine_lock:
+                return bool(self._cred_must_change)
         if key == "admin_cred":
             with self._engine_lock:
                 return bool(self._admin_creds)
@@ -340,6 +378,7 @@ class FactStore(Workspace):
             admin = len(self._admin_creds)
             admin_pairs = sorted(self._admin_creds)
             cred_pairs = sorted(self._cred_pairs)
+            cred_must_change = sorted(self._cred_must_change)
             hashes = [
                 {"kind": kind, "principal": prin,
                  "cracked": rec["cracked"], "plaintext": rec["plaintext"]}
@@ -361,6 +400,7 @@ class FactStore(Workspace):
             "valid_creds": sorted(self._known_valid),
             "admin_creds": admin,
             "admin_pairs": admin_pairs,
+            "cred_must_change": cred_must_change,
             "hostnames": sorted(self._known_hostnames),
             "lockout": self.lockout_threshold,
             "users_complete": self.users_complete,
@@ -378,8 +418,17 @@ class FactStore(Workspace):
     def reload(self) -> int:
         """Re-read the loot files and feed any new entries through the mutators
         (which emit for genuinely-new facts). Returns the count of new facts.
-        Lets the operator edit loot/users.txt etc. and `reload` to refresh."""
-        before = len(self._known_users) + len(self._known_creds) + len(self._known_valid)
+        Lets the operator edit loot/users.txt etc. and `reload` to refresh.
+
+        Also re-ingests port/service facts from any saved nmap XML in raw/ so a
+        warm session resume restores the full port state without a network rescan.
+        This lets the operator distinguish "stale empty" (old instance, must rescan)
+        from "needs reload" (same instance, loot is valid) without manual checking."""
+        before_u = len(self._known_users)
+        before_c = len(self._known_creds)
+        before_v = len(self._known_valid)
+        with self._engine_lock:
+            before_p = len(self._open_ports)
 
         users_path = self.loot_dir / "users.txt"
         if users_path.exists():
@@ -408,5 +457,24 @@ class FactStore(Workspace):
             if saved:
                 self.set_discovered_domain(saved)
 
-        after = len(self._known_users) + len(self._known_creds) + len(self._known_valid)
-        return after - before
+        # Re-ingest port/service facts from saved nmap XML in raw/. This lets a
+        # warm resume (same instance, loot still valid) restore port state without
+        # a full rescan, and lets the operator tell "stale empty" from "unscanned".
+        try:
+            from lib import nmap as _nmap
+            for pattern, proto in (("*_tcp_services.xml", "tcp"),
+                                   ("*_udp_confirmed.xml", "udp")):
+                xml_file = next(self.raw_dir.glob(pattern), None)
+                if xml_file:
+                    services = _nmap.parse_service_xml(xml_file, proto)
+                    if services:
+                        self.add_services(services)
+        except Exception:
+            pass  # never break reload for a transient nmap-parse failure
+
+        with self._engine_lock:
+            after_p = len(self._open_ports)
+        after_u = len(self._known_users)
+        after_c = len(self._known_creds)
+        after_v = len(self._known_valid)
+        return (after_u - before_u) + (after_c - before_c) + (after_v - before_v) + (after_p - before_p)

@@ -36,7 +36,7 @@ _FINDINGS_MD_BUDGET = 48_000  # chars (~12k tokens), well under the tool cap
 
 # Snapshot keys whose values are flat lists of comparable items, diffed by set.
 _LIST_KEYS = ("users", "creds", "valid_creds", "admin_pairs",
-              "hostnames", "open_ports", "cred_pairs")
+              "hostnames", "open_ports", "cred_pairs", "cred_must_change")
 
 
 def _freeze(x):
@@ -174,7 +174,7 @@ class McpSession:
         """Authoritative engine state: facts snapshot + scheduler status."""
         from lib.engine.exploit_hints import candidates
         snap = self.facts.snapshot()
-        return {
+        out = {
             "target": snap["ip"],
             "domain": snap["domain"],
             "posture": self.posture.level.label,
@@ -192,6 +192,8 @@ class McpSession:
             "valid_creds": [list(c) for c in snap["valid_creds"]],
             "admin_creds": [list(c) for c in snap["admin_pairs"]],
             "cred_pairs": [list(c) for c in snap["cred_pairs"]],
+            # credentials that are valid but require a password change before use
+            "cred_must_change": [list(c) for c in snap["cred_must_change"]],
             "hashes": snap["hashes"],
             "hostnames": snap["hostnames"],
             "lockout": snap["lockout"],
@@ -199,6 +201,19 @@ class McpSession:
             "proto_status": snap["proto_status"],
             "actions": self.scheduler.status(),
         }
+        # Stale-scan warning: the session has scan coverage recorded but no open
+        # ports — the scan ran against a now-terminated instance. All service-gated
+        # actions remain dormant forever waiting for port facts that won't arrive.
+        # Call recheck('discovery') to re-arm discovery, then run_all() to rescan.
+        if snap["scanned_tcp"] > 0 and not snap["open_ports"]:
+            out["stale_scan_warning"] = (
+                "STALE SCAN: scanned_tcp={} but open_ports is empty — the scan "
+                "ran against a terminated instance. Call recheck('discovery') to "
+                "re-arm discovery actions, then run_all() to re-scan the live "
+                "instance. (Or call reload() first if loot files from this "
+                "instance are still valid.)".format(snap["scanned_tcp"])
+            )
+        return out
 
     def list_actions(self, include_dormant: bool = True) -> list[dict]:
         """Every action with its planning state — the agent's catalogue.
@@ -460,6 +475,9 @@ class McpSession:
             "valid_creds": [{"user": u, "password": p} for u, p in snap["valid_creds"]],
             "admin_creds": [{"user": u, "password": p} for u, p in snap["admin_pairs"]],
             "cred_pairs": [{"user": u, "password": p} for u, p in snap["cred_pairs"]],
+            # valid but expired — change via impacket-changepasswd -protocol rpc-samr
+            "cred_must_change": [{"user": u, "password": p}
+                                 for u, p in snap["cred_must_change"]],
             "hashes": snap["hashes"],
             "users": snap["users"],
             # True while a background full-TCP sweep is still running — open_ports/

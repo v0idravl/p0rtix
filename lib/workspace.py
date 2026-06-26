@@ -85,7 +85,9 @@ class Workspace:
                 line = re.sub(r"\s*\[[^\]]*\]\s*$", "", line.strip())
                 if ":" in line:
                     u, p = line.split(":", 1)
-                    self._known_valid.add((u.strip(), p.strip()))
+                    u = u.strip()
+                    if u:  # skip empty-username entries (must-change artifacts)
+                        self._known_valid.add((u, p.strip()))
         # Restore discovered domain from prior scan so creds/follow-up runs inherit it
         domain_path = self.loot_dir / "domain.txt"
         if domain_path.exists():

@@ -411,3 +411,97 @@ def test_export_handoff_shape(tmp_path):
     assert {"user": "administrator", "password": "P@ss"} in h["admin_creds"]
     assert {"user": "administrator", "password": "P@ss"} in h["valid_creds"]
     assert h["hashes"][0]["kind"] == "kerberoast"
+
+
+# ── Baby deltas: stale-scan warning, cred_must_change, STATUS_PASSWORD_MUST_CHANGE
+
+def test_stale_scan_warning_when_ports_empty_after_full_scan(tmp_path):
+    """When scanned_tcp > 0 but open_ports is empty the scan ran against a
+    terminated instance. get_state must surface a stale_scan_warning so the
+    operator knows to recheck('discovery') rather than waiting forever (Baby)."""
+    s = _session(tmp_path)
+    # Simulate a completed full sweep with no ports found (stale instance)
+    s.facts.add_scanned_tcp(range(1, 65536))
+    assert s.facts.scanned_tcp()  # coverage is recorded
+    assert not s.facts.snapshot()["open_ports"]  # but no ports
+
+    st = s.get_state()
+    assert "stale_scan_warning" in st
+    assert "recheck" in st["stale_scan_warning"].lower()
+
+
+def test_no_stale_scan_warning_when_ports_present(tmp_path):
+    """When open_ports is populated there is no stale scan — no warning."""
+    s = _session(tmp_path)
+    s.facts.add_scanned_tcp(range(1, 65536))
+    s.facts.add_open_port("tcp", 445)
+    st = s.get_state()
+    assert "stale_scan_warning" not in st
+
+
+def test_no_stale_scan_warning_when_no_scan_run(tmp_path):
+    """A fresh session (nothing scanned yet) must not trigger a stale warning."""
+    s = _session(tmp_path)
+    st = s.get_state()
+    assert "stale_scan_warning" not in st
+
+
+def test_cred_must_change_in_get_state_and_handoff(tmp_path):
+    """STATUS_PASSWORD_MUST_CHANGE pairs surface in get_state and export_handoff
+    (Baby delta: Caroline.Robinson was valid but expired)."""
+    s = _session(tmp_path)
+    s.facts.add_cred_must_change("Caroline.Robinson", "BabyStart123!")
+
+    st = s.get_state()
+    assert ["Caroline.Robinson", "BabyStart123!"] in st["cred_must_change"]
+    # Not stored as a valid_cred in get_state
+    assert ["Caroline.Robinson", "BabyStart123!"] not in st["valid_creds"]
+
+    h = s.export_handoff()
+    assert {"user": "Caroline.Robinson", "password": "BabyStart123!"} in h["cred_must_change"]
+    assert {"user": "Caroline.Robinson", "password": "BabyStart123!"} not in h["valid_creds"]
+
+
+def test_cred_must_change_in_snapshot_diff(tmp_path):
+    """cred_must_change appears in snapshot_diff when new pairs are added."""
+    from lib.mcp.session import snapshot_diff
+    s = _session(tmp_path)
+    before = s.facts.snapshot()
+    s.facts.add_cred_must_change("Caroline.Robinson", "BabyStart123!")
+    after = s.facts.snapshot()
+    delta = snapshot_diff(before, after)
+    assert "cred_must_change" in delta
+    assert ["Caroline.Robinson", "BabyStart123!"] in delta["cred_must_change"]
+
+
+def test_creds_test_detects_status_password_must_change(tmp_path, monkeypatch):
+    """creds.test must detect STATUS_PASSWORD_MUST_CHANGE in nxc output and record
+    it as a must-change fact, not ignore it like a plain LOGON_FAILURE (Baby)."""
+    def fake_run(self, cmd, label, timeout=None):
+        # Simulate nxc SMB returning STATUS_PASSWORD_MUST_CHANGE for Caroline.Robinson
+        if "smb" in cmd and "Caroline.Robinson" in " ".join(cmd):
+            return (
+                "SMB  10.0.0.1  445  DC01  [-] DOMAIN\\Caroline.Robinson:BabyStart123! "
+                "STATUS_PASSWORD_MUST_CHANGE"
+            )
+        return ""
+
+    monkeypatch.setattr("lib.runner.Runner.run", fake_run)
+    s = _session(tmp_path)
+    s.set_noise("yellow")
+    s.facts.add_open_port("tcp", 445)
+    # Seed the credential pair so creds.test has something to test
+    s.facts.add_cred_pair("Caroline.Robinson", "BabyStart123!")
+
+    res = s.run_action("creds.test")
+    assert res["ok"] is True
+    # Must-change pair recorded in facts
+    assert s.facts.has("cred_must_change")
+    snap = s.facts.snapshot()
+    assert ("Caroline.Robinson", "BabyStart123!") in snap["cred_must_change"]
+    # NOT stored as a valid_cred
+    assert ("Caroline.Robinson", "BabyStart123!") not in snap["valid_creds"]
+    # Surfaced in findings
+    assert "must" in res["findings_md"].lower() or "expired" in res["findings_md"].lower()
+    # Summary mentions the expired credential
+    assert "expired" in res["summary"].lower() or "must-change" in res["summary"].lower()
