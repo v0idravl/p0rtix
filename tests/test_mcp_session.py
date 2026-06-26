@@ -193,6 +193,37 @@ def test_run_group_aggregates_findings_md_and_actions(tmp_path, monkeypatch):
     assert {a["action"] for a in res["actions"]} >= {"smb.users", "smb.shares"}
 
 
+def test_collect_caps_oversized_findings_md(tmp_path):
+    """A broad bulk run can concatenate >100 KB of per-action markdown and overflow
+    the MCP tool-result token cap (the CozyHosting run_all failure). _collect must
+    hard-cap the markdown while keeping the compact actions list intact."""
+    from lib.mcp.session import _FINDINGS_MD_BUDGET
+    s = _session(tmp_path)
+    # Simulate many noisy captures past the budget.
+    big = "x" * 2000
+    for i in range(120):  # ~240 KB, well over the cap
+        s._capture(f"act{i}", f"summary {i}", f"## finding {i}\n{big}")
+    collected = s._collect(0)
+    assert collected["findings_truncated"] is True
+    assert collected["findings_chars"] > _FINDINGS_MD_BUDGET
+    # capped to budget + a short truncation notice; never the full 240 KB
+    assert len(collected["findings_md"]) < _FINDINGS_MD_BUDGET + 500
+    assert "findings truncated" in collected["findings_md"]
+    # the per-action map is NOT truncated — every action is still listed
+    assert len(collected["actions"]) == 120
+    assert collected["actions"][0]["action"] == "act0"
+
+
+def test_collect_does_not_cap_small_findings_md(tmp_path):
+    """A normal-sized result is returned whole with findings_truncated False."""
+    s = _session(tmp_path)
+    s._capture("smb.users", "2 users", "## SMB\nuser roster: alice, bob")
+    collected = s._collect(0)
+    assert collected["findings_truncated"] is False
+    assert "alice, bob" in collected["findings_md"]
+    assert "truncated" not in collected["findings_md"]
+
+
 def test_run_group_explains_why_when_nothing_dispatched(tmp_path):
     """dispatched:0 must come with a per-action `why` (delta: 'should say why'),
     not a silent empty result — here SMB is dormant with no tcp/445 open."""

@@ -25,6 +25,15 @@ from lib.engine.runmode import build_engine
 # label → Tier ("passive"/"green"/"yellow"/"red"), same mapping the console uses.
 _TIER_BY_NAME = {t.label: t for t in Tier}
 
+# Cap on the aggregated findings markdown returned in a single MCP tool result.
+# A broad green sweep (run_all/run_group) concatenates every sub-action's rendered
+# markdown; on CozyHosting this reached ~132 KB and overflowed the MCP tool-result
+# token limit, erroring the whole call. We hard-cap the concatenated markdown so a
+# broad sweep can never overflow. The compact `actions` list (action+summary) and
+# `facts_delta` are NEVER truncated, so the caller keeps the full map of what ran
+# and can pull a single branch's full detail with run_action(name) / get_state.
+_FINDINGS_MD_BUDGET = 48_000  # chars (~12k tokens), well under the tool cap
+
 # Snapshot keys whose values are flat lists of comparable items, diffed by set.
 _LIST_KEYS = ("users", "creds", "valid_creds", "admin_pairs",
               "hostnames", "open_ports", "cred_pairs")
@@ -125,11 +134,23 @@ class McpSession:
 
     def _collect(self, start: int) -> dict:
         """Aggregate everything captured since index `start`: concatenated
-        findings markdown and a per-action [{action, summary}] list."""
+        findings markdown (hard-capped at `_FINDINGS_MD_BUDGET` so a broad bulk run
+        can't overflow the MCP tool-result token cap) and a per-action
+        [{action, summary}] list (never truncated). When the markdown is capped,
+        `findings_truncated` is True and `findings_chars` is the full length so the
+        caller knows to pull a branch's detail via run_action(name)/get_state."""
         caps = self._captures[start:]
         md = "\n\n".join(c["rendered"] for c in caps if c["rendered"].strip())
         actions = [{"action": c["action"], "summary": c["summary"]} for c in caps]
-        return {"findings_md": md, "actions": actions}
+        full = len(md)
+        truncated = full > _FINDINGS_MD_BUDGET
+        if truncated:
+            md = md[:_FINDINGS_MD_BUDGET].rstrip() + (
+                f"\n\n… [findings truncated — {full} chars total, showing the first "
+                f"{_FINDINGS_MD_BUDGET}. The `actions` list maps every sub-action that "
+                "ran; pull a branch's full detail with run_action(<name>) or get_state.]")
+        return {"findings_md": md, "actions": actions,
+                "findings_truncated": truncated, "findings_chars": full}
 
     # convenience accessors
     @property
@@ -233,6 +254,7 @@ class McpSession:
             "facts_delta": snapshot_diff(before, after),
             # aggregated across every dispatched instance (e.g. web.enum per port)
             "findings_md": collected["findings_md"],
+            "findings_truncated": collected["findings_truncated"],
         }
 
     def _group_why(self, group: str) -> list[dict]:
@@ -269,6 +291,7 @@ class McpSession:
             "facts_delta": snapshot_diff(before, after),
             "actions": collected["actions"],
             "findings_md": collected["findings_md"],
+            "findings_truncated": collected["findings_truncated"],
         }
         if why is not None:
             out["why"] = why
@@ -296,6 +319,7 @@ class McpSession:
             "facts_delta": snapshot_diff(before, after),
             "actions": collected["actions"],
             "findings_md": collected["findings_md"],
+            "findings_truncated": collected["findings_truncated"],
         }
         if n == 0:
             out["why"] = (f"nothing runnable at/below '{self.posture.level.label}' noise — "
