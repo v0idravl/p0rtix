@@ -259,8 +259,18 @@ def _h_smb_shares(ctx) -> ActionResult:
 
 def _h_smb_spider(ctx) -> ActionResult:
     from lib import services
-    services._smb_spider_shares(ctx.ip, 445, ctx.runner, ctx.findings, ctx.available)
-    return ActionResult(ok=True, summary="SMB share spidering")
+    # Pass any confirmed credentials so the spider can re-enumerate shares that
+    # were listed-but-inaccessible under anonymous/Guest auth. When a fresh
+    # valid_cred lands, the action is re-armed (rearm_on) and re-runs with it.
+    snap = ctx.facts.snapshot()
+    creds = sorted(set(snap["valid_creds"]) | set(snap["cred_pairs"]))
+    domain = ctx.facts.discovered_domain or ctx.domain or ""
+    services._smb_spider_shares(ctx.ip, 445, ctx.runner, ctx.findings,
+                                ctx.available, creds=creds, domain=domain)
+    summary = "SMB share spidering"
+    if creds:
+        summary += f" ({len(creds)} credential(s) available)"
+    return ActionResult(ok=True, summary=summary)
 
 
 def _h_smb_policy(ctx) -> ActionResult:
@@ -845,6 +855,10 @@ def build_registry() -> ActionRegistry:
         "smb.spider", Tier.GREEN, _h_smb_spider, group="smb", order=3,
         footprint=Footprint(summary="recursively list/download files from readable shares"),
         gate=_smb_gate, requires=_smb_req, deps=("nxc",),
+        # A freshly-landed credential re-arms the spider so shares that were
+        # listed-but-inaccessible under anonymous/Guest auth get re-enumerated
+        # with the new credential (the Cicada DEV/Backup_script.ps1 pattern).
+        rearm_on=("valid_cred",),
     ))
     reg.register(Action(
         "smb.policy", Tier.GREEN, _h_smb_policy, group="smb", order=4,
@@ -961,6 +975,10 @@ def build_registry() -> ActionRegistry:
             summary="authenticated LDAP dump + enrichment (delegation/MAQ/policy)",
             windows_events=("4662 (directory reads)",)),
         gate=_authed, requires=_authed_reqs, deps=("ldapdomaindump",),
+        # A freshly-landed credential re-arms the authenticated dump so a higher-
+        # privilege account re-reads directory objects/attributes that the prior
+        # (lower-privilege) credential couldn't — same logic as the SMB re-spider.
+        rearm_on=("valid_cred",),
     ))
     reg.register(Action(
         "kerberos.kerberoast", Tier.YELLOW, _h_kerberoast,

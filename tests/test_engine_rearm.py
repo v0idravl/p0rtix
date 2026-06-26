@@ -59,8 +59,45 @@ def test_actions_rearmed_by_maps_kinds_to_actions(tmp_path):
     reg = build_registry()
     assert reg.actions_rearmed_by("cred") == {"creds.spray"}
     assert reg.actions_rearmed_by("cred_pair") == {"creds.test"}
-    assert reg.actions_rearmed_by("valid_cred") == {"creds.test"}
+    # A fresh valid_cred re-arms credential testing AND the auth-gated re-enum
+    # actions (SMB re-spider, authenticated LDAP re-dump) so a share/attribute
+    # that was inaccessible under the prior auth gets re-read with the new cred.
+    assert reg.actions_rearmed_by("valid_cred") == {
+        "creds.test", "smb.spider", "ldap.domaindump"}
     assert reg.actions_rearmed_by("nonexistent") == set()
+
+
+# ── 6. SMB spider re-arms + re-enumerates shares when a credential lands ───────
+def test_new_valid_cred_rearms_smb_spider(tmp_path):
+    fs, posture, reg, sched, runner = _wire(tmp_path)
+    fs.add_open_port("tcp", 445)
+    # Run the spider once at anonymous/Guest auth so it is tried.
+    sched.run_action("smb.spider")
+    assert "smb.spider" in sched.tried
+    assert "smb.spider" not in _available_names(reg, fs, sched, posture)
+
+    # A confirmed credential re-arms the spider for the next sweep.
+    fs.add_valid_cred("michael.wrightson", "Cicada$M6", "manual")
+    assert "smb.spider" not in sched.tried
+    assert "smb.spider" in _available_names(reg, fs, sched, posture)
+
+
+def test_smb_spider_re_enumerates_shares_with_new_cred(tmp_path):
+    """The re-run must actually pass the credential to nxc --shares — the whole
+    point of the Cicada delta (DEV share readable only after creds land)."""
+    fs, posture, reg, sched, runner = _wire(tmp_path)
+    fs.add_open_port("tcp", 445)
+    fs.set_discovered_domain("cicada.htb")
+    fs.add_valid_cred("michael.wrightson", "Cicada$M6", "manual")
+
+    runner.calls.clear()
+    sched.run_action("smb.spider")
+    # An authenticated --shares enumeration with the landed credential must run.
+    authed = [c for c, _ in runner.calls
+              if "--shares" in c and "michael.wrightson" in c]
+    assert authed, "spider did not re-enumerate shares with the new credential"
+    # …carrying the discovered domain so AD auth resolves.
+    assert any("-d" in c and "cicada.htb" in c for c in authed)
 
 
 # ── 2. relaxed gates: an SSH-only box (tcp/22) is enough ──────────────────────

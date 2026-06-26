@@ -430,8 +430,9 @@ def test_smb_branch_group_runs_all_subactions(tmp_path, monkeypatch):
     from lib.engine.action import Tier
     calls = []
     for fn in ("_smb_users", "_smb_shares", "_smb_spider_shares", "_smb_policy"):
-        monkeypatch.setattr(services, fn,
-                            (lambda name: lambda ip, port, r, buf, a: calls.append(name))(fn))
+        monkeypatch.setattr(
+            services, fn,
+            (lambda name: lambda *a, **kw: calls.append(name))(fn))
     fs, posture, reg, sched = _setup(tmp_path, Tier.GREEN, tools=_ALL_TOOLS)
     fs.add_open_port("tcp", 445)
 
