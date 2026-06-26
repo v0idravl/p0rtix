@@ -326,3 +326,90 @@ def test_check_forms_noop_when_no_form():
     findings = _FakeFindings()
     web._check_forms("http://10.10.10.10", _HtmlRunner("<html>no forms</html>"), findings)
     assert findings.calls == []
+
+
+# ── 6. Spring Boot Actuator probe (CozyHosting delta) ────────────────────────────
+
+import json as _json
+
+
+def test_parse_actuator_sessions_principal_map():
+    # {"<sessionid>": {"principal": "<user>"}} — the classic CozyHosting shape.
+    body = _json.dumps({"abcd-1234": {"principal": "kanderson"},
+                        "ef01-5678": {"principal": "admin"}})
+    assert web._parse_actuator_sessions(body) == ["kanderson", "admin"]
+
+
+def test_parse_actuator_sessions_list_shape():
+    body = _json.dumps({"sessions": [{"principalName": "josh"},
+                                     {"principalName": "josh"},  # dup collapses
+                                     {"principalName": "root"}]})
+    assert web._parse_actuator_sessions(body) == ["josh", "root"]
+
+
+def test_parse_actuator_sessions_regex_fallback():
+    # Non-JSON / flattened body still yields usernames via the regex fallback.
+    body = 'garbage "username":"svc-web" more "principal":"dba"'
+    assert web._parse_actuator_sessions(body) == ["svc-web", "dba"]
+
+
+def test_parse_actuator_sessions_empty():
+    assert web._parse_actuator_sessions("not json at all") == []
+
+
+def test_spring_detected_via_whitelabel_error_page(monkeypatch):
+    def fake_run(cmd, *a, **k):
+        url = cmd[-1]
+        body = "<html><body>Whitelabel Error Page</body></html>" if url.endswith("/error") else ""
+        return subprocess.CompletedProcess(cmd, 0, stdout=body, stderr="")
+    monkeypatch.setattr(web.subprocess, "run", fake_run)
+    assert web._spring_detected("http://10.10.10.10", {}, None) is True
+
+
+def test_spring_detected_false_for_plain_app(monkeypatch):
+    def fake_run(cmd, *a, **k):
+        return subprocess.CompletedProcess(cmd, 0, stdout="<html>nginx welcome</html>", stderr="")
+    monkeypatch.setattr(web.subprocess, "run", fake_run)
+    assert web._spring_detected("http://10.10.10.10", {"server": "nginx"}, None) is False
+
+
+def test_check_spring_actuator_leaks_sessions_to_users(monkeypatch, tmp_path):
+    runner, fs = _real_runner(tmp_path)
+    findings = _FakeFindings()
+
+    def fake_run(cmd, *a, **k):
+        url = cmd[-1]
+        has_w = "-w" in cmd
+        if has_w:  # _probe_code: "<code> <redirect_url>"
+            if url.endswith("/actuator") or url.endswith("/actuator/sessions") \
+               or url.endswith("/actuator/env"):
+                return subprocess.CompletedProcess(cmd, 0, stdout="200 ", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="404 ", stderr="")
+        # body fetches (no -w): detection + sessions body
+        if url.endswith("/error"):
+            return subprocess.CompletedProcess(cmd, 0, stdout="Whitelabel Error Page", stderr="")
+        if url.endswith("/actuator/sessions"):
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=_json.dumps({"s1": {"principal": "kanderson"}}), stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(web.subprocess, "run", fake_run)
+    web._check_spring_actuator("http://10.10.10.10", {}, runner, findings)
+
+    # the leaked session username is promoted to a user fact (reuse spray feed)
+    assert "kanderson" in fs.snapshot()["users"]
+    summaries = [a[0] for nm, a, _ in findings.calls if nm == "add_summary"]
+    assert any("Actuator exposed" in str(s) for s in summaries)
+    assert any("session hijack" in str(s) for s in summaries)
+
+
+def test_check_spring_actuator_noop_when_not_spring(monkeypatch, tmp_path):
+    runner, _fs = _real_runner(tmp_path)
+    findings = _FakeFindings()
+
+    def fake_run(cmd, *a, **k):
+        return subprocess.CompletedProcess(cmd, 0, stdout="plain html", stderr="")
+    monkeypatch.setattr(web.subprocess, "run", fake_run)
+
+    web._check_spring_actuator("http://10.10.10.10", {"server": "nginx"}, runner, findings)
+    assert findings.calls == []
