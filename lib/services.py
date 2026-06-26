@@ -310,10 +310,16 @@ def _smb_probe(ip: str, port: int, runner: Runner, available: set) -> str:
     return out_null
 
 
-def _smb_shares_enum(ip: str, port: int, runner: Runner, available: set):
+def _smb_shares_enum(ip: str, port: int, runner: Runner, available: set,
+                     creds=None, domain: str = ""):
     """Silent: returns (readable_shares, auth_user, auth_pass). Null session
     first, Guest fallback on ACCESS_DENIED. Parsing goes to a throwaway buffer so
-    callers that only need the auth/list don't double-print."""
+    callers that only need the auth/list don't double-print.
+
+    When `creds` (a list of `(user, pass)` pairs) is supplied, each is also tried
+    and whichever auth level exposes the **most** readable shares wins. This is
+    what lets the spider re-run with a freshly-landed credential reach a share
+    that was listed-but-inaccessible under the prior (anonymous/Guest) auth."""
     sink = ServiceBuffer(port, "tcp")
     auth_user, auth_pass = "", ""
     out_shares = runner.run(["nxc", "smb", ip, "-u", "", "-p", "", "--shares"],
@@ -325,9 +331,22 @@ def _smb_shares_enum(ip: str, port: int, runner: Runner, available: set):
         if "[+]" in out_guest:
             out_gs = runner.run(["nxc", "smb", ip, "-u", "Guest", "-p", "", "--shares"],
                                 f"smb_{port}_nxc_shares_guest")
-            readable = _parse_nxc_shares(out_gs, sink)
-            if readable:
-                auth_user, auth_pass = "Guest", ""
+            guest_readable = _parse_nxc_shares(out_gs, sink)
+            if guest_readable:
+                readable, auth_user, auth_pass = guest_readable, "Guest", ""
+    # Authenticated re-enumeration: a real credential often exposes shares that
+    # the unauthenticated listing showed by name but couldn't read.
+    for c_user, c_pass in (creds or []):
+        if not c_user or c_user.lower() == "guest":
+            continue
+        cmd = ["nxc", "smb", ip, "-u", c_user, "-p", c_pass]
+        if domain:
+            cmd += ["-d", domain]
+        label = re.sub(r"[^a-z0-9]", "_", c_user.lower())[:24]
+        out_c = runner.run(cmd + ["--shares"], f"smb_{port}_nxc_shares_{label}")
+        cred_readable = _parse_nxc_shares(out_c, sink)
+        if len(cred_readable) > len(readable):
+            readable, auth_user, auth_pass = cred_readable, c_user, c_pass
     return readable, auth_user, auth_pass
 
 
@@ -406,12 +425,21 @@ def _smb_shares(ip: str, port: int, runner: Runner, buf: Findings, available: se
         buf.note("No anonymously / Guest-readable shares")
 
 
-def _smb_spider_shares(ip: str, port: int, runner: Runner, buf: Findings, available: set) -> None:
+def _smb_spider_shares(ip: str, port: int, runner: Runner, buf: Findings,
+                       available: set, creds=None, domain: str = "") -> None:
     """Recursively list/download interesting files from readable shares.
-    (`_smb_spider` is defined later in this module; name-resolved at call time.)"""
+    (`_smb_spider` is defined later in this module; name-resolved at call time.)
+
+    `creds` (a list of `(user, pass)` pairs) lets the spider re-enumerate shares
+    with a confirmed credential — so when fresh creds re-arm `smb.spider`, a share
+    that was previously listed-but-inaccessible gets spidered with the new auth."""
     _smb_probe(ip, port, runner, available)
-    readable, auth_user, auth_pass = _smb_shares_enum(ip, port, runner, available)
+    readable, auth_user, auth_pass = _smb_shares_enum(
+        ip, port, runner, available, creds=creds, domain=domain)
     if readable:
+        if auth_user and auth_user.lower() != "guest":
+            buf.note(f"Spidering with credential `{auth_user}` "
+                     "(authenticated share access)")
         _smb_spider(ip, readable, runner, buf, available, user=auth_user, password=auth_pass)
     else:
         buf.note("No readable shares to spider")
