@@ -111,6 +111,35 @@ _GRAPHQL_PATHS = [
     "/playground", "/api/v1/graphql", "/api/v2/graphql",
 ]
 
+# Spring Boot Actuator endpoints. The base index plus the high-value leaks:
+# /env + /configprops often hold secrets; /sessions maps live JSESSIONIDs to
+# usernames (direct session-hijack foothold — CozyHosting); /heapdump/mappings
+# expand the surface. (label, sensitive?) — sensitive ones get a stronger note.
+_SPRING_ACTUATOR_PATHS = [
+    ("/actuator",          False),
+    ("/actuator/health",   False),
+    ("/actuator/info",     False),
+    ("/actuator/mappings", False),
+    ("/actuator/sessions", True),
+    ("/actuator/env",      True),
+    ("/actuator/configprops", True),
+    ("/actuator/heapdump", True),
+    ("/actuator/beans",    False),
+    # Spring Boot 1.x served these at the root (no /actuator prefix).
+    ("/env",      True),
+    ("/mappings", False),
+    ("/trace",    True),
+]
+
+# Substrings that mark a Spring Boot app — Whitelabel Error Page (default error
+# view) and Spring Security's login form. Lowercased before match.
+_SPRING_MARKERS = (
+    "whitelabel error page",
+    "org.springframework",
+    "spring-security",
+    "_csrf",  # Spring Security login form hidden field
+)
+
 # Security header flags for assessment
 _SEC_HEADERS = {
     "strict-transport-security": "HSTS",
@@ -283,6 +312,9 @@ def enumerate_web(
 
     # ── 18. GraphQL ───────────────────────────────────────────────────────────
     _check_graphql(base_url, runner, findings)
+
+    # ── 18b. Spring Boot Actuator (only when the app fingerprints as Spring) ───
+    _check_spring_actuator(base_url, fp, runner, findings, host_header, catchall)
 
     # ── 19. Directory bust ────────────────────────────────────────────────────
     if "ffuf" in available:
@@ -956,6 +988,110 @@ def _check_graphql(base_url: str, runner: Runner, findings: Findings):
                 " — look for 'Did you mean' in response"
             )
         return
+
+
+# ── Spring Boot Actuator probe ────────────────────────────────────────────────
+
+def _spring_detected(base_url: str, fp: dict, host_header: str | None) -> bool:
+    """True when the app looks like Spring Boot — server/powered-by header, or a
+    Whitelabel Error Page / Spring Security login in the landing or /error body."""
+    blob = f"{fp.get('server', '')} {fp.get('powered_by', '')}".lower()
+    if "spring" in blob:
+        return True
+    for path in ("", "/error", "/login"):
+        r = subprocess.run(
+            ["curl", "-sk", "--max-time", "8"] + _hh(host_header) + [f"{base_url}{path}"],
+            capture_output=True, text=True,
+        )
+        body = (r.stdout or "").lower()
+        if any(m in body for m in _SPRING_MARKERS):
+            return True
+    return False
+
+
+def _parse_actuator_sessions(body: str) -> list[str]:
+    """Pull usernames out of an /actuator/sessions response. The endpoint maps live
+    session IDs to a principal; the JSON shape varies by version, so grab the common
+    principal/username/user fields. Returns de-duplicated usernames."""
+    users: list[str] = []
+    try:
+        data = json.loads(body)
+    except (ValueError, TypeError):
+        data = None
+    if isinstance(data, dict):
+        # Spring's shape is {"<sessionid>": {"principal": "<user>", ...}, ...} or
+        # {"sessions": [{"principalName": "<user>"}, ...]}.
+        candidates = list(data.values())
+        if isinstance(data.get("sessions"), list):
+            candidates = data["sessions"]
+        for entry in candidates:
+            if isinstance(entry, dict):
+                for key in ("principal", "principalName", "username", "user", "lastRequest"):
+                    val = entry.get(key)
+                    if isinstance(val, str) and val.strip() and key != "lastRequest":
+                        users.append(val.strip())
+                        break
+    # Regex fallback for non-JSON / flattened bodies.
+    if not users:
+        for m in re.finditer(r'"(?:principal(?:Name)?|username|user)"\s*:\s*"([^"]+)"', body):
+            users.append(m.group(1).strip())
+    return list(dict.fromkeys(u for u in users if u))
+
+
+def _check_spring_actuator(base_url: str, fp: dict, runner: Runner, findings: Findings,
+                           host_header: str | None = None,
+                           catchall: tuple[str, str] | None = None):
+    """Probe Spring Boot Actuator endpoints when the app fingerprints as Spring.
+
+    Recon only: surfaces exposed actuators as findings and promotes any usernames
+    leaked by /actuator/sessions to user facts (feeds the cross-protocol reuse
+    spray). /actuator/sessions leaking a JSESSIONID→username map is a direct
+    session-hijack foothold (CozyHosting); /env + /heapdump commonly leak secrets."""
+    if not _spring_detected(base_url, fp, host_header):
+        return
+
+    found: list[tuple[str, str, bool]] = []
+    for path, sensitive in _SPRING_ACTUATOR_PATHS:
+        code = _probe_code(f"{base_url}{path}", host_header, catchall)
+        if code in ("200", "401", "403"):
+            found.append((path, code, sensitive))
+
+    if not found:
+        return
+
+    findings.h4("Spring Boot Actuator")
+    findings.add_summary(f"**Spring Boot Actuator exposed** at `{base_url}/actuator` — "
+                         "check /env, /sessions, /heapdump for secrets and live sessions")
+    leaked_users: list[str] = []
+    for path, code, sensitive in found:
+        if code == "200":
+            tag = " — **sensitive (secrets/sessions)**" if sensitive else ""
+            findings.bullet(f"**{path}** — HTTP 200 (open){tag}")
+            # /actuator/sessions (or /sessions): map JSESSIONID→username = hijack.
+            if path.endswith("sessions"):
+                body = subprocess.run(
+                    ["curl", "-sk", "--max-time", "10"] + _hh(host_header)
+                    + [f"{base_url}{path}"],
+                    capture_output=True, text=True,
+                ).stdout
+                names = _parse_actuator_sessions(body)
+                for name in names:
+                    _record_user(runner, name)
+                leaked_users.extend(names)
+        else:
+            findings.bullet(f"{path} — HTTP {code} (present, auth required)")
+
+    if leaked_users:
+        names = ", ".join(f"`{u}`" for u in dict.fromkeys(leaked_users))
+        findings.bullet(f"**/actuator/sessions leaks live sessions** — users: {names}")
+        findings.add_summary(f"Spring Actuator /sessions leaks usernames ({names}) + live "
+                             "JSESSIONIDs — session hijack into the authenticated app")
+    findings.note(
+        "Spring Actuator endpoints: `/actuator/env` & `/actuator/configprops` often leak "
+        "credentials/secrets; `/actuator/heapdump` is a full memory dump (grep for tokens, "
+        "JDBC strings); `/actuator/sessions` maps a live `JSESSIONID` to a username — set that "
+        "cookie to hijack the session. `/actuator/mappings` reveals the route surface."
+    )
 
 
 # ── ADCS probe ────────────────────────────────────────────────────────────────
