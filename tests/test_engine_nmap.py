@@ -1,6 +1,6 @@
 """Mocked tests for the nmap carve-outs. No real nmap runs: a fake runner writes
 the XML the parser expects, keyed by the -oA label."""
-from lib.nmap import discover_tcp_open, version_detect
+from lib.nmap import _EXCLUDE_PORT_LIMIT, discover_tcp_open, version_detect
 from lib.workspace import Workspace
 
 _TCP_XML = """<?xml version="1.0"?>
@@ -18,17 +18,24 @@ _TCP_XML = """<?xml version="1.0"?>
 
 
 class _FakeRunner:
-    """Stands in for Runner: run_live writes the canned XML for the -oA label."""
+    """Stands in for Runner: run_live/run write canned XML keyed by label."""
 
     def __init__(self, ws, xml_by_label):
         self.ws = ws
         self._xml = xml_by_label
         self.calls = []
 
-    def run_live(self, cmd, label, timeout=900):
+    def _write_xml(self, cmd, label):
         self.calls.append((cmd, label))
         if label in self._xml:
             (self.ws.raw_dir / f"{label}.xml").write_text(self._xml[label])
+
+    def run_live(self, cmd, label, timeout=900):
+        self._write_xml(cmd, label)
+        return ""
+
+    def run(self, cmd, label, timeout=300, **_kw):
+        self._write_xml(cmd, label)
         return ""
 
 
@@ -62,3 +69,41 @@ def test_version_detect_noop_on_empty_ports(tmp_path):
     runner = _FakeRunner(ws, {})
     assert version_detect("192.0.2.10", [], runner, ws) == []
     assert runner.calls == []            # no nmap invoked
+
+
+# ── ARG_MAX guard (Data delta) ────────────────────────────────────────────────
+
+def test_discover_tcp_open_excludes_small_set(tmp_path):
+    """A small exclusion set (< limit) is forwarded as --exclude-ports."""
+    ws = Workspace("192.0.2.10", None, "nmap-test", str(tmp_path))
+    runner = _FakeRunner(ws, {"01_full_tcp": _TCP_XML})
+    small_exclude = set(range(1, 10))   # 9 ports — well under the limit
+    discover_tcp_open("192.0.2.10", runner, ws, exclude=small_exclude)
+    cmd = runner.calls[0][0]
+    assert "--exclude-ports" in cmd
+
+
+def test_discover_tcp_open_drops_large_exclusion(tmp_path):
+    """When the exclusion set exceeds _EXCLUDE_PORT_LIMIT, --exclude-ports is
+    omitted entirely to prevent [Errno 7] Argument list too long (Data bug)."""
+    ws = Workspace("192.0.2.10", None, "nmap-test", str(tmp_path))
+    runner = _FakeRunner(ws, {"01_full_tcp": _TCP_XML})
+    # Simulate the 87-port exclusion that caused the crash on Data
+    large_exclude = set(range(1, 90))
+    assert len(large_exclude) > _EXCLUDE_PORT_LIMIT
+    discover_tcp_open("192.0.2.10", runner, ws, exclude=large_exclude)
+    cmd = runner.calls[0][0]
+    assert "--exclude-ports" not in cmd
+    # -p- still present — full sweep still runs without exclusions
+    assert "-p-" in cmd
+
+
+def test_discover_tcp_open_background_no_exclude_ports(tmp_path):
+    """live=False (background mode, used by start_full_scan) must not add
+    --exclude-ports to the nmap command."""
+    ws = Workspace("192.0.2.10", None, "nmap-test", str(tmp_path))
+    runner = _FakeRunner(ws, {"01_full_tcp": _TCP_XML})
+    discover_tcp_open("192.0.2.10", runner, ws, live=False)
+    cmd = runner.calls[0][0]
+    assert "--exclude-ports" not in cmd
+    assert "-p-" in cmd

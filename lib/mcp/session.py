@@ -432,10 +432,13 @@ class McpSession:
         from lib.runner import Runner
         try:
             runner = Runner(self.facts)
-            exclude = self.facts.scanned_tcp()
             before = {p for (pr, p) in self.facts.snapshot()["open_ports"] if pr == "tcp"}
-            ports = nmap.discover_tcp_open(self.ip, runner, self.facts,
-                                           exclude=exclude, live=False)
+            # Do NOT pass an exclusion list here.  A -p- sweep covers all 65535 ports;
+            # the dedup from skipping already-scanned ports saves <0.1% of work, but
+            # building --exclude-ports from scanned_tcp() (which grows to 87+ after the
+            # quick+common sweeps, or all 65535 after discovery.tcp_ports) can exceed
+            # the OS ARG_MAX and cause an [Errno 7] crash that silently kills the sweep.
+            ports = nmap.discover_tcp_open(self.ip, runner, self.facts, live=False)
             self.facts.add_scanned_tcp(range(1, 65536))
             for p in ports:
                 self.facts.add_open_port("tcp", p)
