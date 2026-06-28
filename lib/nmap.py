@@ -157,13 +157,24 @@ def discover_tcp_common(ip: str, runner: Runner, ws: Workspace) -> list[int]:
                         str(ws.raw_dir / "00_common_tcp"), "00_common_tcp")
 
 
+# Maximum number of ports that may safely be passed in a single --exclude-ports
+# argument without risking ARG_MAX overflow.  A -p- sweep covers all 65535 ports;
+# the dedup benefit of excluding already-scanned ports is negligible (<0.1%).
+# If the caller passes more than this, we drop the exclusion silently rather than
+# crashing with [Errno 7] Argument list too long (observed on Data when 87 ports
+# from the quick+common sweeps, or all 65535 after discovery.tcp_ports, were
+# forwarded as --exclude-ports).
+_EXCLUDE_PORT_LIMIT = 60
+
+
 def discover_tcp_open(ip: str, runner: Runner, ws: Workspace,
                       exclude: set[int] | None = None, *, live: bool = True) -> list[int]:
     """Open-only full TCP SYN sweep — NO version detection. Returns open ports.
 
     The quiet green discovery floor: what is listening, nothing more. `exclude`
     ports (already swept by an earlier tier) are skipped via --exclude-ports so a
-    follow-up full sweep doesn't redo coverage.
+    follow-up full sweep doesn't redo coverage.  If the exclusion set exceeds
+    _EXCLUDE_PORT_LIMIT it is silently dropped to avoid ARG_MAX overflow.
 
     `live=True` streams progress to the terminal (console use). `live=False`
     captures silently — required when run from a background thread or under the
@@ -173,7 +184,7 @@ def discover_tcp_open(ip: str, runner: Runner, ws: Workspace,
         "nmap", "-n", "--reason", "-sS", "-Pn", "-p-", "--open",
         "--min-rate", "2000", "--max-retries", "2", "--stats-every", "60s",
     ]
-    if exclude:
+    if exclude and len(exclude) <= _EXCLUDE_PORT_LIMIT:
         cmd += ["--exclude-ports", ",".join(str(p) for p in sorted(exclude))]
     cmd += ["-oA", tcp_prefix, ip]
     if live:

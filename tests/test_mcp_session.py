@@ -298,6 +298,37 @@ def test_background_full_scan_merges_ports(tmp_path, monkeypatch):
     assert ["tcp", 3389] in [list(p) for p in s.facts.snapshot()["open_ports"]]
 
 
+def test_start_full_scan_never_passes_exclude_to_nmap(tmp_path, monkeypatch):
+    """start_full_scan must NOT forward scanned_tcp() as an exclusion list.
+    On Data, 87 pre-scanned ports grew the --exclude-ports argument past the OS
+    ARG_MAX, causing [Errno 7] Argument list too long and a silent sweep failure."""
+    import time
+    from lib import nmap
+    captured = {}
+
+    def _fake_discover(ip, r, ws, exclude=None, live=True):
+        captured["exclude"] = exclude
+        return [22, 3000]
+
+    monkeypatch.setattr(nmap, "discover_tcp_open", _fake_discover)
+    s = _session(tmp_path)
+    # Pre-populate scanned_tcp with 87 ports (the Data scenario)
+    s.facts.add_scanned_tcp(range(1, 88))
+    assert len(s.facts.scanned_tcp()) == 87
+
+    s.start_full_scan()
+    for _ in range(50):
+        if not s.background_status()["running"]:
+            break
+        time.sleep(0.02)
+
+    # The worker must have called discover_tcp_open with exclude=None
+    assert captured.get("exclude") is None, (
+        f"_full_scan_worker passed exclude={captured.get('exclude')!r} — "
+        "this can cause [Errno 7] when the set is large"
+    )
+
+
 def test_list_actions_exposes_web_and_service_groups(tmp_path):
     s = _session(tmp_path)
     groups = {r["group"] for r in s.list_actions()}
