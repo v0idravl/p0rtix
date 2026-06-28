@@ -469,3 +469,146 @@ def test_check_coldfusion_noop_when_absent(monkeypatch, tmp_path):
     monkeypatch.setattr(web.subprocess, "run", fake_run)
     web._check_coldfusion("http://10.10.10.10", {"server": "nginx"}, runner, findings)
     assert findings.calls == []
+
+
+# ── Flask/Werkzeug file-upload endpoint detection (Chemistry delta) ───────────
+
+def test_parse_upload_form_detects_multipart_enctype():
+    html = '<form method="post" action="/upload" enctype="multipart/form-data"><input type="file"></form>'
+    has_upload, accepted = web._parse_upload_form(html)
+    assert has_upload is True
+
+
+def test_parse_upload_form_detects_input_type_file():
+    html = '<form action="/submit"><input type="file" name="attachment"></form>'
+    has_upload, accepted = web._parse_upload_form(html)
+    assert has_upload is True
+
+
+def test_parse_upload_form_captures_accept_attribute():
+    html = '<form enctype="multipart/form-data"><input type="file" accept=".pdf,.py"></form>'
+    has_upload, accepted = web._parse_upload_form(html)
+    assert has_upload is True
+    assert ".pdf" in accepted and ".py" in accepted
+
+
+def test_parse_upload_form_returns_false_for_plain_form():
+    html = '<form method="post" action="/login"><input type="text" name="user"></form>'
+    has_upload, accepted = web._parse_upload_form(html)
+    assert has_upload is False
+
+
+def test_flask_detected_via_werkzeug_server_header():
+    assert web._flask_detected({"server": "Werkzeug/3.0.3 Python/3.12.3", "powered_by": ""})
+
+
+def test_flask_detected_via_flask_powered_by():
+    assert web._flask_detected({"server": "nginx", "powered_by": "Flask/2.3.2"})
+
+
+def test_flask_detected_false_for_plain_nginx():
+    assert not web._flask_detected({"server": "nginx", "powered_by": ""})
+
+
+def test_check_file_upload_forms_detects_werkzeug_upload_path(monkeypatch, tmp_path):
+    runner, fs = _real_runner(tmp_path)
+    findings = _FakeFindings()
+    upload_html = '<form enctype="multipart/form-data" action="/upload"><input type="file" name="file"></form>'
+
+    def fake_run(cmd, *a, **k):
+        url = cmd[-1]
+        if "-w" in cmd:  # _probe_code
+            if url.endswith("/upload"):
+                return subprocess.CompletedProcess(cmd, 0, stdout="200 ", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="404 ", stderr="")
+        # body fetch
+        if url.endswith("/upload"):
+            return subprocess.CompletedProcess(cmd, 0, stdout=upload_html, stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(web.subprocess, "run", fake_run)
+    web._check_file_upload_forms(
+        "http://10.10.10.10:5000",
+        {"server": "Werkzeug/3.0.3", "powered_by": ""},
+        runner, findings,
+    )
+
+    # upload_endpoint is recorded in the fact store
+    snap = fs.snapshot()
+    assert any("upload" in e["url"] for e in snap["upload_endpoints"])
+    # summary mentions upload endpoint
+    summaries = [a[0] for nm, a, _ in findings.calls if nm == "add_summary"]
+    assert any("upload" in str(s).lower() for s in summaries)
+
+
+def test_check_file_upload_forms_noop_for_non_flask(monkeypatch, tmp_path):
+    runner, fs = _real_runner(tmp_path)
+    findings = _FakeFindings()
+
+    def fake_run(cmd, *a, **k):
+        return subprocess.CompletedProcess(cmd, 0, stdout="404 ", stderr="")
+
+    monkeypatch.setattr(web.subprocess, "run", fake_run)
+    web._check_file_upload_forms(
+        "http://10.10.10.10",
+        {"server": "Apache/2.4.48", "powered_by": ""},
+        runner, findings,
+    )
+    assert findings.calls == []
+    assert fs.snapshot()["upload_endpoints"] == []
+
+
+def test_check_forms_records_upload_endpoint_in_factstore(tmp_path):
+    """_check_forms must record file-upload forms to the fact store when the runner
+    is engine-wired (runner.ws is a FactStore)."""
+    runner, fs = _real_runner(tmp_path)
+    findings = _FakeFindings()
+    html = ('<html><body>'
+            '<form method="post" action="/submit" enctype="multipart/form-data">'
+            '<input type="file" name="doc" accept=".pdf">'
+            '</form></body></html>')
+
+    # Use a runner that returns canned HTML and is wired to the real FactStore.
+    class _WiredHtmlRunner:
+        def __init__(self, ws, body):
+            self.ws = ws
+            self._body = body
+        def run(self, cmd, label, timeout=None):
+            return self._body
+
+    web._check_forms("http://10.10.10.10", _WiredHtmlRunner(fs, html), findings)
+
+    snap = fs.snapshot()
+    assert snap["upload_endpoints"], "upload_endpoint should be recorded in fact store"
+    entry = snap["upload_endpoints"][0]
+    assert "submit" in entry["url"] or "10.10.10.10" in entry["url"]
+
+
+def test_add_upload_endpoint_deduped_and_in_snapshot(tmp_path):
+    """FactStore.add_upload_endpoint: dedup by URL, present in snapshot."""
+    import tempfile
+    fs = _real_runner(tmp_path)[1]
+    fs.add_upload_endpoint("http://10.10.10.10/upload", ".pdf,.py")
+    fs.add_upload_endpoint("http://10.10.10.10/upload", ".pdf,.py")  # duplicate
+    fs.add_upload_endpoint("http://10.10.10.10/attach", "")
+    snap = fs.snapshot()
+    urls = [e["url"] for e in snap["upload_endpoints"]]
+    assert urls.count("http://10.10.10.10/upload") == 1, "URL must be deduped"
+    assert "http://10.10.10.10/attach" in urls
+    assert snap["upload_endpoints"][0]["accepted_types"] in (".pdf,.py", "")
+
+
+def test_upload_endpoints_in_get_state_and_export_handoff(tmp_path):
+    """upload_endpoints appear in both get_state and export_handoff."""
+    from types import SimpleNamespace
+    from lib.mcp.session import McpSession
+
+    args = SimpleNamespace(workspace=str(tmp_path), deep=False, level=0,
+                           users=None, headless=True)
+    sess = McpSession("10.10.10.10", None, "chemistry", args, set())
+    sess.facts.add_upload_endpoint("http://10.10.10.10:5000/upload", ".py")
+
+    state = sess.get_state()
+    handoff = sess.export_handoff()
+    assert any(e["url"].endswith("/upload") for e in state["upload_endpoints"])
+    assert any(e["url"].endswith("/upload") for e in handoff["upload_endpoints"])

@@ -330,6 +330,9 @@ def enumerate_web(
     # ── 18c. Adobe ColdFusion (JRun) admin ────────────────────────────────────
     _check_coldfusion(base_url, fp, runner, findings, host_header, catchall)
 
+    # ── 18d. Flask/Werkzeug file-upload endpoint detection ────────────────────
+    _check_file_upload_forms(base_url, fp, runner, findings, host_header, catchall)
+
     # ── 19. Directory bust ────────────────────────────────────────────────────
     if "ffuf" in available:
         print(f"    → dir bust")
@@ -423,6 +426,18 @@ def _record_cred(runner: Runner, text: str) -> None:
     if add is None or not text:
         return
     add(text)
+
+
+def _record_upload_endpoint(runner: Runner, url: str, accepted_types: str = "") -> None:
+    """Record a file-upload URL in the fact store so it surfaces in get_state /
+    export_handoff as a structured `upload_endpoints` entry rather than buried in
+    findings_md. No-op when the runner is not engine-wired (legacy/headless paths)."""
+    ws = getattr(runner, "ws", None)
+    add = getattr(ws, "add_upload_endpoint", None)
+    url = (url or "").strip()
+    if add is None or not url:
+        return
+    add(url, accepted_types)
 
 
 def _whatweb_tech(clean: str) -> list[str]:
@@ -605,8 +620,10 @@ def _check_forms(base_url: str, runner: Runner, findings: Findings,
                  host_header: str | None = None) -> None:
     """Note HTML forms on the landing page — input vectors worth manual review.
     A free-text/contact form plus a client-readable role cookie is the classic
-    blind/stored-XSS-to-privilege shape (Headless's /support form). Recon only:
-    p0rtix flags the surface, it never submits a payload."""
+    blind/stored-XSS-to-privilege shape (Headless's /support form). File-upload
+    forms (enctype=multipart/form-data or <input type="file">) are recorded as
+    upload_endpoint facts in the store so they surface in get_state directly.
+    Recon only: p0rtix flags the surface, it never submits a payload."""
     cmd = ["curl", "-sk", "--max-time", "12"] + _hh(host_header) + [base_url]
     html = runner.run(cmd, f"web_{_label(base_url)}_forms")
     forms = list(re.finditer(r"<form\b([^>]*)>(.*?)</form>",
@@ -621,11 +638,22 @@ def _check_forms(base_url: str, runner: Runner, findings: Findings,
         inputs = re.findall(r'name\s*=\s*["\']([^"\']+)', attrs + body)
         has_pw = bool(re.search(r'type\s*=\s*["\']?password', body, re.IGNORECASE))
         has_freetext = bool(_FREETEXT_INPUT_RE.search(body) or "<textarea" in body.lower())
-        kind = "login form" if has_pw else "form"
+        # Detect file-upload forms: multipart enctype on the <form> tag, or a
+        # file input anywhere in the body. Record in the fact store for get_state.
+        has_upload, accepted = _parse_upload_form(attrs + body)
+        kind = "login form" if has_pw else ("upload form" if has_upload else "form")
         line = f"{method} `{action}` — {kind}"
         if inputs:
             line += f" (fields: {', '.join(f'`{n}`' for n in inputs[:8])})"
         findings.bullet(line)
+        if has_upload:
+            upload_url = urljoin(base_url.rstrip("/") + "/", action.lstrip("/")) \
+                if action and action != "(self)" else base_url
+            _record_upload_endpoint(runner, upload_url, accepted)
+            note = (f"File upload form at `{action}` -- direct file-upload attack surface."
+                    + (f" Accepted types: `{accepted}`." if accepted else "")
+                    + " Check for unrestricted file-type upload -> RCE.")
+            findings.note(note)
         if has_freetext or _SINK_NAME_RE.search(attrs + body):
             findings.note(
                 f"Free-text/contact form at `{action}` — possible stored/blind-XSS "
@@ -1156,6 +1184,93 @@ def _check_coldfusion(base_url: str, fp: dict, runner: Runner, findings: Finding
         "Crack/replay the SHA1 hash to log into `/CFIDE/administrator/`, then get RCE via a "
         "scheduled task writing a CFML shell, or the FCKeditor upload "
         "(`exploit/windows/http/coldfusion_fckeditor`)."
+    )
+
+
+# ── Flask/Werkzeug file-upload endpoint detection ────────────────────────────
+# Common Flask upload path names. When Werkzeug is the server and these paths return
+# 200 with an upload form (enctype=multipart or <input type="file">), the URL is
+# recorded as a structured `upload_endpoint` fact in the store (Chemistry pattern).
+_FLASK_UPLOAD_PATHS = [
+    "/upload", "/uploads", "/file", "/files",
+    "/upload_file", "/api/upload", "/api/file", "/submit", "/attach",
+]
+
+
+def _flask_detected(fp: dict) -> bool:
+    """True when the app looks like Flask/Werkzeug -- server header or X-Powered-By
+    contains 'werkzeug' or 'flask'. The Chemistry box served 'Werkzeug/3.0.3' in
+    the Server header."""
+    blob = f"{fp.get('server', '')} {fp.get('powered_by', '')}".lower()
+    return "werkzeug" in blob or "flask" in blob
+
+
+def _parse_upload_form(html: str) -> tuple[bool, str]:
+    """Return (has_upload, accepted_types) for an HTML page. Detects a file-upload
+    form via `enctype=multipart/form-data` on the `<form>` tag, or an
+    `<input type="file">` anywhere in the body. `accepted_types` is the `accept`
+    attribute value of the file input if present, else empty string."""
+    has_enctype = bool(
+        re.search(r'enctype\s*=\s*["\']?multipart/form-data', html, re.IGNORECASE)
+    )
+    has_file_input = bool(
+        re.search(r'<input\b[^>]*type\s*=\s*["\']?file', html, re.IGNORECASE)
+    )
+    if not (has_enctype or has_file_input):
+        return False, ""
+    accept_m = re.search(
+        r'<input\b[^>]*type\s*=\s*["\']?file[^>]*accept\s*=\s*["\']([^"\']*)',
+        html, re.IGNORECASE,
+    )
+    accepted = accept_m.group(1).strip() if accept_m else ""
+    return True, accepted
+
+
+def _check_file_upload_forms(base_url: str, fp: dict, runner: Runner, findings: Findings,
+                              host_header: str | None = None,
+                              catchall: tuple[str, str] | None = None) -> None:
+    """Probe common file-upload paths when Flask/Werkzeug is detected, fetching
+    their HTML to check for upload forms. Records any found upload endpoints to
+    the fact store so they surface in get_state's `upload_endpoints` rather than
+    requiring the operator to grep ffuf output (Chemistry delta).
+
+    Recon only -- never uploads a file."""
+    if not _flask_detected(fp):
+        return
+
+    found: list[tuple[str, str]] = []   # (url, accepted_types)
+    for path in _FLASK_UPLOAD_PATHS:
+        url = f"{base_url}{path}"
+        code = _probe_code(url, host_header, catchall)
+        if code == "200":
+            r = subprocess.run(
+                ["curl", "-sk", "--max-time", "8"] + _hh(host_header) + [url],
+                capture_output=True, text=True,
+            )
+            has_upload, accepted = _parse_upload_form(r.stdout or "")
+            if has_upload:
+                _record_upload_endpoint(runner, url, accepted)
+                found.append((url, accepted))
+
+    if not found:
+        return
+
+    findings.h4("Flask/Werkzeug File Upload")
+    findings.add_summary(
+        f"**File upload endpoint(s) detected** on Flask/Werkzeug app: "
+        + ", ".join(f"`{u}`" for u, _ in found)
+        + " -- check for unrestricted file-type upload -> RCE"
+    )
+    for url, accepted in found:
+        line = f"**Upload endpoint:** `{url}`"
+        if accepted:
+            line += f" (accepted types: `{accepted}`)"
+        findings.bullet(line)
+    findings.note(
+        "Flask/Werkzeug file upload -- check for unrestricted file-type upload -> RCE. "
+        "Try uploading a .py script if the app executes uploaded files server-side. "
+        "Magic-byte bypass: rename payload to <name>.pdf.py or craft a valid magic header. "
+        "Accepted-type restriction is client-side only; the server may accept any Content-Type."
     )
 
 

@@ -89,6 +89,13 @@ def snapshot_diff(before: dict, after: dict) -> dict:
     if new_w:
         delta["web_tech"] = new_w
 
+    # upload_endpoints: list of dicts keyed by url
+    seen_ue = {x["url"] for x in before.get("upload_endpoints", [])}
+    new_ue = [x for x in after.get("upload_endpoints", [])
+              if x["url"] not in seen_ue]
+    if new_ue:
+        delta["upload_endpoints"] = new_ue
+
     # proto_status: report keys whose status changed
     bs, as_ = before.get("proto_status", {}), after.get("proto_status", {})
     changed = {k: v for k, v in as_.items() if bs.get(k) != v}
@@ -183,6 +190,7 @@ class McpSession:
             "open_ports": [list(p) for p in snap["open_ports"]],
             "services": snap["services"],
             "web_tech": snap["web_tech"],
+            "upload_endpoints": snap["upload_endpoints"],
             "exploit_candidates": candidates(snap["services"]),
             "background": self._bg_snapshot(),
             "scanned_tcp": snap["scanned_tcp"],
@@ -473,6 +481,9 @@ class McpSession:
                          for s in snap["services"]],
             # detected web tech/versions (Server header, whatweb) — extra fingerprint
             "web_tech": snap["web_tech"],
+            # file-upload endpoints found via form parsing (enctype=multipart or
+            # <input type="file">); each entry has {url, accepted_types}
+            "upload_endpoints": snap["upload_endpoints"],
             # known-RCE pointers (CVE + suggested msf module) for matched services
             "exploit_candidates": candidates(snap["services"]),
             "valid_creds": [{"user": u, "password": p} for u, p in snap["valid_creds"]],
