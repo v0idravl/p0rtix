@@ -413,3 +413,59 @@ def test_check_spring_actuator_noop_when_not_spring(monkeypatch, tmp_path):
 
     web._check_spring_actuator("http://10.10.10.10", {"server": "nginx"}, runner, findings)
     assert findings.calls == []
+
+
+# ── ColdFusion (JRun) admin probe — Arctic delta ─────────────────────────────────
+
+def test_check_coldfusion_flags_cfide_admin_and_cve(monkeypatch, tmp_path):
+    runner, _fs = _real_runner(tmp_path)
+    findings = _FakeFindings()
+
+    def fake_run(cmd, *a, **k):
+        url = cmd[-1]
+        if "-w" in cmd:  # _probe_code
+            if "/CFIDE/administrator/enter.cfm" in url:
+                return subprocess.CompletedProcess(cmd, 0, stdout="200 ", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="404 ", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(web.subprocess, "run", fake_run)
+    web._check_coldfusion("http://10.10.10.10:8500", {"server": "JRun Web Server"},
+                          runner, findings)
+
+    bullets = [a[0] for nm, a, _ in findings.calls if nm == "bullet"]
+    assert any("enter.cfm" in str(b) for b in bullets)
+    notes = [a[0] for nm, a, _ in findings.calls if nm == "note"]
+    assert any("CVE-2010-2861" in str(n) and "password.properties" in str(n) for n in notes)
+
+
+def test_check_coldfusion_detects_via_server_header_without_path(monkeypatch, tmp_path):
+    runner, _fs = _real_runner(tmp_path)
+    findings = _FakeFindings()
+
+    def fake_run(cmd, *a, **k):
+        # every CFIDE path 404s; detection must fall back to the JRun server header
+        if "-w" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="404 ", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="plain", stderr="")
+
+    monkeypatch.setattr(web.subprocess, "run", fake_run)
+    web._check_coldfusion("http://10.10.10.10:8500", {"server": "JRun Web Server"},
+                          runner, findings)
+
+    summaries = [a[0] for nm, a, _ in findings.calls if nm == "add_summary"]
+    assert any("ColdFusion" in str(s) for s in summaries)
+
+
+def test_check_coldfusion_noop_when_absent(monkeypatch, tmp_path):
+    runner, _fs = _real_runner(tmp_path)
+    findings = _FakeFindings()
+
+    def fake_run(cmd, *a, **k):
+        if "-w" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="404 ", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="plain html", stderr="")
+
+    monkeypatch.setattr(web.subprocess, "run", fake_run)
+    web._check_coldfusion("http://10.10.10.10", {"server": "nginx"}, runner, findings)
+    assert findings.calls == []

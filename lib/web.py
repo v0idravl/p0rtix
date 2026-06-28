@@ -99,6 +99,17 @@ _PMA_PATHS = [
     "/admin/phpmyadmin", "/mysql", "/phpma",
 ]
 
+# Adobe ColdFusion (JRun) admin + traversal-relevant paths. Presence of the
+# CFIDE admin (default on 8500, but often reverse-proxied onto 80/443) is the
+# tell for CVE-2010-2861 — an unauthenticated directory traversal that leaks the
+# admin password hash from password.properties.
+_COLDFUSION_PATHS = [
+    ("/CFIDE/administrator/enter.cfm",                 "ColdFusion administrator login"),
+    ("/CFIDE/administrator/index.cfm",                 "ColdFusion administrator console"),
+    ("/CFIDE/adminapi/administrator.cfc?method=login", "ColdFusion admin API"),
+    ("/CFIDE/wizards/common/_logintowizard.cfm",       "ColdFusion wizard (CVE-2010-2861 sink)"),
+]
+
 # Splunk login paths
 _SPLUNK_PATHS = [
     "/en-US/account/login",
@@ -315,6 +326,9 @@ def enumerate_web(
 
     # ── 18b. Spring Boot Actuator (only when the app fingerprints as Spring) ───
     _check_spring_actuator(base_url, fp, runner, findings, host_header, catchall)
+
+    # ── 18c. Adobe ColdFusion (JRun) admin ────────────────────────────────────
+    _check_coldfusion(base_url, fp, runner, findings, host_header, catchall)
 
     # ── 19. Directory bust ────────────────────────────────────────────────────
     if "ffuf" in available:
@@ -1091,6 +1105,57 @@ def _check_spring_actuator(base_url: str, fp: dict, runner: Runner, findings: Fi
         "credentials/secrets; `/actuator/heapdump` is a full memory dump (grep for tokens, "
         "JDBC strings); `/actuator/sessions` maps a live `JSESSIONID` to a username — set that "
         "cookie to hijack the session. `/actuator/mappings` reveals the route surface."
+    )
+
+
+def _coldfusion_detected(base_url: str, fp: dict, host_header: str | None) -> bool:
+    """True when the app looks like Adobe ColdFusion / JRun — server header, or a
+    CFIDE reference / ColdFusion marker in the landing body."""
+    blob = f"{fp.get('server', '')} {fp.get('powered_by', '')}".lower()
+    if "jrun" in blob or "coldfusion" in blob:
+        return True
+    r = subprocess.run(
+        ["curl", "-sk", "--max-time", "8"] + _hh(host_header) + [base_url],
+        capture_output=True, text=True,
+    )
+    body = (r.stdout or "").lower()
+    return "/cfide/" in body or "coldfusion" in body
+
+
+def _check_coldfusion(base_url: str, fp: dict, runner: Runner, findings: Findings,
+                      host_header: str | None = None,
+                      catchall: tuple[str, str] | None = None):
+    """Probe Adobe ColdFusion (JRun) admin endpoints.
+
+    Recon only: surfaces the CFIDE admin as a finding and points at CVE-2010-2861
+    (unauthenticated directory traversal → admin password-hash leak). Always
+    probes the small CFIDE path set — the JRun/ColdFusion banner shows on its own
+    port (default 8500) but the CFIDE admin is frequently reverse-proxied onto
+    80/443, so a header gate would miss it; the probe is cheap and catch-all aware."""
+    found: list[tuple[str, str, str]] = []
+    for path, label in _COLDFUSION_PATHS:
+        code = _probe_code(f"{base_url}{path}", host_header, catchall)
+        if code in ("200", "301", "302", "401", "403"):
+            found.append((path, code, label))
+
+    # A bare-header detection with no live CFIDE path is still worth a note.
+    detected = bool(found) or _coldfusion_detected(base_url, fp, host_header)
+    if not detected:
+        return
+
+    findings.h4("Adobe ColdFusion (JRun)")
+    findings.add_summary(f"**Adobe ColdFusion / JRun** at `{base_url}` — check "
+                         "CVE-2010-2861 (admin directory traversal → password-hash leak)")
+    for path, code, label in found:
+        findings.bullet(f"**{path}** — HTTP {code} ({label})")
+    findings.note(
+        "ColdFusion 8/9 (JRun) — CVE-2010-2861 unauthenticated directory traversal leaks the "
+        "admin password hash:\n"
+        "`/CFIDE/administrator/enter.cfm?locale=../../../../../../../../ColdFusion8/lib/"
+        "password.properties%00en` (try `CFusionMX7`/`JRun4`/`ColdFusion9` roots too). "
+        "Crack/replay the SHA1 hash to log into `/CFIDE/administrator/`, then get RCE via a "
+        "scheduled task writing a CFML shell, or the FCKeditor upload "
+        "(`exploit/windows/http/coldfusion_fckeditor`)."
     )
 
 
