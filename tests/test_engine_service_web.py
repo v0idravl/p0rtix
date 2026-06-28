@@ -108,3 +108,77 @@ def test_web_and_service_dormant_until_versiondetect(tmp_path):
     fs.add_open_port("tcp", 80)
     assert not reg.get("web.enum").is_available(fs)
     assert not reg.get("service.enum").is_available(fs)
+
+
+# ── web_tech backfill (Validation delta) ────────────────────────────────────────
+# When add_web_tech fires for a port with no service entry (or an is_web=False
+# entry), the fact store must backfill a web service so web.enum is dispatched.
+
+
+def test_add_web_tech_creates_stub_service_when_no_entry(tmp_path):
+    """add_web_tech on a port with no service entry creates a minimal is_web=True
+    stub so web.enum is available for that port (Validation pattern: whatweb
+    detected Apache 2.4.48 on port 80 but version_detect produced no entry)."""
+    fs, posture, reg, sched = _wire(tmp_path)
+    # No services registered for port 80 yet
+    assert fs.get_services() == []
+    fs.add_web_tech(80, "Apache 2.4.48")
+    svcs = fs.get_services()
+    assert len(svcs) == 1
+    s = svcs[0]
+    assert s.port == 80 and s.proto == "tcp" and s.is_web is True
+    assert s.scheme == "http"
+    # Port must also be in open_ports so the port fact is consistent
+    assert ("tcp", 80) in fs._open_ports
+
+
+def test_add_web_tech_backfills_https_scheme_for_known_https_ports(tmp_path):
+    """Port 443 gets scheme='https' when backfilled."""
+    fs, *_ = _wire(tmp_path)
+    fs.add_web_tech(443, "nginx 1.18")
+    svcs = [s for s in fs.get_services() if s.port == 443]
+    assert svcs and svcs[0].scheme == "https"
+
+
+def test_add_web_tech_promotes_existing_non_web_service(tmp_path):
+    """add_web_tech on a port whose existing service has is_web=False promotes it
+    to is_web=True and assigns a scheme — covers a mis-classified service record."""
+    fs, posture, reg, sched = _wire(tmp_path)
+    fs.add_services([_svc(80, "http", is_web=False, scheme="")])
+    assert not any(s.is_web for s in fs.get_services())
+    fs.add_web_tech(80, "Apache 2.4.48")
+    svcs = [s for s in fs.get_services() if s.port == 80]
+    assert len(svcs) == 1 and svcs[0].is_web is True and svcs[0].scheme == "http"
+
+
+def test_web_enum_available_after_web_tech_backfill(tmp_path, monkeypatch):
+    """web.enum must become available for the backfilled port after add_web_tech."""
+    seen = []
+    monkeypatch.setattr(
+        web, "enumerate_web",
+        lambda ip, svc, *a, **k: seen.append(svc.port) or [],
+    )
+    fs, posture, reg, sched = _wire(tmp_path)
+    # Simulate: version_detect produced no entry for port 80 (or a non-web entry),
+    # but whatweb ran (e.g. piggybacking on port 8080 web.enum) and recorded tech.
+    fs.add_web_tech(80, "Apache 2.4.48")
+    assert reg.get("web.enum").is_available(fs)
+    instances = reg.get("web.enum").instances(fs)
+    assert any(i["port"] == 80 for i in instances)
+    # Running web.enum now dispatches for port 80
+    sched.run_action("web.enum")
+    assert 80 in seen
+
+
+def test_add_web_tech_no_double_backfill_when_already_web(tmp_path):
+    """If the port already has is_web=True, add_web_tech does not emit a spurious
+    service event and does not alter the existing entry."""
+    fs, *_ = _wire(tmp_path)
+    fs.add_services([_svc(80, "http", is_web=True, scheme="http")])
+    events = []
+    fs.subscribe(lambda ev: events.append(ev.kind) if ev.kind == "service" else None)
+    fs.add_web_tech(80, "Apache 2.4.48")
+    # No extra service event for an already-web service
+    assert "service" not in events
+    # Still only one service entry
+    assert len([s for s in fs.get_services() if s.port == 80]) == 1

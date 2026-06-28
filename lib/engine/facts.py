@@ -294,19 +294,56 @@ class FactStore(Workspace):
         if changed:
             self._emit(FactEvent("smb_signing", required))
 
+    # HTTPS ports used when backfilling a scheme from a web_tech hit alone.
+    # Mirrors the logic in lib/nmap._scheme.
+    _HTTPS_PORTS = frozenset({443, 8443, 9443, 7443})
+
     def add_web_tech(self, port: int, tech: str) -> None:
         """Record a detected web technology/version for a port (e.g.
         (80, "HFS 2.3")). Deduped; emits so the fingerprint rides along in the
-        snapshot / handoff as structured fact, not only in findings_md."""
+        snapshot / handoff as structured fact, not only in findings_md.
+
+        Side-effect — web_tech detection proves the port is HTTP. If no service
+        entry exists for the port, or the existing one has is_web=False, the
+        record is backfilled so web.enum is dispatched for it automatically.
+        This handles the Validation pattern: whatweb detects port 80 (Apache
+        2.4.48) but svc.version_detect produced no service entry for that port,
+        leaving web_tech populated in get_state while web.enum skipped the port
+        entirely because its services entry was absent or mis-classified."""
         tech = (tech or "").strip()
         if not tech:
             return
-        key = (int(port), tech)
+        _port = int(port)
+        key = (_port, tech)
+        backfill_svc: "Service | None" = None
         with self._engine_lock:
             is_new = key not in self._web_tech
             self._web_tech.add(key)
+            # Backfill: ensure a web-capable service entry exists for this port
+            # so the web.enum gate and instances functions pick it up.
+            existing = next(
+                (s for s in self._services if s.port == _port and s.proto == "tcp"),
+                None,
+            )
+            scheme = "https" if _port in self._HTTPS_PORTS else "http"
+            if existing is None:
+                backfill_svc = Service(
+                    port=_port, proto="tcp", name="http", version="",
+                    is_web=True, scheme=scheme,
+                )
+                self._services.append(backfill_svc)
+                self._open_ports.add(("tcp", _port))
+            elif not existing.is_web:
+                existing.is_web = True
+                if not existing.scheme:
+                    existing.scheme = scheme
+                backfill_svc = existing
         if is_new:
             self._emit(FactEvent("web_tech", key))
+        # Emit a service event when the backfill changed the service list so the
+        # scheduler can re-evaluate web.enum availability.
+        if backfill_svc is not None:
+            self._emit(FactEvent("service", [backfill_svc]))
 
     def set_proto_status(self, proto: str, status: ProtoStatus) -> None:
         with self._engine_lock:
