@@ -21,7 +21,6 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from lib.analyze import analyze_findings
 from lib.deps import check_deps
 from lib.logger import get_logger, setup_logging
 from lib.findings import Findings, ServiceBuffer, set_verbose
@@ -73,10 +72,6 @@ def parse_args() -> argparse.Namespace:
                    help="Root directory for all output (default: current directory)")
     p.add_argument("--workers", type=int, default=6, metavar="N",
                    help="Parallel enumeration threads (default: 6)")
-    p.add_argument("--analyze", "-A", action="store_true",
-                   help="send findings.md to Claude API for AI analysis (requires ANTHROPIC_API_KEY; use sudo -E to preserve env)")
-    p.add_argument("--model", default="claude-sonnet-4-6", metavar="MODEL",
-                   help="Claude model for --analyze (default: claude-sonnet-4-6)")
     p.add_argument("--verbose", "-v", action="store_true",
                    help="show inline enumeration notes in findings.md")
     p.add_argument("--debug", action="store_true",
@@ -203,8 +198,6 @@ def _run_single_scan(
 
         run_creds_mode(ip, domain, creds, services, runner, findings, ws, available)
         findings.finalize()
-        if args.analyze:
-            analyze_findings(ws, ip, domain, model=args.model, mode="creds")
         _chown(ws)
         _print_loot_summary(ws)
         return {"ip": ip, "domain": domain, "machine_dir": str(ws.machine_dir), "success": True}
@@ -464,8 +457,6 @@ def _run_single_scan(
     # ── Wrap up ────────────────────────────────────────────────────────────────
     state.mark_done("complete")
     findings.finalize()
-    if args.analyze:
-        analyze_findings(ws, ip, domain, model=args.model)
 
     if args.sample:
         try:

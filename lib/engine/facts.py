@@ -74,6 +74,11 @@ class FactStore(Workspace):
         # (STATUS_PASSWORD_MUST_CHANGE). Distinct from valid_cred (usable) and
         # cred_candidate (unverified). Next step: impacket-changepasswd -protocol rpc-samr.
         self._cred_must_change: set[tuple[str, str]] = set()
+        # file-upload endpoints discovered via form parsing (enctype=multipart/form-data
+        # or <input type="file">). Keyed by URL; value is the accepted file types string
+        # from the `accept` attribute (empty string when absent). Surfaces upload attack
+        # surface directly in get_state / export_handoff — the Chemistry pattern.
+        self._upload_endpoints: dict[str, str] = {}  # url → accepted_types
 
     # ── event plumbing ────────────────────────────────────────────────────────
     def subscribe(self, fn: Listener) -> None:
@@ -285,6 +290,22 @@ class FactStore(Workspace):
         if is_new:
             self._emit(FactEvent("cred_must_change", key))
 
+    def add_upload_endpoint(self, url: str, accepted_types: str = "") -> None:
+        """Record a file-upload endpoint discovered via form parsing (enctype=
+        multipart/form-data or <input type="file">). Accepted file types come
+        from the form's `accept` attribute when present. Deduped by URL; emits
+        an `upload_endpoint` event on the first record so callers can react.
+        Surfaces in get_state / export_handoff as the `upload_endpoints` list."""
+        url = (url or "").strip()
+        if not url:
+            return
+        with self._engine_lock:
+            is_new = url not in self._upload_endpoints
+            if is_new:
+                self._upload_endpoints[url] = (accepted_types or "").strip()
+        if is_new:
+            self._emit(FactEvent("upload_endpoint", (url, accepted_types)))
+
     def set_smb_signing(self, required: bool) -> None:
         """Record whether SMB signing is required. `required=False` marks this host
         as an NTLM-relay target. Emits so a planner can react."""
@@ -294,19 +315,56 @@ class FactStore(Workspace):
         if changed:
             self._emit(FactEvent("smb_signing", required))
 
+    # HTTPS ports used when backfilling a scheme from a web_tech hit alone.
+    # Mirrors the logic in lib/nmap._scheme.
+    _HTTPS_PORTS = frozenset({443, 8443, 9443, 7443})
+
     def add_web_tech(self, port: int, tech: str) -> None:
         """Record a detected web technology/version for a port (e.g.
         (80, "HFS 2.3")). Deduped; emits so the fingerprint rides along in the
-        snapshot / handoff as structured fact, not only in findings_md."""
+        snapshot / handoff as structured fact, not only in findings_md.
+
+        Side-effect — web_tech detection proves the port is HTTP. If no service
+        entry exists for the port, or the existing one has is_web=False, the
+        record is backfilled so web.enum is dispatched for it automatically.
+        This handles the Validation pattern: whatweb detects port 80 (Apache
+        2.4.48) but svc.version_detect produced no service entry for that port,
+        leaving web_tech populated in get_state while web.enum skipped the port
+        entirely because its services entry was absent or mis-classified."""
         tech = (tech or "").strip()
         if not tech:
             return
-        key = (int(port), tech)
+        _port = int(port)
+        key = (_port, tech)
+        backfill_svc: "Service | None" = None
         with self._engine_lock:
             is_new = key not in self._web_tech
             self._web_tech.add(key)
+            # Backfill: ensure a web-capable service entry exists for this port
+            # so the web.enum gate and instances functions pick it up.
+            existing = next(
+                (s for s in self._services if s.port == _port and s.proto == "tcp"),
+                None,
+            )
+            scheme = "https" if _port in self._HTTPS_PORTS else "http"
+            if existing is None:
+                backfill_svc = Service(
+                    port=_port, proto="tcp", name="http", version="",
+                    is_web=True, scheme=scheme,
+                )
+                self._services.append(backfill_svc)
+                self._open_ports.add(("tcp", _port))
+            elif not existing.is_web:
+                existing.is_web = True
+                if not existing.scheme:
+                    existing.scheme = scheme
+                backfill_svc = existing
         if is_new:
             self._emit(FactEvent("web_tech", key))
+        # Emit a service event when the backfill changed the service list so the
+        # scheduler can re-evaluate web.enum availability.
+        if backfill_svc is not None:
+            self._emit(FactEvent("service", [backfill_svc]))
 
     def set_proto_status(self, proto: str, status: ProtoStatus) -> None:
         with self._engine_lock:
@@ -387,6 +445,10 @@ class FactStore(Workspace):
             scanned_tcp = len(self._scanned_tcp)
             smb_signing = self._smb_signing_required
             web_tech = sorted(self._web_tech)
+            upload_endpoints = [
+                {"url": u, "accepted_types": t}
+                for u, t in sorted(self._upload_endpoints.items())
+            ]
             services = [
                 {"port": s.port, "proto": s.proto, "name": s.name,
                  "version": s.version, "is_web": s.is_web, "scheme": s.scheme}
@@ -411,6 +473,7 @@ class FactStore(Workspace):
             "scanned_tcp": scanned_tcp,
             "smb_signing_required": smb_signing,
             "web_tech": [{"port": p, "tech": t} for (p, t) in web_tech],
+            "upload_endpoints": upload_endpoints,
             "services": services,
         }
 

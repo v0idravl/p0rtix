@@ -9,6 +9,10 @@ from lib.workspace import Workspace
 
 _log = get_logger()
 
+# Written by sliver-mcp start_socks; deleted by stop_socks.
+# When present, nmap scans route through the SOCKS proxy.
+_PROXYCHAINS_CONF = Path.home() / ".cache" / "dagar-proxychains.conf"
+
 
 class Runner:
     """
@@ -31,6 +35,17 @@ class Runner:
     @property
     def ws(self) -> Workspace:
         return self._ws
+
+    def proxy_cmd(self, cmd: list[str]) -> list[str]:
+        """Wrap cmd with proxychains if a dagar SOCKS proxy is active.
+
+        SYN scans (-sS) require raw sockets and don't work through SOCKS, so they
+        are downgraded to TCP-connect (-sT) automatically.
+        """
+        if not _PROXYCHAINS_CONF.exists():
+            return cmd
+        adapted = ["-sT" if a == "-sS" else a for a in cmd]
+        return ["proxychains", "-q", "-f", str(_PROXYCHAINS_CONF)] + adapted
 
     # ── Public API ────────────────────────────────────────────────────────────
 

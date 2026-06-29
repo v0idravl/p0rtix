@@ -18,8 +18,8 @@
 primarily driven by an AI agent over MCP, and equally runnable standalone (interactive TUI or
 headless CLI). p0rtix collects repeatable evidence, keeps raw output intact, and never wanders
 outside the agreed scope. It owns the **recon → initial-access leg of the AI-offsec stack**: it
-enumerates and *tests* access, then hands off via `export_handoff` to the exploitation/privesc
-layer (Metasploit MCP) and on to C2 ([sliver-mcp](https://github.com/v0idravl/sliver-mcp)), with
+enumerates and *tests* access, then hands off via `export_handoff` to exploit staging
+([p0cs](https://github.com/v0idravl/p0cs)) and on to C2 ([sliver-mcp](https://github.com/v0idravl/sliver-mcp)), with
 [dagar-red](https://github.com/v0idravl/dagar-red) supplying the skill/judgment layer across the
 chain.
 
@@ -85,16 +85,16 @@ working artifacts like `loot/users.txt`. It enumerates, *tests* access, and hand
 candidate down the chain:
 
 ```text
-p0rtix      init / facts / recon / enum / test-access / offline-crack + the green->yellow->red noise floor  (you are here)
-Metasploit  exploitation, sessions, privesc, post, pivoting   (via Metasploit MCP)
-sliver-mcp  C2 — listeners, implant/beacon generation, sessions/beacons, execution
-dagar-red   ATT&CK adversary-emulation skills — the judgment about which call to make next
+p0rtix      recon / enum / test-access / offline-crack + the green→yellow→red noise floor  (you are here)
+p0cs        exploit staging — PoC library with Sliver download-cradle injection
+sliver-mcp  C2 — listeners, implant/beacon generation, sessions/beacons, post-ex, tunneling
+dagar-red   ATT&CK adversary-emulation skills — judgment layer
 ```
 
-`export_handoff` emits a structured inventory (hosts, domain, open ports, versioned services,
-web tech, **exploit candidates** with CVE + msf module, valid/admin creds, hashes, relay
-targets) that the exploitation/C2 agents ingest. See
-[dagar-red](https://github.com/v0idravl/dagar-red) for the orchestration.
+`export_handoff` emits a structured per-host inventory (hosts[] array with ip, domain, open
+ports, versioned services, web tech, exploit candidates, valid/admin creds, hashes, relay
+targets) that p0cs and sliver-mcp ingest; it also syncs to the dagar-state engagement store.
+See [dagar-red](https://github.com/v0idravl/dagar-red) for the orchestration.
 
 ---
 
@@ -149,7 +149,7 @@ sudo python3 p0rtix.py 10.10.11.34 --domain test.htb --deep --workspace ~/htb
 sudo python3 p0rtix.py 10.10.11.34 --domain test.htb --mode creds -u '<USERNAME>' -p '<PASSWORD>' --name assessment --workspace ~/engagements
 
 # Combined — full scan then credentialed phase in one run (recommended)
-sudo -E python3 p0rtix.py 10.10.11.34 --domain test.htb --mode scan,creds -u '<USERNAME>' -p '<PASSWORD>' --name assessment --workspace ~/engagements --analyze
+sudo python3 p0rtix.py 10.10.11.34 --domain test.htb --mode scan,creds -u '<USERNAME>' -p '<PASSWORD>' --name assessment --workspace ~/engagements
 ```
 
 ### Arguments
@@ -166,8 +166,6 @@ sudo -E python3 p0rtix.py 10.10.11.34 --domain test.htb --mode scan,creds -u '<U
 | `-u / --username` | — | Username for creds mode |
 | `-p / --password` | — | Password for creds mode |
 | `--creds` | — | File of `user:pass` pairs for creds mode |
-| `--analyze` | off | Send `findings.md` to Claude API for AI triage (requires `ANTHROPIC_API_KEY`; use `sudo -E`) |
-| `--model` | `claude-sonnet-4-6` | Claude model for `--analyze` |
 | `--verbose` | off | Include notes and searchsploit output in `findings.md` |
 | `--deep` | off | Extended web scanning: cewl wordlist, arjun param discovery, full API bust (slower) |
 | `--continue` | off | Resume a previous scan — skips completed phases |
@@ -233,7 +231,11 @@ first call is `open_target(ip, domain?)`.
 **Doctrine — recon, not C2.** p0rtix owns reconnaissance and credentialed enumeration and stops
 there: it tests access (`creds.test`) and runs a single command non-interactively (`access.exec`),
 but never opens an interactive shell. Discovered facts leave via `export_handoff` for a separate
-exploitation/C2 agent (Metasploit MCP / [sliver-mcp](https://github.com/v0idravl/sliver-mcp)).
+exploitation/C2 agent ([p0cs](https://github.com/v0idravl/p0cs) or [sliver-mcp](https://github.com/v0idravl/sliver-mcp)).
+
+**Proxychains auto-routing.** nmap scans route through proxychains automatically when sliver-mcp has
+an active SOCKS proxy (written to `~/.cache/dagar-proxychains.conf` by sliver-mcp) — no operator
+intervention needed.
 
 **Tool surface (generic, mirrors the engine).** Every recon capability is an *action*; new
 actions are callable with no new tool code:
@@ -250,7 +252,7 @@ actions are callable with no new tool code:
 | `set_breadth(level)` | effort knob `concise` → `standard` → `broad` (wordlists/crack rules), orthogonal to noise |
 | `arm_dangerous` | unlock RED-tier actions |
 | `add_fact(kind, value)` · `reload` · `recheck` | seed/refresh facts |
-| `export_handoff` | structured inventory (hosts, domain, open ports, versioned services, **web tech**, **exploit candidates** (CVE + msf module), valid/admin creds, hashes, relay target) |
+| `export_handoff` | structured per-host inventory (hosts[] array with ip, domain, open ports, versioned services, web tech, exploit candidates, valid/admin creds, hashes, relay target); also syncs to dagar-state engagement store |
 
 The action catalogue spans discovery, **web** and **service** enumeration (databases, DNS, SNMP,
 mail, RDP, …), **IKE/IPsec** (`ike.enum` — ISAKMP fingerprint + IKEv1 aggressive-mode probe that
@@ -322,7 +324,6 @@ rules of engagement.
 | Symptom | Fix |
 |---|---|
 | `Operation not permitted` / no SYN results | Run with `sudo` — SYN scans and `/etc/hosts` writes need root. |
-| `--analyze` does nothing / auth error | Export `ANTHROPIC_API_KEY` and run with `sudo -E` so the env survives the sudo boundary. |
 | A tool is "missing" mid-scan | p0rtix prompts before installing; accept, or pre-install it. Use `--no-install` to skip optional tools entirely. |
 | Kerberos `KRB_AP_ERR_SKEW` in creds mode | Clock skew vs the DC — p0rtix runs `ntpdate`, but ensure it is installed and reachable. |
 | MCP server not found by the agent | Point the MCP client at the `p0rtix-mcp` entry point from `pip install -e '.[mcp]'`; it speaks stdio. |
