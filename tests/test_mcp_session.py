@@ -134,7 +134,7 @@ def test_versioned_services_surface_in_state_delta_and_handoff(tmp_path):
     assert s.get_state()["services"][0]["name"] == "http"
     h = s.export_handoff()
     assert {"port": 80, "proto": "tcp", "name": "http",
-            "version": "HttpFileServer httpd 2.3"} in h["services"]
+            "version": "HttpFileServer httpd 2.3"} in h["hosts"][0]["services"]
 
 
 def test_web_tech_surfaces_in_state_delta_and_handoff(tmp_path):
@@ -151,7 +151,7 @@ def test_web_tech_surfaces_in_state_delta_and_handoff(tmp_path):
     techs = {(x["port"], x["tech"]) for x in delta["web_tech"]}
     assert (80, "HFS 2.3") in techs and (80, "JQuery 1.4.4") in techs
     assert {"port": 80, "tech": "HFS 2.3"} in s.get_state()["web_tech"]
-    assert {"port": 80, "tech": "HFS 2.3"} in s.export_handoff()["web_tech"]
+    assert {"port": 80, "tech": "HFS 2.3"} in s.export_handoff()["hosts"][0]["web_tech"]
 
 
 def test_exploit_candidates_in_state_and_handoff(tmp_path):
@@ -161,7 +161,7 @@ def test_exploit_candidates_in_state_and_handoff(tmp_path):
     s = _session(tmp_path)
     s.facts.add_services([Service(80, "tcp", "http", "HttpFileServer httpd 2.3",
                                   is_web=True, scheme="http")])
-    cand = s.export_handoff()["exploit_candidates"]
+    cand = s.export_handoff()["hosts"][0]["exploit_candidates"]
     assert any(c["cve"] == "CVE-2014-6287"
                and c["msf_module"] == "exploit/windows/http/rejetto_hfs_exec"
                and c["port"] == 80 for c in cand)
@@ -436,12 +436,12 @@ def test_export_handoff_shape(tmp_path):
     s.facts.add_hash("kerberoast", "svc-sql", cracked=False)
 
     h = s.export_handoff()
-    assert h["hosts"] == ["192.0.2.10"]
+    assert h["hosts"][0]["ip"] == "192.0.2.10"
     assert h["domain"] == "contoso.local"
-    assert {"proto": "tcp", "port": 445} in h["open_ports"]
-    assert {"user": "administrator", "password": "P@ss"} in h["admin_creds"]
-    assert {"user": "administrator", "password": "P@ss"} in h["valid_creds"]
-    assert h["hashes"][0]["kind"] == "kerberoast"
+    assert {"proto": "tcp", "port": 445} in h["hosts"][0]["open_ports"]
+    assert {"user": "administrator", "password": "P@ss"} in h["hosts"][0]["admin_creds"]
+    assert {"user": "administrator", "password": "P@ss"} in h["hosts"][0]["valid_creds"]
+    assert h["hosts"][0]["hashes"][0]["kind"] == "kerberoast"
 
 
 # ── Baby deltas: stale-scan warning, cred_must_change, STATUS_PASSWORD_MUST_CHANGE
@@ -489,8 +489,9 @@ def test_cred_must_change_in_get_state_and_handoff(tmp_path):
     assert ["Caroline.Robinson", "BabyStart123!"] not in st["valid_creds"]
 
     h = s.export_handoff()
-    assert {"user": "Caroline.Robinson", "password": "BabyStart123!"} in h["cred_must_change"]
-    assert {"user": "Caroline.Robinson", "password": "BabyStart123!"} not in h["valid_creds"]
+    host = h["hosts"][0]
+    assert {"user": "Caroline.Robinson", "password": "BabyStart123!"} in host["cred_must_change"]
+    assert {"user": "Caroline.Robinson", "password": "BabyStart123!"} not in host["valid_creds"]
 
 
 def test_cred_must_change_in_snapshot_diff(tmp_path):

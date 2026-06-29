@@ -54,11 +54,11 @@ def run_port_discovery(ip: str, runner: Runner, ws: Workspace, findings: Finding
     tcp_prefix = str(ws.raw_dir / "01_full_tcp")
     print("[*] nmap — full TCP SYN scan (-p-), this may take a few minutes...")
     runner.run_live(
-        [
+        runner.proxy_cmd([
             "nmap", "-n", "--reason", "-sS", "-Pn", "-p-", "--open",
             "--min-rate", "2000", "--max-retries", "2", "--stats-every", "60s",
             "-oA", tcp_prefix, ip,
-        ],
+        ]),
         label="01_full_tcp",
     )
 
@@ -69,10 +69,10 @@ def run_port_discovery(ip: str, runner: Runner, ws: Workspace, findings: Finding
     udp_prefix = str(ws.raw_dir / "02_udp_top100")
     print("[*] nmap — top-100 UDP scan...")
     runner.run_live(
-        [
+        runner.proxy_cmd([
             "nmap", "-n", "-sU", "-T3", "-Pn", "--top-ports", "100",
             "--stats-every", "60s", "-oA", udp_prefix, ip,
-        ],
+        ]),
         label="02_udp_top100",
     )
 
@@ -84,11 +84,11 @@ def run_port_discovery(ip: str, runner: Runner, ws: Workspace, findings: Finding
         print(f"[*] nmap — confirming {len(udp_candidates)} UDP candidate(s)...")
         udp_confirm_prefix = str(ws.raw_dir / "03_udp_confirmed")
         runner.run_live(
-            [
+            runner.proxy_cmd([
                 "nmap", "-n", "-sU", "-sV", "--version-intensity", "0", "-Pn",
                 "-p", ",".join(str(p) for p in sorted(udp_candidates)),
                 "--stats-every", "60s", "-oA", udp_confirm_prefix, ip,
-            ],
+            ]),
             label="03_udp_confirmed",
         )
         udp_ports = _parse_xml_ports(
@@ -134,10 +134,10 @@ COMMON_TCP_PORTS = [
 def _quick_sweep(ip, runner, ws, ports, prefix, label) -> list[int]:
     spec = ",".join(str(p) for p in ports)
     runner.run_live(
-        [
+        runner.proxy_cmd([
             "nmap", "-n", "--reason", "-sS", "-Pn", "-p", spec, "--open",
             "--min-rate", "1500", "--max-retries", "2", "-oA", prefix, ip,
-        ],
+        ]),
         label=label,
     )
     return _parse_xml_ports(Path(prefix + ".xml"), "tcp", include_filtered=False)
@@ -187,6 +187,7 @@ def discover_tcp_open(ip: str, runner: Runner, ws: Workspace,
     if exclude and len(exclude) <= _EXCLUDE_PORT_LIMIT:
         cmd += ["--exclude-ports", ",".join(str(p) for p in sorted(exclude))]
     cmd += ["-oA", tcp_prefix, ip]
+    cmd = runner.proxy_cmd(cmd)
     if live:
         runner.run_live(cmd, label="01_full_tcp")
     else:
@@ -200,10 +201,10 @@ def discover_udp(ip: str, runner: Runner, ws: Workspace) -> list[int]:
     """Top-100 UDP sweep with a confirmation pass. Returns confirmed-open ports."""
     udp_prefix = str(ws.raw_dir / "02_udp_top100")
     runner.run_live(
-        [
+        runner.proxy_cmd([
             "nmap", "-n", "-sU", "-T3", "-Pn", "--top-ports", "100",
             "--stats-every", "60s", "-oA", udp_prefix, ip,
-        ],
+        ]),
         label="02_udp_top100",
     )
     candidates = _parse_xml_ports(Path(udp_prefix + ".xml"), "udp", include_filtered=True)
@@ -211,11 +212,11 @@ def discover_udp(ip: str, runner: Runner, ws: Workspace) -> list[int]:
         return []
     confirm_prefix = str(ws.raw_dir / "03_udp_confirmed")
     runner.run_live(
-        [
+        runner.proxy_cmd([
             "nmap", "-n", "-sU", "-sV", "--version-intensity", "0", "-Pn",
             "-p", ",".join(str(p) for p in sorted(candidates)),
             "--stats-every", "60s", "-oA", confirm_prefix, ip,
-        ],
+        ]),
         label="03_udp_confirmed",
     )
     return _parse_xml_ports(Path(confirm_prefix + ".xml"), "udp", include_filtered=False)
@@ -229,11 +230,11 @@ def version_detect(ip: str, ports: list[int], runner: Runner, ws: Workspace) -> 
         return []
     svc_prefix = str(ws.raw_dir / "04_tcp_services")
     runner.run_live(
-        [
+        runner.proxy_cmd([
             "nmap", "-n", "-sS", "-sV", "--version-light", "-Pn",
             "-p", ",".join(str(p) for p in sorted(ports)),
             "--stats-every", "60s", "-oA", svc_prefix, ip,
-        ],
+        ]),
         label="04_tcp_services",
     )
     return _parse_xml_services(Path(svc_prefix + ".xml"), "tcp")
@@ -256,11 +257,11 @@ def run_service_scan(
         print(f"[*] nmap — TCP service scan on {len(tcp_ports)} port(s)...")
         svc_prefix = str(ws.raw_dir / "04_tcp_services")
         runner.run_live(
-            [
+            runner.proxy_cmd([
                 "nmap", "-n", "-sS", "-sV", "--version-light", "-Pn",
                 "-p", ",".join(str(p) for p in sorted(tcp_ports)),
                 "--stats-every", "60s", "-oA", svc_prefix, ip,
-            ],
+            ]),
             label="04_tcp_services",
         )
         services.extend(_parse_xml_services(Path(svc_prefix + ".xml"), "tcp"))

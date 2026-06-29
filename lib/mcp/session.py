@@ -132,6 +132,12 @@ class McpSession:
         self.ip = ip
         self.domain = domain
         self.available = set(available)
+        self._store = None
+        try:
+            from dagar_state.store import EngagementStore
+            self._store = EngagementStore(name or ip)
+        except ImportError:
+            pass
 
     # ── capture hook (wired into the scheduler) ───────────────────────────────
     def _capture(self, action_name: str, summary: str, rendered_md: str) -> None:
@@ -464,39 +470,61 @@ class McpSession:
 
     # ── the lab-pwn / metasploit handoff ──────────────────────────────────────
     def export_handoff(self) -> dict:
-        """Structured recon inventory for an exploitation agent (metasploitmcp).
-        Pure read of the fact store — no exploitation, no shells."""
+        """Structured recon inventory for the exploitation/C2 agent.
+
+        Returns a ``hosts[]`` array so the schema composes naturally with
+        multi-host handoffs from SessionManager.export_all_handoffs().
+        Each host entry carries all recon facts so the consumer can drive
+        targeting without re-querying p0rtix.
+
+        Side-effect: syncs discovered hosts, services, and valid creds into the
+        dagar-state engagement store when one is open.
+        """
         from lib.engine.exploit_hints import candidates
         snap = self.facts.snapshot()
-        return {
-            "hosts": [snap["ip"]],
+        ip = snap["ip"]
+
+        services = [{"port": s["port"], "proto": s["proto"],
+                     "name": s["name"], "version": s["version"]}
+                    for s in snap["services"]]
+        valid_creds = [{"user": u, "password": p} for u, p in snap["valid_creds"]]
+
+        # Sync to dagar-state when available
+        if self._store is not None:
+            try:
+                self._store.upsert_host(ip, hostname=snap.get("domain") or None)
+                for svc in snap["services"]:
+                    self._store.add_service(ip, svc["port"], svc["proto"],
+                                            service=svc["name"], version=svc["version"])
+                for u, p in snap["valid_creds"]:
+                    cid = self._store.add_cred(ip, u, p, "password", source="p0rtix")
+                    self._store.mark_cred_valid(cid)
+            except Exception:
+                pass
+
+        host_block = {
+            "ip": ip,
             "domain": snap["domain"],
             "hostnames": snap["hostnames"],
-            # relay target when SMB signing is explicitly not required
             "relay_target": snap["smb_signing_required"] is False,
             "open_ports": [{"proto": pr, "port": po} for pr, po in snap["open_ports"]],
-            # versioned services drive exploit selection on the metasploit side
-            "services": [{"port": s["port"], "proto": s["proto"],
-                          "name": s["name"], "version": s["version"]}
-                         for s in snap["services"]],
-            # detected web tech/versions (Server header, whatweb) — extra fingerprint
+            "services": services,
             "web_tech": snap["web_tech"],
-            # file-upload endpoints found via form parsing (enctype=multipart or
-            # <input type="file">); each entry has {url, accepted_types}
             "upload_endpoints": snap["upload_endpoints"],
-            # known-RCE pointers (CVE + suggested msf module) for matched services
             "exploit_candidates": candidates(snap["services"]),
-            "valid_creds": [{"user": u, "password": p} for u, p in snap["valid_creds"]],
+            "valid_creds": valid_creds,
             "admin_creds": [{"user": u, "password": p} for u, p in snap["admin_pairs"]],
             "cred_pairs": [{"user": u, "password": p} for u, p in snap["cred_pairs"]],
-            # valid but expired — change via impacket-changepasswd -protocol rpc-samr
             "cred_must_change": [{"user": u, "password": p}
                                  for u, p in snap["cred_must_change"]],
             "hashes": snap["hashes"],
             "users": snap["users"],
-            # True while a background full-TCP sweep is still running — open_ports/
-            # services here may be incomplete; re-export once it finishes (poll
-            # background_status / get_state.background).
+        }
+        return {
+            "hosts": [host_block],
+            # top-level flattened fields kept for backwards compat with
+            # normalize_ingest() consumers that read the first host's values
+            "domain": snap["domain"],
             "full_scan_running": self._bg_running(),
         }
 
@@ -529,3 +557,22 @@ class SessionManager:
 
     def targets(self) -> list[str]:
         return sorted(self._sessions)
+
+    def export_all_handoffs(self) -> dict:
+        """Merge handoffs from every open session into a single multi-host dict.
+
+        The ``hosts[]`` array contains one entry per open session so the
+        exploitation/C2 agent sees the full engagement surface in one call.
+        """
+        all_hosts = []
+        any_running = False
+        for sess in self._sessions.values():
+            with sess._lock:
+                h = sess.export_handoff()
+            all_hosts.extend(h.get("hosts", []))
+            if h.get("full_scan_running"):
+                any_running = True
+        return {
+            "hosts": all_hosts,
+            "full_scan_running": any_running,
+        }

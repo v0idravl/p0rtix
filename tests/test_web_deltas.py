@@ -611,4 +611,4 @@ def test_upload_endpoints_in_get_state_and_export_handoff(tmp_path):
     state = sess.get_state()
     handoff = sess.export_handoff()
     assert any(e["url"].endswith("/upload") for e in state["upload_endpoints"])
-    assert any(e["url"].endswith("/upload") for e in handoff["upload_endpoints"])
+    assert any(e["url"].endswith("/upload") for e in handoff["hosts"][0]["upload_endpoints"])

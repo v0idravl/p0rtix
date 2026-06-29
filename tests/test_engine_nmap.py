@@ -30,6 +30,9 @@ class _FakeRunner:
         if label in self._xml:
             (self.ws.raw_dir / f"{label}.xml").write_text(self._xml[label])
 
+    def proxy_cmd(self, cmd):
+        return cmd  # no proxy in tests
+
     def run_live(self, cmd, label, timeout=900):
         self._write_xml(cmd, label)
         return ""

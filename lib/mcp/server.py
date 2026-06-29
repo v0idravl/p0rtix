@@ -151,12 +151,26 @@ def build_server(manager: SessionManager):
 
     @server.tool()
     async def export_handoff() -> dict:
-        """Export the structured recon inventory (hosts, domain, open ports,
-        versioned services, valid & admin credentials, cred pairs, captured hashes,
-        relay target, hostnames, users) for an exploitation agent (e.g.
-        metasploitmcp). The `services` versions drive exploit-module selection.
-        Pure read — p0rtix does recon and hands off; it does not exploit."""
+        """Export the structured recon inventory for the current target.
+
+        Returns a hosts[] array containing the target's open ports, versioned
+        services, valid/admin credentials, cred pairs, captured hashes, relay
+        target flag, hostnames, and users. Also syncs facts into the dagar-state
+        engagement store if one is open. Pure read — p0rtix recons and hands off;
+        it does not exploit."""
         return await _scall("export_handoff")
+
+    @server.tool()
+    async def export_all_handoffs() -> dict:
+        """Export merged recon inventory across ALL open sessions (multi-host).
+
+        Returns a hosts[] array with one entry per open target, suitable for
+        feeding a full-engagement picture into the C2/exploitation agent. Use
+        export_handoff() for single-target work; this tool is for pivot/multi-host
+        engagements where p0rtix has multiple open targets simultaneously."""
+        def _all():
+            return manager.export_all_handoffs()
+        return await anyio.to_thread.run_sync(_all)
 
     return server
 
