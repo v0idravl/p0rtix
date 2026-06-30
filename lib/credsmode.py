@@ -570,7 +570,13 @@ def sync_clock(ip: str, runner: Runner, findings: Findings, available: set[str])
     with the exact command to run by hand.
     """
     if "ntpdate" not in available:
-        findings.note("ntpdate not available — Kerberos may fail if clock skew > 5 min")
+        findings.note(
+            "ntpdate not available — clock sync skipped; Kerberos may fail if DC "
+            "clock skew > 5 min. Fix: `sudo apt install ntpdate`"
+        )
+        findings.add_summary(
+            "ntpdate missing — install before Kerberos ops: `sudo apt install ntpdate`"
+        )
         return
 
     # Query-only: report the offset without touching the clock. ntpdate prints
