@@ -461,3 +461,75 @@ def test_smb_policy_notes_when_not_readable(tmp_path):
     fs.add_open_port("tcp", 445)
     sched.run_action("smb.policy")
     assert fs.snapshot()["lockout"] == -1            # still unknown
+
+
+# ── Administrator box: secretsdump user override ──────────────────────────────
+
+def test_secretsdump_user_override_picks_specified_cred(tmp_path):
+    """When args={"user": "ethan"} is supplied and ethan is in valid_creds,
+    secretsdump uses ethan's creds instead of the default first-non-machine pick.
+    This is the Administrator box pattern: emily (default pick) lacked DCSync
+    rights; ethan held GetChanges+GetChangesAll."""
+    fs, posture, reg, sched = _setup(
+        tmp_path, Tier.YELLOW, output=_FAKE_SECRETSDUMP,
+        tools=_ALL_TOOLS | {"impacket-secretsdump"})
+    fs.set_discovered_domain("administrator.htb")
+    fs.add_valid_cred("emily", "emilypass", "SMB")     # default pick (first non-machine)
+    fs.add_valid_cred("ethan", "ethanpass", "SMB")     # DCSync-delegated account
+
+    result = sched.run_action("creds.secretsdump", extra_args={"user": "ethan"})
+    assert result > 0
+    # hashes captured (secretsdump output contains ":::") and summary names ethan
+    snap = fs.snapshot()
+    assert snap["hashes"]
+
+
+def test_secretsdump_user_override_unknown_user_captures_nothing(tmp_path):
+    """Specifying a user not in valid_creds leaves hashes unchanged — the handler
+    returns ok=False and no secretsdump subprocess runs."""
+    fs, posture, reg, sched = _setup(
+        tmp_path, Tier.YELLOW, output=_FAKE_SECRETSDUMP,
+        tools=_ALL_TOOLS | {"impacket-secretsdump"})
+    fs.set_discovered_domain("administrator.htb")
+    fs.add_valid_cred("emily", "emilypass", "SMB")
+
+    sched.run_action("creds.secretsdump", extra_args={"user": "nonexistent"})
+    # no hashes should have been captured (the lookup failed before secretsdump ran)
+    assert not fs.has("hash"), "unexpected hash fact after user-not-found override"
+
+
+def test_secretsdump_default_pick_still_works(tmp_path):
+    """Without args override the original first-non-machine pick is used."""
+    fs, posture, reg, sched = _setup(
+        tmp_path, Tier.YELLOW, output=_FAKE_SECRETSDUMP,
+        tools=_ALL_TOOLS | {"impacket-secretsdump"})
+    fs.set_discovered_domain("htb.local")
+    fs.add_valid_cred("admin", "Pass123!", "SMB")
+
+    result = sched.run_action("creds.secretsdump")
+    assert result > 0
+    assert fs.has("hash")
+
+
+# ── ntpdate dep visibility: missing dep surfaces in action summary ─────────────
+
+def test_sync_clock_adds_summary_when_ntpdate_missing():
+    """When ntpdate is absent, sync_clock must add_summary so the dep gap is
+    visible in the MCP action response — not just buried in findings_md notes.
+    This is the Administrator/kerberoast pattern: Claude should read 'ntpdate
+    missing' in the summary and install the dep, not infer 'p0rtix can't sync.'"""
+    from lib.credsmode import sync_clock
+    from lib.findings import ServiceBuffer
+
+    class _NoOpRunner:
+        def run(self, cmd, label, timeout=None): return ""
+
+    buf = ServiceBuffer(0, "tcp")
+    sync_clock("192.0.2.10", _NoOpRunner(), buf, available=set())  # ntpdate absent
+
+    # summary must contain the dep-missing signal
+    assert any("ntpdate" in s for s in buf._summary), (
+        f"expected ntpdate in summary, got: {buf._summary}"
+    )
+    # and the install hint must name the apt package
+    assert any("apt install ntpdate" in s for s in buf._summary)

